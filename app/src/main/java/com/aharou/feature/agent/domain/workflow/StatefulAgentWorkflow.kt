@@ -400,13 +400,17 @@ class StatefulAgentWorkflow @Inject constructor(
         ).systemPrompt
     }
 
+    override fun executeEvents(userRequest: String, context: AgentContext, tools: List<AgentTool>): Flow<AgentEvent> =
+        executeEvents(userRequest, context, tools, AgentTurnTrigger.UNKNOWN)
+
     override fun executeEvents(
         userRequest: String,
         context: AgentContext,
-        tools: List<AgentTool>
+        tools: List<AgentTool>,
+        trigger: AgentTurnTrigger
     ): Flow<AgentEvent> = channelFlow {
         runAgentLoop(userRequest, context, tools) { send(it) }
-    }
+    }.attributedToTurn(context.sessionId, trigger)
 
     /**
      * Agent 主循环：初始化运行期上下文，然后反复「取动作 → Reducer → 执行副作用」，
@@ -770,7 +774,7 @@ class StatefulAgentWorkflow @Inject constructor(
             flushPendingReasoningDelta()
             val aiResponse = finalResponse ?: AIResponse(content = acc.toString())
             val snapshot = captureSnapshot()
-            telemetry.llmStreamEnd(callId, acc.length, reasoningAcc.length, snapshot.toolCalls.size, aiResponse.stopReason, aiResponse.inputTokens, aiResponse.outputTokens, retryAttempts)
+            telemetry.llmStreamEnd(callId, acc.length, reasoningAcc.length, snapshot.toolCalls.size, aiResponse.stopReason, aiResponse.inputTokens, aiResponse.outputTokens, retryAttempts, aiResponse.cachedInputTokens)
             callCompleted = true
             if (aiResponse.stopReason == "model_context_window_exceeded" && !budget.overflowRecoveryAttempted) {
                 budget.overflowRecoveryAttempted = true

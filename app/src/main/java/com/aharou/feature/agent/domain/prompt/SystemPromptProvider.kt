@@ -6,6 +6,7 @@ import com.aharou.core.util.SecretMasker
 import com.aharou.core.util.TextSanitizer
 import com.aharou.feature.agent.data.local.dao.ChatSessionDao
 import com.aharou.feature.agent.domain.container.ContainerInstaller
+import com.aharou.feature.agent.domain.context.ProjectIndex
 import com.aharou.feature.agent.domain.inbox.InboxDirectory
 import com.aharou.feature.agent.domain.inbox.SharedInbox
 import com.aharou.feature.agent.domain.memory.MemoryRepository
@@ -53,7 +54,8 @@ class SystemPromptProvider @Inject constructor(
     private val ruleRepository: RuleRepository,
     private val chatSessionDao: ChatSessionDao,
     private val sharedInbox: SharedInbox,
-    private val containerProfileResolver: com.aharou.feature.agent.domain.container.ContainerProfileResolver
+    private val containerProfileResolver: com.aharou.feature.agent.domain.container.ContainerProfileResolver, private val projectIndex: ProjectIndex,
+    private val injectedContextStore: InjectedContextStore
 ) {
     // 抽象独立的 Source
     interface PromptSource {
@@ -669,7 +671,16 @@ class SystemPromptProvider @Inject constructor(
     fun findAgentDefinitionIncludingDisabled(name: String): AgentDefinition? =
         agentDefinitionRepository.findIncludingDisabled(name)
 
-    fun build(agentContext: AgentContext, consumeInbox: Boolean = true): String {
+    /**
+     * 构建本轮系统提示词，并把结果顺手存一份给界面的「显示全部」。
+     *
+     * 包一层而不是在各个 return 前插代码：build 有 6 条返回路径，逐个补必漏一条。
+     */
+    fun build(agentContext: AgentContext, consumeInbox: Boolean = true): String =
+        buildUnrecorded(agentContext, consumeInbox)
+            .also { injectedContextStore.record(agentContext.sessionId, it) }
+
+    private fun buildUnrecorded(agentContext: AgentContext, consumeInbox: Boolean): String {
         agentContext.agentDefinition?.let { return buildForSubAgent(it, agentContext) }
 
         if (PromptFragmentResolver.isBuiltinDisabled(customDir)) {
@@ -680,24 +691,25 @@ class SystemPromptProvider @Inject constructor(
         // 隐身会话只保留核心档案：记忆清单与常驻记忆全部不注入（写入侧已由 GhostModeStore 拦住，
         // 读取侧不拦的话，「隐身」只挡住了落盘、挡不住模型把旧会话里的用户信息读进上下文）。
         val ghost = isGhostSession(agentContext)
+        // 用户在提示词页关掉的动态区块：不取内容也不追加（与片段里的 {{AICODE_*}} 变量同一语义）。
+        val offBlocks = promptFragmentCatalog.disabledBlocks()
         val rawStatic = staticRuleSource.build(agentContext)
-        val soulContent = soulSource.build(agentContext)
-        val aharouMemoryContent =
-            if (ghost) coreArchiveSource.build(agentContext) else aharouMemorySource.build(agentContext)
-        val skillsContent = activeSkillsSource.build(agentContext)
-        val subAgentsContent = subAgentListSource.build(agentContext)
-        val teamsContent = teamListSource.build(agentContext)
-        val memoriesContent = if (ghost) null else memoryListSource.build(agentContext)
-        val projectRules = projectRuleSource.build(agentContext)
-        val rulesContent = availableRulesSource.build(agentContext)
-        val workspaceTypeContent = workspaceTypeSource.build(agentContext)
-        val modelIdentityContent = modelIdentitySource.build(agentContext)
+        val soulContent = gate(InjectionBlock.SOUL, offBlocks) { soulSource.build(agentContext) }
+        val aharouMemoryContent = gate(InjectionBlock.ARCHIVE, offBlocks) { if (ghost) coreArchiveSource.build(agentContext) else aharouMemorySource.build(agentContext) }
+        val skillsContent = gate(InjectionBlock.SKILLS, offBlocks) { activeSkillsSource.build(agentContext) }
+        val subAgentsContent = gate(InjectionBlock.SUB_AGENTS, offBlocks) { subAgentListSource.build(agentContext) }
+        val teamsContent = gate(InjectionBlock.TEAMS, offBlocks) { teamListSource.build(agentContext) }
+        val memoriesContent = gate(InjectionBlock.MEMORIES, offBlocks) { if (ghost) null else memoryListSource.build(agentContext) }
+        val projectRules = gate(InjectionBlock.PROJECT_RULES, offBlocks) { projectRuleSource.build(agentContext) }
+        val rulesContent = gate(InjectionBlock.RULES, offBlocks) { availableRulesSource.build(agentContext) }
+        val workspaceTypeContent = gate(InjectionBlock.WORKSPACE_TYPE, offBlocks) { workspaceTypeSource.build(agentContext) }
+        val modelIdentityContent = gate(InjectionBlock.MODEL_IDENTITY, offBlocks) { modelIdentitySource.build(agentContext) }
         // 隐身会话不读也不消费信箱：不把其他工作区的内容带进隐身对话，也不替用户吃掉这些消息。
-        val inboxContent = if (ghost) null else sharedInboxSource.build(agentContext, consumeInbox)
+        val inboxContent = gate(InjectionBlock.INBOX, offBlocks) { if (ghost) null else sharedInboxSource.build(agentContext, consumeInbox) }
 
         // 2. Workspace 上下文固定输出（内容已精简，无需快照占位）
-        val effectiveWorkspaceContent = workspaceSource.build(agentContext)
-        val timeContent = currentTimeSource.build(agentContext)
+        val effectiveWorkspaceContent = if (InjectionBlock.WORKSPACE.key in offBlocks) "" else workspaceSource.build(agentContext)
+        val timeContent = if (InjectionBlock.TIME.key in offBlocks) null else currentTimeSource.build(agentContext)
 
         // 3. 变量就地展开：片段里写了 {{AICODE_*}} 就替换为真实内容，并跳过下方对应的自动追加，避免重复。
         val staticContent = renderVariables(
@@ -707,47 +719,44 @@ class SystemPromptProvider @Inject constructor(
             subAgentsContent,
             projectRules,
             effectiveWorkspaceContent,
-            currentDate()
+            currentDate(),
+            rulesContent
         )
 
-        // 4. 组装最终提示词：把稳定不变的重头基线放最前面（享受 KV Cache），变化部分放末尾
-        return buildString {
-            append(staticContent)
-
-            // 人格（SOUL.md）：身份段紧随基线；外置文件，Agent/用户可直接修改
-            soulContent?.let { if (it.isNotEmpty()) { append("\n\n"); append(it) } }
-
-            // 记忆（核心档案 + 今日日志）：外置文件在 filesDir/aharou-global/memory
-            aharouMemoryContent?.let { if (it.isNotEmpty()) { append("\n\n"); append(it) } }
-
-            if (SKILLS_VAR !in rawStatic) skillsContent?.let { append("\n\n"); append(it) }
-            if (SUBAGENTS_VAR !in rawStatic) subAgentsContent?.let { append("\n\n"); append(it) }
-            teamsContent?.let { append("\n\n"); append(it) }
-            if (MEMORY_VAR !in rawStatic) memoriesContent?.let { append("\n\n"); append(it) }
-            if (PROJECT_RULES_VAR !in rawStatic) projectRules?.let { append("\n\n"); append(it) }
-
-            if (WORKSPACE_VAR !in rawStatic) {
-                append("\n\n")
-                append(effectiveWorkspaceContent)
-            }
-            rulesContent?.let { append("\n\n"); append(it) }
-            workspaceTypeContent?.let { append("\n\n"); append(it) }
-            // 模型身份放在变化区末尾：会话内稳定，但切模型时会变，不放在 KV Cache 前缀里。
-            modelIdentityContent?.let { if (it.isNotEmpty()) { append("\n\n"); append(it) } }
-            // 信箱只在有新消息时出现，内容本身就在变，同样只放在末尾。
-            inboxContent?.let { append("\n\n"); append(it) }
-            if (DATE_VAR !in rawStatic) {
-                append("\n\n")
-                append(timeContent)
-            }
-            // 工作区变更提醒放在最后：平时不出现，只在切区或与会话绑定不一致时插入一段。
-            workspaceChangeSource.build(agentContext)?.let { append("\n\n"); append(it) }
-        }
+        // 4. 组装最终提示词：静态基线在前（享受 KV Cache），易变段落统一交给
+        //    [PromptTailAssembler] 按固定顺序追加。
+        return staticContent + PromptTailAssembler.render(
+            rawStatic,
+            PromptTail(
+                soul = soulContent,
+                archive = aharouMemoryContent,
+                skills = skillsContent,
+                subAgents = subAgentsContent,
+                teams = teamsContent,
+                memories = memoriesContent,
+                projectRules = projectRules,
+                workspace = effectiveWorkspaceContent,
+                rules = rulesContent,
+                workspaceType = workspaceTypeContent,
+                projectIndex = projectIndex.build(agentContext.projectRoot),
+                modelIdentity = modelIdentityContent,
+                inbox = inboxContent,
+                time = timeContent,
+                workspaceChange = gate(InjectionBlock.WORKSPACE_CHANGE, offBlocks) { workspaceChangeSource.build(agentContext) }
+            )
+        )
     }
 
     /**
-     * [PromptFragmentResolver.DISABLE_BUILTIN_FILE] 生效时：只输出 `prompts.custom/` 顶层的数字片段，
-     * 不注入任何内置来源；动态内容仅通过 `{{AICODE_*}}` 变量按需取回。
+     * [PromptFragmentResolver.DISABLE_BUILTIN_FILE] 生效时：**静态区**只输出 `prompts.custom/` 顶层的数字片段，
+     * 不注入任何内置提示词片段；**动态区**（人格、核心档案、技能清单、子代理索引、团队、记忆清单、项目规则、
+     * 工作区、按需规则、工作区类型、模型身份、信箱、时间、工作区变更）与内置路径同序追加在末尾。
+     *
+     * 追加规则：某个变量（如 `{{AICODE_SKILLS}}`）已出现在片段原文里时不再自动追加，避免重复。
+     * 顺序由 [PromptTailAssembler] 统一决定——静态前缀在前（可复用 KV Cache），易变内容在后。
+     *
+     * 为什么必须追加而不是「只靠变量」：片段里一个 `{{AICODE_*}}` 都没写时，模型会完全看不到自己有哪些技能、
+     * 记忆、按需规则和工作区红线（`AGENTS.md`），只能靠猜。
      */
     private fun buildCustomOnly(ctx: AgentContext, consumeInbox: Boolean): String {
         val content = promptFragmentCatalog.renderCustomOnly(ctx.projectRoot)
@@ -759,19 +768,61 @@ class SystemPromptProvider @Inject constructor(
             return ""
         }
         val ghost = isGhostSession(ctx)
-        val inboxContent = if (ghost) null else sharedInboxSource.build(ctx, consumeInbox)
+        // 与内置路径同一套开关：关掉的动态区块在「只用自定义片段」模式下也不追加。
+        val offBlocks = promptFragmentCatalog.disabledBlocks()
+
+        // 先算好每一段，再交给 PromptTailAssembler 按「片段里有没有写占位符」决定追加与否。
+        val skillsContent = gate(InjectionBlock.SKILLS, offBlocks) { activeSkillsSource.build(ctx) }
+        val subAgentsContent = gate(InjectionBlock.SUB_AGENTS, offBlocks) { subAgentListSource.build(ctx) }
+        val teamsContent = gate(InjectionBlock.TEAMS, offBlocks) { teamListSource.build(ctx) }
+        val memoriesContent = gate(InjectionBlock.MEMORIES, offBlocks) { if (ghost) null else memoryListSource.build(ctx) }
+        val projectRules = gate(InjectionBlock.PROJECT_RULES, offBlocks) { projectRuleSource.build(ctx) }
+        val rulesContent = gate(InjectionBlock.RULES, offBlocks) { availableRulesSource.build(ctx) }
+        val soulContent = gate(InjectionBlock.SOUL, offBlocks) { soulSource.build(ctx) }
+        val archiveContent = gate(InjectionBlock.ARCHIVE, offBlocks) { if (ghost) coreArchiveSource.build(ctx) else aharouMemorySource.build(ctx) }
+        val workspaceContent = if (InjectionBlock.WORKSPACE.key in offBlocks) "" else workspaceSource.build(ctx)
+        val workspaceTypeContent = gate(InjectionBlock.WORKSPACE_TYPE, offBlocks) { workspaceTypeSource.build(ctx) }
+        val modelIdentityContent = gate(InjectionBlock.MODEL_IDENTITY, offBlocks) { modelIdentitySource.build(ctx) }
+        val inboxContent = gate(InjectionBlock.INBOX, offBlocks) { if (ghost) null else sharedInboxSource.build(ctx, consumeInbox) }
+        val timeContent = if (InjectionBlock.TIME.key in offBlocks) null else currentTimeSource.build(ctx)
+
         val rendered = renderVariables(
             content,
-            activeSkillsSource.build(ctx),
-            if (ghost) null else memoryListSource.build(ctx),
-            subAgentListSource.build(ctx),
-            projectRuleSource.build(ctx),
-            workspaceSource.build(ctx),
-            currentDate()
+            skillsContent,
+            memoriesContent,
+            subAgentsContent,
+            projectRules,
+            workspaceContent,
+            currentDate(),
+            rulesContent
         )
-        val withInbox = if (inboxContent == null) rendered else "$rendered\n\n$inboxContent"
-        val changeNotice = workspaceChangeSource.build(ctx) ?: return withInbox
-        return "$withInbox\n\n$changeNotice"
+        val assembled = rendered + PromptTailAssembler.render(
+            content,
+            PromptTail(
+                soul = soulContent,
+                archive = archiveContent,
+                skills = skillsContent,
+                subAgents = subAgentsContent,
+                teams = teamsContent,
+                memories = memoriesContent,
+                projectRules = projectRules,
+                workspace = workspaceContent,
+                rules = rulesContent,
+                workspaceType = workspaceTypeContent,
+                projectIndex = projectIndex.build(ctx.projectRoot),
+                modelIdentity = modelIdentityContent,
+                inbox = inboxContent,
+                time = timeContent,
+                workspaceChange = gate(InjectionBlock.WORKSPACE_CHANGE, offBlocks) { workspaceChangeSource.build(ctx) }
+            )
+        )
+        FileLogger.d(
+            TAG,
+            "custom-only 提示词组装完成：片段 ${content.length} 字符 → 总计 ${assembled.length} 字符" +
+                "（技能=${skillsContent?.length ?: 0} 记忆=${memoriesContent?.length ?: 0} " +
+                "项目规则=${projectRules?.length ?: 0} 按需规则=${rulesContent?.length ?: 0}）"
+        )
+        return assembled
     }
 
     /**
@@ -822,7 +873,10 @@ class SystemPromptProvider @Inject constructor(
                     append(it)
                 }
             }
-            if (InjectPart.PROJECT_RULES in definition.inject && PROJECT_RULES_VAR !in raw) {
+            // 项目规则（AGENTS.md 里的数据红线、禁改路径）是安全底线，**不受 InjectPart 控制**：
+            // 子代理手里就有 shell 与写文件能力，看不到红线就是「不知道规矩就动手」。
+            // 想调整内容就改 AGENTS.md，不要在角色定义里关掉它。
+            if (PROJECT_RULES_VAR !in raw) {
                 projectRuleSource.build(agentContext)?.let {
                     append("\n\n")
                     append(it)
@@ -845,6 +899,10 @@ class SystemPromptProvider @Inject constructor(
     }
 
     /** 把片段里的 `{{AICODE_*}}` 占位符替换为真实内容；未出现的占位符保持原样，不影响 `{{INSTRUCTION}}` 等其它占位符。 */
+    /** 动态区块被用户关掉时整段返回 null，注入侧据此跳过；[build] 只在真正需要时才执行。 */
+    private fun <T> gate(block: InjectionBlock, disabled: Set<String>, build: () -> T?): T? =
+        if (block.key in disabled) null else build()
+
     private fun renderVariables(
         text: String,
         skills: String?,
@@ -852,7 +910,8 @@ class SystemPromptProvider @Inject constructor(
         subAgents: String?,
         projectRules: String?,
         workspace: String,
-        date: String
+        date: String,
+        rules: String? = null
     ): String {
         var out = text
         out = out.replace(SKILLS_VAR, skills.orEmpty())
@@ -861,6 +920,8 @@ class SystemPromptProvider @Inject constructor(
         out = out.replace(PROJECT_RULES_VAR, projectRules.orEmpty())
         out = out.replace(WORKSPACE_VAR, workspace)
         out = out.replace(DATE_VAR, date)
+        // 仅当调用方传了规则清单才展开；未传时保留占位符原样（与其它未出现的占位符一致）。
+        if (rules != null) out = out.replace(RULES_VAR, rules)
         return out
     }
 
@@ -924,12 +985,13 @@ class SystemPromptProvider @Inject constructor(
             70 to "70-skills-and-mcp.md"
         )
 
-        // 片段里可用的运行期变量，渲染时替换为真实内容
-        const val SKILLS_VAR = "{{AICODE_SKILLS}}"
-        const val MEMORY_VAR = "{{AICODE_MEMORY}}"
-        const val SUBAGENTS_VAR = "{{AICODE_SUBAGENTS}}"
-        const val PROJECT_RULES_VAR = "{{AICODE_PROJECT_RULES}}"
-        const val WORKSPACE_VAR = "{{AICODE_WORKSPACE}}"
-        const val DATE_VAR = "{{AICODE_DATE}}"
+        // 片段里可用的运行期变量，渲染时替换为真实内容；字面量集中在 [PromptVars]，勿在此重复定义
+        const val SKILLS_VAR = PromptVars.SKILLS_VAR
+        const val MEMORY_VAR = PromptVars.MEMORY_VAR
+        const val SUBAGENTS_VAR = PromptVars.SUBAGENTS_VAR
+        const val PROJECT_RULES_VAR = PromptVars.PROJECT_RULES_VAR
+        const val WORKSPACE_VAR = PromptVars.WORKSPACE_VAR
+        const val DATE_VAR = PromptVars.DATE_VAR
+        const val RULES_VAR = PromptVars.RULES_VAR
     }
 }

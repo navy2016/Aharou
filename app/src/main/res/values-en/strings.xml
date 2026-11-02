@@ -779,6 +779,7 @@
     <string name="editor_show_indent_guide">Show indent guides</string>
     <string name="editor_show_wrap_arrow">Show word-wrap arrows</string>
     <string name="editor_show_whitespace">Show whitespace</string>
+    <string name="editor_error_lens">Show diagnostics inline</string>
     <string name="editor_language_extensions">Language extensions</string>
     <string name="editor_language_extensions_desc">Language servers are usually installed together with the container (Alpine image); use this page to check status or install one manually. Once installed, opening a matching file shows its diagnostics (red/yellow squiggles). If the container is not running yet, start it from the Terminal page first.</string>
     <string name="editor_extension_installed">Installed %1$s</string>
@@ -840,6 +841,9 @@
     <!-- Chat Message Bubbles -->
     <string name="chat_copied">Copied</string>
     <string name="chat_copy">Copy</string>
+    <string name="chat_show_injected">Show all</string>
+    <string name="chat_injected_title">What was injected this turn</string>
+    <string name="chat_injected_desc">None of this is text you typed. It is what the app automatically feeds into the model each turn: persona, rules, memory, skill index, current time and more.</string>
     <string name="chat_task_duration">Total time %1$s</string>
     <string name="chat_cache_hit_rate">Cache hit rate %1$s</string>
     <string name="chat_status_generating">Generating</string>
@@ -1580,14 +1584,41 @@
     <string name="scheduled_tasks_condition_battery_only">Battery ≥ %1$d%%</string>
     <string name="scheduled_tasks_skipped_debounce">In the debounce window</string>
     <string name="scheduled_tasks_skipped_running">Previous run still going</string>
+    <string name="scheduled_tasks_skipped_duplicate">Duplicate of a recent run</string>
+    <string name="scheduled_tasks_skipped_dedup_full">Dedup store full, this run was dropped</string>
     <string name="scheduled_task_service_channel">Automation task execution</string>
     <string name="scheduled_task_service_title">Automation task</string>
     <string name="scheduled_tasks_failed">Last run failed</string>
+
+    <!-- Automation task built-in templates -->
+    <string name="scheduled_tasks_from_template">Create from template</string>
+    <string name="scheduled_tasks_from_template_hint">Pick a scenario; the name, instruction and trigger time are prefilled and stay editable</string>
+    <string name="scheduled_tasks_templates_title">Choose a template</string>
+    <string name="scheduled_tasks_templates_intro">A template is only a starting point: the name, instruction and trigger time are prefilled into the editor and everything stays editable before you save. Templates read only the working directory, repositories and public web pages - never mail, chats or calendar.</string>
+    <string name="scheduled_tasks_template_category_dev">Development</string>
+    <string name="scheduled_tasks_template_category_radar">Info radar</string>
+    <string name="scheduled_tasks_template_category_doc">Docs and office</string>
+    <string name="scheduled_tasks_template_nightly_test">Nightly test heal</string>
+    <string name="scheduled_tasks_template_nightly_test_desc">Runs the tests at 02:00 daily and fixes only failures with clear evidence</string>
+    <string name="scheduled_tasks_template_pr_guard">PR gatekeeper</string>
+    <string name="scheduled_tasks_template_pr_guard_desc">Reviews open pull requests at 10:00 daily and reports risks by severity</string>
+    <string name="scheduled_tasks_template_domain_radar">Topic radar</string>
+    <string name="scheduled_tasks_template_domain_radar_desc">Collects the last 24 hours of news around one topic at 08:00 daily</string>
+    <string name="scheduled_tasks_template_competitor">Competitor watch</string>
+    <string name="scheduled_tasks_template_competitor_desc">Tracks releases and changes of a chosen project or product at 09:00 daily</string>
+    <string name="scheduled_tasks_template_weekly_report">Weekly report draft</string>
+    <string name="scheduled_tasks_template_weekly_report_desc">Summarises the work output into a weekly draft every 7 days</string>
+    <string name="scheduled_tasks_template_docs_fresh">Docs freshness</string>
+    <string name="scheduled_tasks_template_docs_fresh_desc">Checks docs against the code every 3 days and lists paragraphs that need updating</string>
+    <string name="scheduled_tasks_template_topic">Topic</string>
+    <string name="scheduled_tasks_template_topic_hint">Replaces {{topic}} in the instruction; leave it empty to keep the example topic</string>
 
     <!-- Subagent Settings -->
     <string name="settings_subagents">Subagents</string>
     <string name="subagent_max_running">Concurrency limit</string>
     <string name="subagent_max_running_hint">Max subagents running at the same time, %1$d to %2$d. The quota is shared by the whole app, not per session.</string>
+    <string name="subagent_comm_enabled">Let subagents talk to each other</string>
+    <string name="subagent_comm_enabled_desc">Subagents in the same batch can list their teammates and message them (team / tell). When off, they can only report upward; the parent side is unaffected.</string>
     <string name="settings_teams">Team presets</string>
     <string name="settings_experiments">Experiments</string>
     <string name="experiment_quote_reply">Long-press quote</string>
@@ -3057,6 +3088,28 @@
     <string name="prompts_add_prompt">Add fragment</string>
     <string name="prompts_add_prompt_hint">Insert a new fragment with a free number</string>
     <string name="prompts_disable_builtin">Disable all built-in prompts</string>
+    <string name="prompts_fragment_toggle">Enable this fragment</string>
+    <string name="prompts_aux_title">On-demand fragments</string>
+    <string name="prompts_aux_editor_hint">Saving writes a copy into your custom directory that overrides the built-in one; turning the switch off stops it from being injected.</string>
+    <string name="rules_builtin_title">Built-in on-demand rules</string>
+    <string name="prompts_blocks_title">Dynamic injected blocks</string>
+    <string name="prompts_fragments_title">Static baseline fragments</string>
+    <string name="prompts_block_soul">Persona (SOUL.md)</string>
+    <string name="prompts_block_archive">Core archive and memory body</string>
+    <string name="prompts_block_skills">Available skills</string>
+    <string name="prompts_block_sub_agents">Sub-agent index</string>
+    <string name="prompts_block_teams">Team presets</string>
+    <string name="prompts_block_memories">Memory index</string>
+    <string name="prompts_block_project_rules">Project rules (AGENTS.md)</string>
+    <string name="prompts_block_workspace">Workspace context</string>
+    <string name="prompts_block_rules">On-demand rule index</string>
+    <string name="prompts_block_workspace_type">Project-type conventions</string>
+    <string name="prompts_block_model_identity">Model identity</string>
+    <string name="prompts_block_inbox">Shared inbox</string>
+    <string name="prompts_block_time">Current time</string>
+    <string name="prompts_block_workspace_change">Workspace switch notice</string>
+    <string name="rules_builtin_subtitle">Low-frequency rules; the AI loads the body with loadRule when needed</string>
+    <string name="rules_builtin_editor_hint">Saving writes a same-named file under ~/.aharou/rules/, overriding the built-in copy.</string>
     <string name="prompts_disable_builtin_hint">Keep only your own fragments; you must supply every rule yourself</string>
     <!-- Checkpoint: conflict detection and undo -->
     <string name="checkpoint_conflict_title">Some files were not restored</string>
@@ -3108,6 +3161,8 @@
     <string name="knowledge_base_invalid_repo">That repository address is not recognised</string>
     <string name="knowledge_base_no_source">No knowledge base configured yet</string>
     <string name="chat_status_checking_dependencies">Checking dependency versions</string>
+    <string name="chat_status_checking_diagnostics">Checking code</string>
+    <string name="chat_status_querying_blame">Tracing changes</string>
     <string name="dependency_check_title">Dependency version check</string>
     <string name="dependency_check_updates_count">%1$d update(s) available</string>
     <string name="dependency_check_network_failed">Couldn\'t reach repositories, versions may be stale</string>
@@ -3342,6 +3397,11 @@
     <string name="settings_remote_device_allow_ask_ai">Let paired devices ask this device\'s AI</string>
     <string name="settings_remote_device_allow_ask_ai_hint">When on, paired devices can use ask_ai to send a question in your voice — this device\'s AI answers it as if you asked. That is letting them work through your AI, so it is on by default; tool calls still go through this device\'s permission layer.</string>
     <string name="settings_remote_device_pair_hint">Enter this 6-digit code in Aharou on the other device to pair</string>
+    <string name="settings_remote_device_paired_title">Authorized devices</string>
+    <string name="settings_remote_device_paired_empty">No authorized devices yet</string>
+    <string name="settings_remote_device_paired_revoke">Revoke</string>
+    <string name="settings_remote_device_action_mismatch">Action list mismatch</string>
+    <string name="settings_remote_device_action_mismatch_hint">The peer %1$s reports fingerprint %2$s while this device has %3$s, so it may call actions that don\'t exist here</string>
     <string name="settings_remote_device_pair_remaining">Expires in %1$s</string>
     <string name="settings_remote_device_pair_expired">Pairing code expired</string>
     <string name="settings_remote_device_pair_regen">Regenerate</string>
