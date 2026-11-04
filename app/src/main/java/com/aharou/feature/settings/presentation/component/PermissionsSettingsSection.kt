@@ -22,7 +22,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -41,13 +40,16 @@ import com.aharou.core.ui.AppSwitch
 import com.aharou.core.ui.SwipeToDeleteRow
 import com.aharou.feature.agent.domain.permission.PermissionDecision
 import com.aharou.feature.agent.domain.permission.PermissionRule
+import com.aharou.feature.settings.presentation.SettingsViewModel
 import compose.icons.FeatherIcons
 import compose.icons.feathericons.CheckCircle
 import compose.icons.feathericons.ChevronRight
 import compose.icons.feathericons.Plus
 import compose.icons.feathericons.Shield
+import compose.icons.feathericons.Users
 import compose.icons.feathericons.XCircle
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /**
  * 「工具授权」二级页：与设置页其它二级页一致的 iOS 分组列表。
@@ -167,7 +169,8 @@ private fun SafetyConfirmDialog(
     onConfirm: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    var secondsLeft by remember { mutableIntStateOf(SAFETY_CONFIRM_COUNTDOWN_SECONDS) }
+    // 转屏不重置：倒计时是安全闩锁，旋转一下就能立刻确认等于它不存在。
+    var secondsLeft by rememberSaveable { mutableStateOf(SAFETY_CONFIRM_COUNTDOWN_SECONDS) }
     LaunchedEffect(Unit) {
         while (secondsLeft > 0) {
             delay(1_000)
