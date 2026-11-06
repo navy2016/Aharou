@@ -79,6 +79,26 @@ class OpenAIAdapterTest {
     private fun toolCall(id: String, name: String, arguments: String): OpenAIToolCall =
         OpenAIToolCall(id = id, function = OpenAIFunctionCall(name = name, arguments = arguments))
 
+    @Test
+    fun customBodyAndAuthorizationReachChatCompletion() = runTest {
+        val api = api()
+        val request = slot<okhttp3.RequestBody>()
+        val authorization = slot<String?>()
+        coEvery { api.createChatCompletionCustom(any(), captureNullable(authorization), any(), capture(request)) } returns response()
+        adapter(api).apply {
+            customHeaders = mapOf("Authorization" to "custom")
+            customBody = com.google.gson.JsonParser.parseString("""{"temperature":0.6,"extra":{"mode":"x"},"nullable":null}""").asJsonObject
+        }.complete("sys", listOf(AgentMessage.UserMessage(content = "hi")))
+        assertNull(authorization.captured)
+        val buffer = okio.Buffer()
+        request.captured.writeTo(buffer)
+        val body = com.google.gson.JsonParser.parseString(buffer.readUtf8()).asJsonObject
+        assertEquals(0.6, body.get("temperature").asDouble, 0.0001)
+        assertEquals("x", body.getAsJsonObject("extra").get("mode").asString)
+        assertEquals(2, body.getAsJsonArray("messages").size())
+        assertTrue(body.get("nullable").isJsonNull)
+    }
+
     // ── Chat Completions 非流式：请求构造 ──────────────────────────────
 
     @Test

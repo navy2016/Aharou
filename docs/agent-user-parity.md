@@ -66,8 +66,10 @@
 | 删除供应商 | `ProvidersAndLogSection.kt:114` | 有 | `config` `action=remove path=providers id=<id>`（`ConfigProviderFields.kt:470`） | 无 |
 | 选当前会话的模型 | `component/ChatModelSheet.kt:56`（`ModelIconButton`）、`:89`（`onSelect`）→ `ChatInputBar.kt:584` → `AIChatPanel.kt:1505` | 无 | 未找到（`sessions` 只读，`SessionTool.kt:31`；config 无会话级模型字段） | **缺口**：只能改全局默认/角色模型，不能改当前会话 |
 | 设全局角色模型（默认/标题/压缩/视觉/生图） | `component/DefaultModelsSection.kt:93`、挂载 `SettingsScreen.kt:1024` | 有 | `config` `model.roles.default` / `.default_effort` / `.title` / `.compaction` / `.vision` / `.image_gen`（`feature/settings/data/ConfigModelRoleFields.kt:41`、`:51`、`:82`、`:92`、`:102`、`:112`） | 无 |
-| 改采样温度 | 未找到（用户界面也没有） | 无 | 未找到 | 双方都没有：温度由固定表决定（`feature/agent/domain/provider/AIProvider.kt:251` `fixedTemperature`），不是可配置项 |
-| 改思考强度（reasoning effort） | `ChatModelSheet.kt:107`（`ReasoningEffortSelector`）→ `AIChatPanel.kt:1511` | 无 | 未找到（无 `reasoning_effort` 配置字段） | **缺口**：会话级设置，agent 无法改 |
+| 改采样温度 | `CustomRequestSheet.kt`（请求体 JSON） | 有 | `config` `custom_request.global.body` 或 `providers.<id>.custom_request.body` / `providers.<id>.models.<model>.custom_request.body` | 自定义请求体按供应商协议填写，需确认模型支持 |
+| 改思考强度（reasoning effort） | `ChatModelSheet.kt` 模型标签 → `ModelReasoningEffortSheet` | 部分 | `config` `providers.<id>.models.<model>.reasoning_effort` | 模型默认值可改；当前会话档位没有独立写入接口 |
+| 配置自定义请求头与请求体 | `CustomRequestSheet.kt`（全局、供应商、模型） | 有 | `config` `custom_request.global.headers/body`、`providers.<id>.custom_request.headers/body`、`providers.<id>.models.<model>.custom_request.headers/body` | 敏感字段需确认 |
+| 配置自动重试增强 | `StewardSheet.kt` → `AutoRetrySettingsSheet.kt` | 有 | `config` `steward.retry_*` | 包含开关、延迟、倍率、状态码与关键字 |
 | 测试模型/供应商连通性 | `component/ProviderModelComponents.kt:323`（`onClick = onTest`）、`:330`；`DefaultModelsSection.kt:841` | 无 | 未找到专用工具；只能 `Bash` `curl` 或 `webfetch` 自己发请求 | **缺口**：App 内有现成的测试链路（`feature/settings/data/remote/ModelApiService.kt:290`），但没暴露成工具 |
 
 ## 5. 技能
@@ -159,9 +161,9 @@
 
 ## 13. 缺口汇总
 
-统计（86 条能力）：**有对应工具 49 条 / 只能靠 Bash 或文件工具临时替代 8 条 / agent 完全没有 26 条 / 双方都没有 3 条**；另有 1 条反向缺口（远程设备端口，属有意不做界面）。
+统计（88 条能力）：**有对应工具 52 条 / 部分支持 9 条 / agent 完全没有 25 条 / 双方都没有 2 条**；另有 1 条反向缺口（远程设备端口，属有意不做界面）。
 
-### A. 用户能做、agent 完全没有工具（26 条）
+### A. 用户能做、agent 完全没有工具（25 条）
 
 1. 手动跑一次自动化任务 —— 双方都无（不计入 26，列在此处便于对照）
 2. 记忆：合并压缩（`MemorySection.kt:282`）
@@ -173,7 +175,6 @@
 8. 工作区：删除（`WorkspacePicker.kt:184`）
 9. 工作区：添加外部目录（`WorkspacePicker.kt:151`）
 10. 模型：选当前会话的模型（`ChatModelSheet.kt:89`）
-11. 模型：改思考强度（`ChatModelSheet.kt:107`）
 12. 供应商：测试连通性（`ProviderModelComponents.kt:323`）
 13. 技能：从市场搜索/安装（`SettingsScreen.kt:1121`）
 14. 技能：导出（`SkillDetailSection.kt:121`）
@@ -191,13 +192,13 @@
 26. 备份：网络目标增删改/测试（`BackupViewModel.kt:345`、`:359`）
 27. 备份：上传/从网络恢复（`BackupViewModel.kt:374`、`:446`）
 
-（第 1 条属于“双方都没有”，不计入 26；26 条为第 2–27 条。）
+（第 1 条属于“双方都没有”，不计入 25；思考强度的模型默认值已有配置通道，但当前会话仍无独立写接口。）
 
 按域看，缺口最集中的是**会话（6 条）**、**工作区（5 条）**、**备份（4 条）**：这三块都是“App 自身状态管理”，工具范围里只有文件、配置、只读会话浏览三类接口，没有“改 App 内数据”的写通道。
 
-### B. 只能靠 `Bash` / 文件工具临时替代（8 条）
+### B. 部分支持（9 条）
 
-文件重命名、文件删除、复制/剪切/粘贴、`rules.d` 片段新建与编辑、规则片段/主规则删除、技能导入安装、技能删除、（补）文件新建虽已用 `writeFile` 覆盖，但“文件夹新建”同样只有 `Bash`（`writeFile` 不建目录）。
+文件重命名、文件删除、复制/剪切/粘贴、`rules.d` 片段新建与编辑、规则片段/主规则删除、技能导入安装、技能删除、文件夹新建，以及模型思考强度（仅可设置模型默认值）。
 
 共同问题：这些动作**没有专用工具，所以不在工具名层面可发现**——agent 得先知道“可以用 shell 凑”，才做得出来；也没有 UI 那层的合法性校验（片段命名、技能目录必须含 SKILL.md）。
 
@@ -206,9 +207,9 @@
 - 远程设备端口：`ConfigRemoteDeviceFields.kt:53` 可写；设置页没有端口输入——**有意不做界面**（只有端口撞车才需要改，不做入口），不算缺口。
 - （已消）已配对设备列表与撤销设备授权均已接入设置页：`RemoteDeviceSection.kt:135` 列表、`:144` 撤销按钮（提交 `201e3c60`）。
 
-### D. 双方都没有（3 条）
+### D. 双方都没有（2 条）
 
-采样温度调节、会话归档。自动化任务「手动跑一次」已明确不做（2026-11-03 主人定，调试用单次任务凑合）。写在这里是为了说明：它们不是 agent 工具缺口，不要照着补工具。
+会话归档与自动化任务「手动跑一次」。写在这里是为了说明：它们不是 agent 工具缺口，不要照着补工具。
 
 ## 14. 方法说明
 

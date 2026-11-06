@@ -59,6 +59,7 @@ class ViewImageTool @Inject constructor(
     private val aiProviderRepository: AIProviderRepository,
     private val defaultModelSettingsRepository: DefaultModelSettingsRepository,
     private val generalSettingsRepository: GeneralSettingsRepository,
+    private val providerRequestSettings: com.aharou.feature.agent.domain.provider.ProviderRequestSettings,
     private val visionModelSettingsRepository: VisionModelSettingsRepository,
     private val ocrEngine: TesseractOcrEngine,
     private val modelMetadataService: ModelMetadataService,
@@ -358,13 +359,10 @@ class ViewImageTool @Inject constructor(
         provider.providerId = config.id
         // 视觉调用同样是模型请求，隐身会话不能留 AI 日志；判定与主链路共用一份。
         provider.logSessionId = AILogger.loggableSessionId(sessionId, sessionUseCase::isGhostSession)
-        provider.customHeaders = config.customHeaders
         val metadata = modelMetadataService.resolve(config.id, config.type, config.effectiveModel)
         provider.maxOutputTokens = metadata.outputTokens
         provider.temperature = if (metadata.supportsCustomTemperature) fixedTemperature(config.effectiveModel) else null
-        provider.firstByteTimeoutMs = generalSettingsRepository.firstByteTimeoutMs()
-        provider.streamIdleTimeoutMs = generalSettingsRepository.streamIdleTimeoutMs()
-        provider.maxNetworkRetries = generalSettingsRepository.maxNetworkRetries()
+        providerRequestSettings.apply(provider, config)
         return provider
     }
 

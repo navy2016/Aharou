@@ -16,6 +16,9 @@ import com.aharou.core.config.ConfigValue
 import com.aharou.core.config.fields.ClosureField
 import com.aharou.core.config.fields.ReadOnlyField
 import com.aharou.feature.settings.data.local.CustomModelMetadataStore
+import com.aharou.feature.settings.data.local.CustomRequestStore
+import com.aharou.feature.settings.data.repository.ModelReasoningEffortRepository
+import com.aharou.feature.agent.domain.model.ReasoningEffort
 import com.aharou.feature.settings.domain.model.AIProviderConfig
 import com.aharou.feature.settings.domain.model.ModelMetadata
 import com.aharou.feature.settings.domain.model.DEFAULT_KEY_WEIGHT
@@ -46,11 +49,15 @@ import javax.inject.Singleton
 class ConfigProviderFields @Inject constructor(
     @param:ApplicationContext private val context: Context,
     private val modelMetadataStore: CustomModelMetadataStore,
+    private val customRequestStore: CustomRequestStore,
+    private val reasoningStore: ModelReasoningEffortRepository,
     private val providers: AIProviderRepository,
 ) {
 
     fun registerInto(registry: ConfigRegistry) {
         registry.register(ProviderCollection())
+        customRequestConfigFields("custom_request.global", customRequestStore::getGlobal, customRequestStore::setGlobal)
+            .forEach(registry::register)
     }
 
     private fun snapshot(id: String): AIProviderConfig? =
@@ -58,6 +65,8 @@ class ConfigProviderFields @Inject constructor(
 
     private fun save(updated: AIProviderConfig) =
         runBlocking { providers.saveProvider(updated) }
+
+    private fun AIProviderConfig?.orEmptyModels(): List<String> = this?.models ?: emptyList()
 
     /** 解析多 Key 串：每行 `值|权重`，与 AIProviderRepositoryImpl 的存储格式一致。 */
     private fun parseProviderKeys(text: String): List<ProviderKey> =
@@ -276,6 +285,11 @@ class ConfigProviderFields @Inject constructor(
                         null
                     },
                 ),
+                *customRequestConfigFields(
+                    "$basePath.$forId.custom_request",
+                    { customRequestStore.getProvider(forId) },
+                    { customRequestStore.setProvider(forId, it) }
+                ).toTypedArray(),
                 str(
                     field = "request_middleware",
                     name = "请求中间件",
@@ -438,7 +452,23 @@ class ConfigProviderFields @Inject constructor(
                     read = { it.openaiChatCacheKey },
                     write = { p, b -> p.copy(openaiChatCacheKey = b) },
                 ),
-            )
+            ) + snapshot(forId).orEmptyModels().flatMap { model ->
+                customRequestConfigFields(
+                    "$basePath.$forId.models.$model.custom_request",
+                    { customRequestStore.getModel(forId, model) },
+                    { customRequestStore.setModel(forId, model, it) }
+                ) + ClosureField(
+                    path = "$basePath.$forId.models.$model.reasoning_effort",
+                    displayName = "模型思考强度（$model）",
+                    description = "模型默认思考强度，切换模型或新建会话时使用。",
+                    valueSchema = ConfigSchema.StrEnum(ReasoningEffort.entries.map { it.name.lowercase() }),
+                    reader = { ConfigValue.Str((reasoningStore.get(forId, model) ?: ReasoningEffort.DEFAULT.name).lowercase()) },
+                    writer = { v ->
+                        val effort = (v as? ConfigValue.Str)?.value ?: throw ConfigError.TypeMismatch("string")
+                        reasoningStore.set(forId, model, effort.uppercase())
+                    },
+                )
+            }
         }
 
         override val addPayloadSchema: ConfigSchema = ConfigSchema.Json

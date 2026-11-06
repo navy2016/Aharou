@@ -214,7 +214,8 @@ internal fun rememberModelTester(): suspend (AIProviderConfig, String) -> ModelT
                 provider.useFullUrl,
                 provider.useResponseApi,
                 model,
-                provider.customHeaders
+                provider.customHeaders,
+                provider.id
             )
         }
         tester

@@ -36,6 +36,20 @@ class OpenAIResponsesStreamInterruptionTest {
             request: ChatCompletionRequest
         ): ChatCompletionResponse = unsupportedNonStreaming()
 
+        override suspend fun createChatCompletionCustom(
+            url: String,
+            authorization: String?,
+            extraHeaders: Map<String, String>,
+            request: okhttp3.RequestBody
+        ): ChatCompletionResponse = unsupportedNonStreaming()
+
+        override fun streamChatCompletionCustom(
+            url: String,
+            authorization: String?,
+            extraHeaders: Map<String, String>,
+            request: okhttp3.RequestBody
+        ): Call<ResponseBody> = unsupportedNonStreaming()
+
         override fun streamChatCompletion(
             url: String,
             authorization: String?,
@@ -55,6 +69,20 @@ class OpenAIResponsesStreamInterruptionTest {
             authorization: String?,
             extraHeaders: Map<String, String>,
             request: Any
+        ): Call<ResponseBody> = stream()
+
+        override suspend fun createResponsesCustom(
+            url: String,
+            authorization: String?,
+            extraHeaders: Map<String, String>,
+            request: okhttp3.RequestBody
+        ): JsonObject = unsupportedNonStreaming()
+
+        override fun streamResponsesCustom(
+            url: String,
+            authorization: String?,
+            extraHeaders: Map<String, String>,
+            request: okhttp3.RequestBody
         ): Call<ResponseBody> = stream()
 
         override suspend fun createImage(

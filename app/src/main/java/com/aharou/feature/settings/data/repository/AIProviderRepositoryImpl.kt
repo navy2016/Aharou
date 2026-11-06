@@ -4,6 +4,7 @@ import com.aharou.core.security.KeystoreCipher
 import com.aharou.core.util.FileLogger
 import com.aharou.feature.agent.data.local.database.AgentDatabase
 import com.aharou.feature.settings.data.local.dao.AIProviderDao
+import com.aharou.feature.settings.data.local.CustomRequestStore
 import com.aharou.feature.settings.data.local.entity.AIProviderEntity
 import com.aharou.feature.settings.domain.model.AIProviderConfig
 import com.aharou.feature.settings.domain.model.DEFAULT_KEY_WEIGHT
@@ -28,7 +29,8 @@ import javax.inject.Singleton
 @Singleton
 class AIProviderRepositoryImpl @Inject constructor(
     private val aiProviderDao: AIProviderDao,
-    private val agentDatabase: AgentDatabase
+    private val agentDatabase: AgentDatabase,
+    private val customRequestStore: CustomRequestStore
 ) : AIProviderRepository {
 
     private companion object {
@@ -93,6 +95,7 @@ class AIProviderRepositoryImpl @Inject constructor(
     override suspend fun deleteProvider(id: String) {
         FileLogger.i(TAG, "删除提供商 id=$id")
         aiProviderDao.deleteProvider(id)
+        customRequestStore.removeProvider(id)
     }
 
     override suspend fun setSelectedModel(id: String, model: String) {
@@ -114,6 +117,7 @@ class AIProviderRepositoryImpl @Inject constructor(
         if (ids.isEmpty()) return
         FileLogger.i(TAG, "批量删除提供商 共 ${ids.size} 个")
         aiProviderDao.deleteProviders(ids)
+        ids.forEach(customRequestStore::removeProvider)
     }
 
     override suspend fun setProvidersEnabled(ids: List<String>, isEnabled: Boolean) {

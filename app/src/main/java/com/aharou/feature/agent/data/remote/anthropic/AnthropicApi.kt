@@ -13,10 +13,29 @@ interface AnthropicApi {
     suspend fun createMessage(
         @Url url: String,
         @Header("x-api-key") apiKey: String?,
-        @Header("anthropic-version") version: String = "2023-06-01",
+        @Header("anthropic-version") version: String? = "2023-06-01",
         @HeaderMap extraHeaders: Map<String, String> = emptyMap(),
         @Body request: AnthropicMessageRequest
     ): AnthropicMessageResponse
+
+    @POST
+    suspend fun createMessageCustom(
+        @Url url: String,
+        @Header("x-api-key") apiKey: String?,
+        @Header("anthropic-version") version: String? = "2023-06-01",
+        @HeaderMap extraHeaders: Map<String, String> = emptyMap(),
+        @Body request: okhttp3.RequestBody
+    ): AnthropicMessageResponse
+
+    @Streaming
+    @POST
+    fun streamMessageCustom(
+        @Url url: String,
+        @Header("x-api-key") apiKey: String?,
+        @Header("anthropic-version") version: String? = "2023-06-01",
+        @HeaderMap extraHeaders: Map<String, String> = emptyMap(),
+        @Body request: okhttp3.RequestBody
+    ): retrofit2.Call<ResponseBody>
 
     /** 流式（SSE）补全：返回原始响应体，由调用方逐行解析 event-stream。请求需带 stream=true。 */
     @Streaming
@@ -24,7 +43,7 @@ interface AnthropicApi {
     fun streamMessage(
         @Url url: String,
         @Header("x-api-key") apiKey: String?,
-        @Header("anthropic-version") version: String = "2023-06-01",
+        @Header("anthropic-version") version: String? = "2023-06-01",
         @HeaderMap extraHeaders: Map<String, String> = emptyMap(),
         @Body request: AnthropicMessageRequest
     ): retrofit2.Call<ResponseBody>

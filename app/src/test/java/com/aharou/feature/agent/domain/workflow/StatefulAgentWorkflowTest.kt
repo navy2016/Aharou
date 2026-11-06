@@ -107,6 +107,7 @@ class StatefulAgentWorkflowTest {
         titleModelSettingsRepository = mockk(),
         defaultModelSettingsRepository = mockk(),
         generalSettingsRepository = mockk(relaxed = true),
+        providerRequestSettings = mockk(relaxed = true),
         sessionUseCase = sessions,
         messagePersistenceUseCase = persistence,
         checkpointManager = mockk(),

@@ -3,6 +3,29 @@
     <string name="app_name">Aharou</string>
 
     <!-- Settings menu titles -->
+    <string name="model_reasoning_effort_tag">Thinking: %1$s</string>
+    <string name="custom_request_title">Custom request</string>
+    <string name="custom_request_global">Global headers and body; providers and models can override them</string>
+    <string name="custom_request_provider">Overrides global settings; model settings take precedence</string>
+    <string name="custom_request_model">Overrides global and provider settings</string>
+    <string name="custom_request_hint">Use JSON objects for headers and body. Header values must be strings; leave blank to inherit.</string>
+    <string name="custom_request_headers">Headers JSON</string>
+    <string name="custom_request_body">Body JSON</string>
+    <string name="custom_request_headers_invalid">Enter valid header names and string values</string>
+    <string name="custom_request_body_invalid">Enter a valid JSON object</string>
+    <string name="retry_enhanced_title">Enhanced auto retry</string>
+    <string name="retry_enhanced_enable">Enable enhanced auto retry</string>
+    <string name="retry_enabled">Enabled</string>
+    <string name="retry_disabled">Disabled</string>
+    <string name="retry_max_retries">Additional retries (0–10)</string>
+    <string name="retry_initial_delay">Initial delay (ms)</string>
+    <string name="retry_multiplier">Backoff multiplier</string>
+    <string name="retry_max_delay">Maximum delay (ms)</string>
+    <string name="retry_jitter">Random jitter (±20%)</string>
+    <string name="retry_network">Retry network errors</string>
+    <string name="retry_status_codes">Retry HTTP status codes (comma-separated)</string>
+    <string name="retry_keywords">Retry keywords (one per line)</string>
+    <string name="retry_stop_keywords">Stop keywords (one per line)</string>
     <string name="settings_title">Settings</string>
     <string name="settings_select_section_hint">Pick a setting from the list</string>
     <string name="settings_providers">AI Vendors</string>

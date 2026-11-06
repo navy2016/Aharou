@@ -1504,13 +1504,13 @@ fun AIChatPanel(
                     activeProvider = activeProvider,
                     providers = providers,
                     modelMetadata = modelMetadata,
-                    onSelectModel = { p, m ->
-                        viewModel.setSessionProviderModel(p, m)
-                    },
+                    onSelectModel = { p, m -> viewModel.setSessionProviderModel(p, m) },
                     currentMode = currentMode,
                     onToggleMode = { viewModel.setSessionMode(it) },
                     reasoningEffort = reasoningEffort,
                     onReasoningEffortChange = { viewModel.setSessionReasoningEffort(it) },
+                    onModelReasoningEffortChange = { p, m, effort -> if (activeProvider?.id == p && activeModel == m) viewModel.setSessionReasoningEffort(effort) },
+                    onNavigateToTerminal = onNavigateToTerminal,
                     pendingAttachments = pendingAttachments,
                     onRemoveAttachment = ::removePendingAttachment,
                     onReadAttachment = { path -> viewModel.readAttachmentText(path) },
@@ -1618,7 +1618,7 @@ fun AIChatPanel(
                     .padding(end = Spacing.lg)
                     .padding(bottom = with(LocalDensity.current) {
                         (floatingLayerHeightPx + permissionOffsetPx + FLOATING_LAYER_GAP_DP.toPx()).toDp() +
-                            SCROLL_BUTTON_SIZE_DP.dp + Spacing.sm
+                            SCROLL_BUTTON_SIZE_DP.dp + Spacing.sm + SCROLL_BUTTON_SIZE_DP.dp
                     })
                     .graphicsLayer { alpha = if (listState.isScrollInProgress) 0.4f else 1f },
                 enter = fadeIn() + scaleIn(),
@@ -1642,7 +1642,7 @@ fun AIChatPanel(
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
                     .padding(end = Spacing.lg)
-                    .padding(bottom = with(LocalDensity.current) { (floatingLayerHeightPx + permissionOffsetPx + FLOATING_LAYER_GAP_DP.toPx()).toDp() })
+                    .padding(bottom = with(LocalDensity.current) { (floatingLayerHeightPx + permissionOffsetPx + FLOATING_LAYER_GAP_DP.toPx()).toDp() + SCROLL_BUTTON_SIZE_DP.dp })
                     .graphicsLayer { alpha = if (listState.isScrollInProgress) 0.4f else 1f },
                 enter = fadeIn() + scaleIn(),
                 exit = fadeOut() + scaleOut()

@@ -32,6 +32,34 @@ class GeminiStreamInterruptionTest {
             request: Any
         ): JsonObject = unsupportedNonStreaming()
 
+        override suspend fun generateContentCustom(
+            url: String,
+            apiKey: String?,
+            extraHeaders: Map<String, String>,
+            request: okhttp3.RequestBody
+        ): JsonObject = unsupportedNonStreaming()
+
+        override fun streamGenerateContentCustom(
+            url: String,
+            apiKey: String?,
+            extraHeaders: Map<String, String>,
+            request: okhttp3.RequestBody
+        ): Call<ResponseBody> = stream()
+
+        override suspend fun createInteractionCustom(
+            url: String,
+            apiKey: String?,
+            extraHeaders: Map<String, String>,
+            request: okhttp3.RequestBody
+        ): JsonObject = unsupportedNonStreaming()
+
+        override fun streamInteractionCustom(
+            url: String,
+            apiKey: String?,
+            extraHeaders: Map<String, String>,
+            request: okhttp3.RequestBody
+        ): Call<ResponseBody> = unsupportedNonStreaming()
+
         override fun streamGenerateContent(
             url: String,
             apiKey: String?,

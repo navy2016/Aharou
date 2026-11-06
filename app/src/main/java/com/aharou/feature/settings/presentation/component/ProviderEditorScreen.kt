@@ -113,6 +113,8 @@ import com.aharou.core.util.ProviderIconStore
 import com.aharou.core.ui.FloatingTabBar
 import com.aharou.core.ui.FloatingTabItem
 import com.aharou.feature.settings.data.local.CustomModelMetadataStore
+import com.aharou.feature.settings.data.local.CustomRequestStore
+import com.aharou.feature.settings.data.local.CustomRequestOverride
 import com.aharou.feature.settings.data.local.ProviderPreset
 import com.aharou.feature.settings.domain.model.AIProviderConfig
 import com.aharou.feature.settings.domain.model.KeyRotationStrategy
@@ -234,6 +236,7 @@ fun ProviderEditorScreen(
         }
     }
     val customMetadataStore = remember { CustomModelMetadataStore(context.applicationContext) }
+    val customRequestStore = remember { CustomRequestStore(context.applicationContext) }
     val scope = rememberCoroutineScope()
     var customMetadata by remember { mutableStateOf<Map<String, ModelMetadata>>(emptyMap()) }
     var editingModel by remember { mutableStateOf<String?>(null) }
@@ -286,6 +289,7 @@ fun ProviderEditorScreen(
     var showProxyPage by remember { mutableStateOf(false) }
     var showKeysPage by remember { mutableStateOf(false) }
     var showHeadersSheet by remember { mutableStateOf(false) }
+    var showCustomRequest by remember { mutableStateOf(false) }
     var showScriptParamsSheet by remember { mutableStateOf(false) }
     var fetchDialogKey by remember { mutableIntStateOf(0) }
 
@@ -370,7 +374,8 @@ fun ProviderEditorScreen(
         scriptParams = scriptParams.filter { it.first.isNotBlank() }.toMap(),
         customIcon = customIcon,
         fallbackProviderId = fallbackProviderId,
-        fallbackModel = fallbackModel
+        fallbackModel = fallbackModel,
+        requestMiddleware = initialProvider?.requestMiddleware.orEmpty()
     ).sanitized()
 
     // 新建场景下判断用户是否填写了实质内容：名称、API Key、Base URL 任一非空白，或已添加模型 / DIY 脚本参数。
@@ -538,6 +543,12 @@ fun ProviderEditorScreen(
                     // ── 选项 ──
                     SettingsGroupHeader(text = stringResource(R.string.provider_section_options))
                     SettingsGroup {
+                        SettingsRow(
+                            title = stringResource(R.string.custom_request_title),
+                            subtitle = stringResource(R.string.custom_request_provider),
+                            onClick = { showCustomRequest = true }
+                        )
+                        SettingsDivider()
                         SettingsRow(
                             title = stringResource(R.string.provider_custom_icon),
                             subtitle = stringResource(R.string.provider_custom_icon_hint),
@@ -967,6 +978,14 @@ fun ProviderEditorScreen(
         )
     }
 
+    if (showCustomRequest) {
+        CustomRequestSheet(
+            initial = customRequestStore.getProvider(providerId),
+            onSave = { customRequestStore.setProvider(providerId, it); showCustomRequest = false },
+            onDismiss = { showCustomRequest = false }
+        )
+    }
+
     if (showHeadersSheet) {
         ProviderHeadersSheet(
             headers = customHeaders,
@@ -1001,7 +1020,9 @@ fun ProviderEditorScreen(
                         ?.takeIf { it.isNotBlank() && it != model }
                 },
                 providerId = providerId,
-                onSave = { model, meta ->
+                initialRequest = editingModel?.let { customRequestStore.getModel(providerId, it) } ?: CustomRequestOverride(),
+                onSave = { model, meta, request ->
+                    customRequestStore.setModel(providerId, model, request)
                     val editing = editingModel
                     if (editing != null && model != editing) {
                         val idx = models.indexOf(editing)

@@ -3,6 +3,29 @@
     <string name="app_name">Aharou</string>
 
     <!-- 设置页菜单标题 -->
+    <string name="model_reasoning_effort_tag">思考：%1$s</string>
+    <string name="custom_request_title">自定义请求</string>
+    <string name="custom_request_global">全局请求头和请求体，供应商与模型可覆盖</string>
+    <string name="custom_request_provider">覆盖全局配置，模型配置优先</string>
+    <string name="custom_request_model">覆盖全局和供应商配置</string>
+    <string name="custom_request_hint">请求头和请求体使用 JSON 对象。请求头值必须是字符串；留空表示不覆盖。</string>
+    <string name="custom_request_headers">请求头 JSON</string>
+    <string name="custom_request_body">请求体 JSON</string>
+    <string name="custom_request_headers_invalid">请输入有效的请求头名称与字符串值</string>
+    <string name="custom_request_body_invalid">请输入有效的 JSON 对象</string>
+    <string name="retry_enhanced_title">自动重试增强</string>
+    <string name="retry_enhanced_enable">启用自动重试增强</string>
+    <string name="retry_enabled">已启用</string>
+    <string name="retry_disabled">未启用</string>
+    <string name="retry_max_retries">额外重试次数（0–10）</string>
+    <string name="retry_initial_delay">首次延迟（毫秒）</string>
+    <string name="retry_multiplier">退避倍率</string>
+    <string name="retry_max_delay">最大延迟（毫秒）</string>
+    <string name="retry_jitter">随机抖动（±20%）</string>
+    <string name="retry_network">重试网络错误</string>
+    <string name="retry_status_codes">重试 HTTP 状态码（逗号分隔）</string>
+    <string name="retry_keywords">重试关键字（每行一个）</string>
+    <string name="retry_stop_keywords">停止关键字（每行一个）</string>
     <string name="settings_title">设置</string>
     <string name="settings_select_section_hint">从左侧选择一个设置项</string>
     <string name="settings_providers">AI 供应商</string>

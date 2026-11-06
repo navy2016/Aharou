@@ -27,6 +27,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -36,6 +37,7 @@ import com.aharou.core.theme.semanticColors
 import com.aharou.core.ui.AppSwitch
 import com.aharou.core.ui.AppTextField
 import com.aharou.feature.settings.data.repository.StartupSessionMode
+import com.aharou.feature.settings.data.local.CustomRequestStore
 import compose.icons.FeatherIcons
 import compose.icons.feathericons.Check
 
@@ -67,6 +69,9 @@ internal fun GeneralSettingsSection(
     contextTrimRounds: Int,
     onSetContextTrimRounds: (Int) -> Unit
 ) {
+    val context = LocalContext.current
+    val customRequestStore = remember(context) { CustomRequestStore(context.applicationContext) }
+    var showCustomRequest by remember { mutableStateOf(false) }
     var showStartupSessionSheet by remember { mutableStateOf(false) }
     var editingFirstByteTimeout by remember { mutableStateOf(false) }
     var editingStreamIdleTimeout by remember { mutableStateOf(false) }
@@ -191,6 +196,12 @@ internal fun GeneralSettingsSection(
         SettingsGroupHeader(text = stringResource(R.string.settings_general_network))
         SettingsGroup {
             SettingsRow(
+                title = stringResource(R.string.custom_request_title),
+                subtitle = stringResource(R.string.custom_request_global),
+                onClick = { showCustomRequest = true }
+            )
+            SettingsDivider()
+            SettingsRow(
                 icon = null,
                 title = stringResource(R.string.settings_first_byte_timeout),
                 subtitle = stringResource(R.string.settings_first_byte_timeout_desc),
@@ -249,6 +260,14 @@ internal fun GeneralSettingsSection(
                 }
             )
         }
+    }
+
+    if (showCustomRequest) {
+        CustomRequestSheet(
+            initial = customRequestStore.getGlobal(),
+            onSave = { customRequestStore.setGlobal(it); showCustomRequest = false },
+            onDismiss = { showCustomRequest = false }
+        )
     }
 
     if (showStartupSessionSheet) {
