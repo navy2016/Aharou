@@ -38,6 +38,10 @@ class CustomRequestStore @Inject constructor(
     fun setModel(providerId: String, model: String, value: CustomRequestOverride) =
         set(modelKey(providerId, model), value)
 
+    fun removeModel(providerId: String, model: String) {
+        prefs.edit().remove(modelKey(providerId, model)).apply()
+    }
+
     fun removeProvider(providerId: String) {
         val prefix = "model:$providerId:"
         val editor = prefs.edit().remove(providerKey(providerId))

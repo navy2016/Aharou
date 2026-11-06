@@ -591,6 +591,7 @@ internal fun ChatInputBar(
                             onSelectModel = onSelectModel,
                             reasoningEffort = reasoningEffort,
                             onReasoningEffortChange = onModelReasoningEffortChange,
+                            currentReasoningEffortEnabled = !isBusy,
                             forceOpenSheet = forceOpenModelSheet,
                             onSelectSuccessInOnboarding = onSelectModelInOnboarding,
                             onSheetDismiss = onModelSheetDismiss,

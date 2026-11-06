@@ -53,6 +53,7 @@ internal fun ModelIconButton(
     onSelectModel: (String, String) -> Unit,
     reasoningEffort: ReasoningEffort,
     onReasoningEffortChange: (String, String, ReasoningEffort) -> Unit,
+    currentReasoningEffortEnabled: Boolean,
     modifier: Modifier = Modifier,
     forceOpenSheet: Boolean = false,
     onSelectSuccessInOnboarding: (() -> Unit)? = null,
@@ -82,6 +83,7 @@ internal fun ModelIconButton(
             currentModel = effectiveModel,
             modelMetadata = modelMetadata,
             currentReasoningEffort = reasoningEffort,
+            currentReasoningEffortEnabled = currentReasoningEffortEnabled,
             onReasoningEffortChange = onReasoningEffortChange,
             onSelect = { pId, model ->
                 onSelectModel(pId, model)
@@ -105,6 +107,7 @@ internal fun ModelReasoningEffortSheet(
     modelMetadata: ModelMetadata?,
     onChange: (ReasoningEffort) -> Unit,
     onDismiss: () -> Unit,
+    enabled: Boolean = true,
 ) {
     AdaptiveModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -150,7 +153,7 @@ internal fun ModelReasoningEffortSheet(
                 val selected = value == effort
                 Row(
                     modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(Radius.sm))
-                        .clickable { onChange(value) }.padding(Spacing.md),
+                        .clickable(enabled = enabled) { onChange(value) }.padding(Spacing.md),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Icon(

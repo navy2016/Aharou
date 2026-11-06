@@ -431,13 +431,16 @@ private fun Throwable.retryText(): String {
     return "$messages $streamCode $detail".lowercase(Locale.ROOT)
 }
 
+private fun AutoRetryOptions.matchesStopKeyword(text: String): Boolean =
+    stopKeywords.any { it.lowercase(Locale.ROOT) in text }
+
 /** 停止关键字优先于网络、重试关键字与状态码。 */
 fun shouldRetryWithOptions(error: Throwable, options: AutoRetryOptions): Boolean {
     if (error is CancellationException || error is javax.net.ssl.SSLHandshakeException ||
         error is java.security.cert.CertificateException) return false
     val normalized = options.normalized()
     val text = error.retryText()
-    if (normalized.stopKeywords.any { it.lowercase(Locale.ROOT) in text }) return false
+    if (normalized.matchesStopKeyword(text)) return false
     val networkError = error is SocketTimeoutException || error is InterruptedIOException ||
         error is UnknownHostException || error is ConnectException || error is SSLException || error is IOException
     if (networkError) return normalized.retryOnNetworkError
@@ -496,6 +499,7 @@ suspend fun <T> retryStaircase(
             throw e
         } catch (e: Throwable) {
             coroutineContext.ensureActive()
+            if (normalizedOptions?.matchesStopKeyword(e.retryText()) == true) throw e
             if (!isRetriableNetworkError(e)) {
                 if (onKeyFailure?.invoke(e, true) == true) {
                     attempt = 0
@@ -547,6 +551,7 @@ suspend fun streamWithStaircaseRetry(
             throw e
         } catch (e: Throwable) {
             coroutineContext.ensureActive()
+            if (normalizedOptions?.matchesStopKeyword(e.retryText()) == true) throw e
             if (!isRetriableNetworkError(e)) {
                 if (onKeyFailure?.invoke(e, !receivedContent) == true) {
                     attempt = 0

@@ -2662,6 +2662,7 @@ class AIAgentViewModel @Inject constructor(
 
     fun setSessionReasoningEffort(effort: ReasoningEffort) {
         val sid = _currentSessionId.value ?: return
+        if (sessionJobs[sid]?.isActive == true) return
         viewModelScope.launch { sessionUseCase.updateReasoningEffort(sid, effort.name) }
     }
 

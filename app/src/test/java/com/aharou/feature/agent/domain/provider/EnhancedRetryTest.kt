@@ -6,6 +6,7 @@ import kotlinx.coroutines.test.runTest
 import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import retrofit2.HttpException
@@ -26,6 +27,61 @@ class EnhancedRetryTest {
         assertTrue(shouldRetryWithOptions(StreamApiException("server_error", "unavailable"), options))
         assertFalse(shouldRetryWithOptions(StreamApiException("insufficient_quota", "quota exceeded"), options))
         assertFalse(shouldRetryWithOptions(CancellationException(), options))
+    }
+
+    @Test
+    fun stopKeywordPreventsKeyFailover() = runTest {
+        val error = http(402, "insufficient balance")
+        var attempts = 0
+        var keyFailures = 0
+        val failure = runCatching {
+            retryStaircase(
+                retryOptions = options,
+                onKeyFailure = { _, _ -> ++keyFailures < 2 },
+            ) {
+                attempts++
+                throw error
+            }
+        }.exceptionOrNull()
+        assertSame(error, failure)
+        assertEquals(1, attempts)
+        assertEquals(0, keyFailures)
+    }
+
+    @Test
+    fun streamStopKeywordPreventsKeyFailover() = runTest {
+        val error = StreamApiException("insufficient_quota", "quota exceeded")
+        var attempts = 0
+        var keyFailures = 0
+        val failure = runCatching {
+            streamWithStaircaseRetry(
+                retryOptions = options,
+                onKeyFailure = { _, _ -> ++keyFailures < 2 },
+                attemptOnce = {
+                    attempts++
+                    throw error
+                },
+            )
+        }.exceptionOrNull()
+        assertSame(error, failure)
+        assertEquals(1, attempts)
+        assertEquals(0, keyFailures)
+    }
+
+    @Test
+    fun disabledEnhancementKeepsKeyFailover() = runTest {
+        var attempts = 0
+        var keyFailures = 0
+        val result = retryStaircase(
+            retryOptions = options.copy(enabled = false),
+            onKeyFailure = { _, _ -> ++keyFailures < 2 },
+        ) {
+            if (++attempts == 1) throw http(402, "insufficient balance")
+            "ok"
+        }
+        assertEquals("ok", result)
+        assertEquals(2, attempts)
+        assertEquals(1, keyFailures)
     }
 
     @Test

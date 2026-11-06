@@ -12,7 +12,13 @@ const val CONFIG_MASK_TEXT = "••• (hidden)"
 fun ConfigValue.maskedForDisplay(sensitive: Boolean): ConfigValue =
     if (sensitive) ConfigValue.Str(CONFIG_MASK_TEXT) else this
 
-/** 按字段风险判断该值是否需要在展示面上打码。未知字段（已删）按非敏感处理。 */
+private val customRequestPath = Regex(
+    """^(custom_request\.global|providers\.[^.]+(?:\.models\..+)?\.custom_request)\.(headers|body)$"""
+)
+
+internal fun isCustomRequestPath(path: String): Boolean = customRequestPath.matches(path)
+
+/** 自定义请求在模型或供应商删除后仍包含敏感数据，不能依赖动态字段是否存在。 */
 fun isSensitivePath(path: String): Boolean =
-    runCatching { ConfigRegistry.get().resolveField(path)?.risk }
+    isCustomRequestPath(path) || runCatching { ConfigRegistry.get().resolveField(path)?.risk }
         .getOrNull() == ConfigRisk.SENSITIVE

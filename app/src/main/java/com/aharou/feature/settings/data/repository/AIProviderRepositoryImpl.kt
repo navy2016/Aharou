@@ -78,6 +78,9 @@ class AIProviderRepositoryImpl @Inject constructor(
             val sortOrder = current?.sortOrder ?: (aiProviderDao.getMaxSortOrder() + 1)
             FileLogger.i(TAG, "保存提供商 id=${provider.id} name=${provider.name} sortOrder=$sortOrder")
             aiProviderDao.insertProvider(provider.copy(sortOrder = sortOrder).sanitized().toEntity())
+            current?.models?.lineSequence()?.map { it.substringBefore('|').trim() }
+                ?.filter { it.isNotEmpty() && it !in provider.models }
+                ?.forEach { customRequestStore.removeModel(provider.id, it) }
         }
     }
 
@@ -105,7 +108,13 @@ class AIProviderRepositoryImpl @Inject constructor(
 
     override suspend fun updateModels(id: String, models: List<String>) {
         FileLogger.d(TAG, "更新模型列表 provider=$id 共 ${models.size} 个")
-        aiProviderDao.setModels(id, models.joinToString("\n"))
+        agentDatabase.withTransaction {
+            val current = aiProviderDao.getProviderById(id)
+            aiProviderDao.setModels(id, models.joinToString("\n"))
+            current?.models?.lineSequence()?.map { it.substringBefore('|').trim() }
+                ?.filter { it.isNotEmpty() && it !in models }
+                ?.forEach { customRequestStore.removeModel(id, it) }
+        }
     }
 
     override suspend fun setProviderEnabled(id: String, isEnabled: Boolean) {

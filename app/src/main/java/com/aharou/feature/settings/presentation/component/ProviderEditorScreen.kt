@@ -389,7 +389,8 @@ fun ProviderEditorScreen(
             dashboardScriptPath.isNotBlank() ||
             scriptParams.any { it.first.isNotBlank() } ||
             customHeaders.any { it.first.isNotBlank() } ||
-            models.isNotEmpty()
+            models.isNotEmpty() ||
+            customRequestStore.getProvider(providerId).let { it.headers.isNotEmpty() || it.body != null }
 
     // 与上次提交内容完全相同则跳过保存（改了又改回原值、或原样返回都不应触发 DB 写入）；编辑场景以进入时配置为基线，新建场景为 null 保证首次填写必存。
     var lastSubmittedConfig by remember {
@@ -981,7 +982,11 @@ fun ProviderEditorScreen(
     if (showCustomRequest) {
         CustomRequestSheet(
             initial = customRequestStore.getProvider(providerId),
-            onSave = { customRequestStore.setProvider(providerId, it); showCustomRequest = false },
+            onSave = {
+                customRequestStore.setProvider(providerId, it)
+                saveCurrent()
+                showCustomRequest = false
+            },
             onDismiss = { showCustomRequest = false }
         )
     }

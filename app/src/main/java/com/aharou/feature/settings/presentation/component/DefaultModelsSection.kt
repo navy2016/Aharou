@@ -591,6 +591,7 @@ internal fun ModelSelectionSheet(
     currentModel: String,
     modelMetadata: Map<String, ModelMetadata>,
     currentReasoningEffort: com.aharou.feature.agent.domain.model.ReasoningEffort? = null,
+    currentReasoningEffortEnabled: Boolean = true,
     onReasoningEffortChange: ((String, String, com.aharou.feature.agent.domain.model.ReasoningEffort) -> Unit)? = null,
     onSelect: (providerId: String, model: String) -> Unit,
     onClear: (() -> Unit)?,
@@ -801,6 +802,7 @@ internal fun ModelSelectionSheet(
         }
     }
     reasoningModel?.let { (providerId, model) ->
+        val canChange = currentReasoningEffortEnabled || providerId != currentProviderId || model != currentModel
         val metadata = mergeModelMetadata(
             model,
             modelMetadata[modelMetadataKey(providerId, model)],
@@ -810,12 +812,15 @@ internal fun ModelSelectionSheet(
             model = model,
             effort = reasoningEffort,
             modelMetadata = metadata,
+            enabled = canChange,
             onChange = { effort ->
-                reasoningStore.set(providerId, model, effort.name)
-                savedEfforts[providerId to model] = effort
-                reasoningEffort = effort
-                onReasoningEffortChange?.invoke(providerId, model, effort)
-                reasoningModel = null
+                if (canChange) {
+                    reasoningStore.set(providerId, model, effort.name)
+                    savedEfforts[providerId to model] = effort
+                    reasoningEffort = effort
+                    onReasoningEffortChange?.invoke(providerId, model, effort)
+                    reasoningModel = null
+                }
             },
             onDismiss = { reasoningModel = null }
         )
