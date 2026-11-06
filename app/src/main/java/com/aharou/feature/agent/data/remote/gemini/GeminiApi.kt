@@ -26,6 +26,40 @@ interface GeminiApi {
         @Body request: Any
     ): retrofit2.Call<ResponseBody>
 
+    @POST
+    suspend fun generateContentCustom(
+        @Url url: String,
+        @Header("x-goog-api-key") apiKey: String?,
+        @HeaderMap extraHeaders: Map<String, String> = emptyMap(),
+        @Body request: okhttp3.RequestBody
+    ): com.google.gson.JsonObject
+
+    @Streaming
+    @POST
+    fun streamGenerateContentCustom(
+        @Url url: String,
+        @Header("x-goog-api-key") apiKey: String?,
+        @HeaderMap extraHeaders: Map<String, String> = emptyMap(),
+        @Body request: okhttp3.RequestBody
+    ): retrofit2.Call<ResponseBody>
+
+    @POST
+    suspend fun createInteractionCustom(
+        @Url url: String,
+        @Header("x-goog-api-key") apiKey: String?,
+        @HeaderMap extraHeaders: Map<String, String> = emptyMap(),
+        @Body request: okhttp3.RequestBody
+    ): com.google.gson.JsonObject
+
+    @Streaming
+    @POST
+    fun streamInteractionCustom(
+        @Url url: String,
+        @Header("x-goog-api-key") apiKey: String?,
+        @HeaderMap extraHeaders: Map<String, String> = emptyMap(),
+        @Body request: okhttp3.RequestBody
+    ): retrofit2.Call<ResponseBody>
+
     /** Interactions API（`v1beta/interactions`）的非流式请求。 */
     @POST
     suspend fun createInteraction(

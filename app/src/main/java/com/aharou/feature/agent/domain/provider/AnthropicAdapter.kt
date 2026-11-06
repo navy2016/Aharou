@@ -45,12 +45,14 @@ class AnthropicAdapter @Inject constructor(
     override var firstByteTimeoutMs: Long = FIRST_BYTE_TIMEOUT_MS
     override var streamIdleTimeoutMs: Long = 0L
     override var maxNetworkRetries: Int = MAX_NETWORK_RETRIES
+    override var autoRetryOptions: AutoRetryOptions = AutoRetryOptions()
 
     /** 是否启用显式缓存断点（cache_control）。默认开启；第三方兼容网关严格校验未知字段时由设置项关闭。 */
     var cacheBreakpointsEnabled: Boolean = true
 
     /** 自定义请求头：占位符替换后写出，完全覆盖同名默认头。 */
     override var customHeaders: Map<String, String> = emptyMap()
+    override var customBody: com.google.gson.JsonObject? = null
 
     override var maxOutputTokens: Int? = null
 
@@ -59,6 +61,12 @@ class AnthropicAdapter @Inject constructor(
 
     private fun extraHeaders(): Map<String, String> =
         resolveCustomHeaders(customHeaders, logSessionId, apiKey)
+
+    private fun requestKey(): String? =
+        if (customHeaders.containsHeader("x-api-key")) null else apiKey.takeIf { it.isNotBlank() }
+
+    private fun requestVersion(): String? =
+        if (customHeaders.containsHeader("anthropic-version")) null else "2023-06-01"
 
     override suspend fun complete(
         systemPrompt: String,
@@ -97,9 +105,15 @@ class AnthropicAdapter @Inject constructor(
         val response = try {
             retryStaircase(
                 maxRetries = maxNetworkRetries,
-                onKeyFailure = { e, _ -> switchKeyOnFailure(e, triedKeys) != null }
+                onKeyFailure = { e, _ -> switchKeyOnFailure(e, triedKeys) != null },
+                retryOptions = autoRetryOptions
             ) {
-                api.createMessage(url = url, apiKey = apiKey.takeIf { it.isNotBlank() }, extraHeaders = extraHeaders(), request = request)
+                val custom = customRequestBody(request)
+                if (custom == null) {
+                    api.createMessage(url = url, apiKey = requestKey(), version = requestVersion(), extraHeaders = extraHeaders(), request = request)
+                } else {
+                    api.createMessageCustom(url = url, apiKey = requestKey(), version = requestVersion(), extraHeaders = extraHeaders(), request = custom)
+                }
             }
         } catch (e: CancellationException) {
             throw e
@@ -207,7 +221,13 @@ class AnthropicAdapter @Inject constructor(
             // content block index -> thinking / redacted_thinking 累积；按 index 分槽，避免一轮多个思考块被合并。
             val thinkingBlocks = LinkedHashMap<Int, ThinkingBlockAcc>()
 
-            val body = firstContent.awaitBody(api.streamMessage(url = url, apiKey = apiKey.takeIf { it.isNotBlank() }, extraHeaders = extraHeaders(), request = request))
+            val custom = customRequestBody(request)
+            val call = if (custom == null) {
+                api.streamMessage(url = url, apiKey = requestKey(), version = requestVersion(), extraHeaders = extraHeaders(), request = request)
+            } else {
+                api.streamMessageCustom(url = url, apiKey = requestKey(), version = requestVersion(), extraHeaders = extraHeaders(), request = custom)
+            }
+            val body = firstContent.awaitBody(call)
 
             body.use { rb ->
                 firstContent.attach { rb.close() }
@@ -361,6 +381,8 @@ class AnthropicAdapter @Inject constructor(
                             }
                         } catch (e: CancellationException) {
                             throw e
+                        } catch (e: StreamApiException) {
+                            throw e
                         } catch (e: Exception) {
                             coroutineContext.ensureActive()
                             // 该行 SSE 解析失败，跳过；不影响已累积文本与后续行。
@@ -378,7 +400,8 @@ class AnthropicAdapter @Inject constructor(
             send(AIStreamChunk.Final(sanitizeTruncatedToolCalls(AIResponse(content = textBuilder.toString(), toolCalls = toolCalls, stopReason = stopReason, stopDetail = stopDetail, signature = signature, thinkingBlocksJson = encodeThinkingBlocks(thinkingBlocks.values.map { it.toBlock() }), inputTokens = totalInputTokens(streamInputTokens, streamCachedInputTokens, streamCacheCreationTokens), outputTokens = streamOutputTokens, cachedInputTokens = streamCachedInputTokens, cacheCreationTokens = streamCacheCreationTokens))))
                     }
                 },
-                onRetry = { attempt, max, error -> send(AIStreamChunk.Retrying(attempt, max, error)) }
+                onRetry = { attempt, max, error -> send(AIStreamChunk.Retrying(attempt, max, error)) },
+                retryOptions = autoRetryOptions
             )
         } catch (e: CancellationException) {
             throw e

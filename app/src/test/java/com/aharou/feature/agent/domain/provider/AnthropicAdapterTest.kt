@@ -27,7 +27,7 @@ class AnthropicAdapterTest {
         override suspend fun createMessage(
             url: String,
             apiKey: String?,
-            version: String,
+            version: String?,
             extraHeaders: Map<String, String>,
             request: AnthropicMessageRequest
         ): AnthropicMessageResponse {
@@ -35,10 +35,26 @@ class AnthropicAdapterTest {
             return response
         }
 
+        override suspend fun createMessageCustom(
+            url: String,
+            apiKey: String?,
+            version: String?,
+            extraHeaders: Map<String, String>,
+            request: okhttp3.RequestBody
+        ): AnthropicMessageResponse = response
+
+        override fun streamMessageCustom(
+            url: String,
+            apiKey: String?,
+            version: String?,
+            extraHeaders: Map<String, String>,
+            request: okhttp3.RequestBody
+        ): Call<ResponseBody> = throw UnsupportedOperationException()
+
         override fun streamMessage(
             url: String,
             apiKey: String?,
-            version: String,
+            version: String?,
             extraHeaders: Map<String, String>,
             request: AnthropicMessageRequest
         ): Call<ResponseBody> = throw UnsupportedOperationException("本测试只覆盖非流式路径")

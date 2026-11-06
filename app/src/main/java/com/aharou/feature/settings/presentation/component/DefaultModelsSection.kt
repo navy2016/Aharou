@@ -4,8 +4,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -73,8 +71,6 @@ import com.aharou.feature.settings.data.local.CustomModelMetadataStore
 import com.aharou.feature.settings.domain.model.mergeModelMetadata
 import com.aharou.feature.settings.domain.model.modelMetadataKey
 import compose.icons.FeatherIcons
-import compose.icons.feathericons.ArrowDown
-import compose.icons.feathericons.ArrowUp
 import compose.icons.feathericons.Camera
 import compose.icons.feathericons.Download
 import compose.icons.feathericons.Eye
@@ -83,6 +79,8 @@ import compose.icons.feathericons.Minimize2
 import compose.icons.feathericons.Mic
 import compose.icons.feathericons.Type
 import compose.icons.feathericons.Volume2
+import com.aharou.feature.agent.presentation.component.ModelReasoningEffortSheet
+import com.aharou.feature.settings.data.repository.ModelReasoningEffortRepository
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
@@ -592,6 +590,9 @@ internal fun ModelSelectionSheet(
     currentProviderId: String,
     currentModel: String,
     modelMetadata: Map<String, ModelMetadata>,
+    currentReasoningEffort: com.aharou.feature.agent.domain.model.ReasoningEffort? = null,
+    currentReasoningEffortEnabled: Boolean = true,
+    onReasoningEffortChange: ((String, String, com.aharou.feature.agent.domain.model.ReasoningEffort) -> Unit)? = null,
     onSelect: (providerId: String, model: String) -> Unit,
     onClear: (() -> Unit)?,
     onDismiss: () -> Unit,
@@ -609,6 +610,10 @@ internal fun ModelSelectionSheet(
     var customMetadata by remember { mutableStateOf<Map<String, ModelMetadata>>(emptyMap()) }
     LaunchedEffect(Unit) { customMetadata = customMetadataStore.all() }
     var searchQuery by remember { mutableStateOf("") }
+    var reasoningModel by remember { mutableStateOf<Pair<String, String>?>(null) }
+    var reasoningEffort by remember { mutableStateOf(com.aharou.feature.agent.domain.model.ReasoningEffort.DEFAULT) }
+    val reasoningStore = remember(context) { ModelReasoningEffortRepository(context.applicationContext) }
+    val savedEfforts = remember { mutableStateMapOf<Pair<String, String>, com.aharou.feature.agent.domain.model.ReasoningEffort>() }
     var collapsedProviderIds by remember { mutableStateOf(collapseStore.collapsedProviderIds()) }
 
     val modelTester = rememberModelTester()
@@ -771,7 +776,18 @@ internal fun ModelSelectionSheet(
                                                     modelMetadata[modelMetadataKey(provider.id, model)],
                                                     customMetadata[modelMetadataKey(provider.id, model)]
                                                 ),
+                                                providerId = provider.id,
                                                 testState = testStates[provider.id to model],
+                                                currentEffort = savedEfforts[provider.id to model]
+                                                    ?: if (provider.id == currentProviderId && model == currentModel) currentReasoningEffort
+                                                    else reasoningStore.get(provider.id, model)?.let {
+                                                        runCatching { com.aharou.feature.agent.domain.model.ReasoningEffort.valueOf(it) }.getOrNull()
+                                                    } ?: com.aharou.feature.agent.domain.model.ReasoningEffort.DEFAULT,
+                                                onEffortChange = onReasoningEffortChange,
+                                                onOpenEffort = { pId, selectedModel, effort ->
+                                                    reasoningModel = pId to selectedModel
+                                                    reasoningEffort = effort
+                                                },
                                                 onTest = { startTest(provider, model) },
                                                 onClick = { onSelect(provider.id, model) }
                                             )
@@ -785,15 +801,43 @@ internal fun ModelSelectionSheet(
             }
         }
     }
+    reasoningModel?.let { (providerId, model) ->
+        val canChange = currentReasoningEffortEnabled || providerId != currentProviderId || model != currentModel
+        val metadata = mergeModelMetadata(
+            model,
+            modelMetadata[modelMetadataKey(providerId, model)],
+            customMetadata[modelMetadataKey(providerId, model)]
+        )
+        ModelReasoningEffortSheet(
+            model = model,
+            effort = reasoningEffort,
+            modelMetadata = metadata,
+            enabled = canChange,
+            onChange = { effort ->
+                if (canChange) {
+                    reasoningStore.set(providerId, model, effort.name)
+                    savedEfforts[providerId to model] = effort
+                    reasoningEffort = effort
+                    onReasoningEffortChange?.invoke(providerId, model, effort)
+                    reasoningModel = null
+                }
+            },
+            onDismiss = { reasoningModel = null }
+        )
+    }
 }
 
 @Composable
 private fun ModelSelectionRow(
+    providerId: String,
     model: String,
     alias: String?,
     selected: Boolean,
     metadata: ModelMetadata?,
     testState: ModelTestRowState?,
+    currentEffort: com.aharou.feature.agent.domain.model.ReasoningEffort?,
+    onEffortChange: ((String, String, com.aharou.feature.agent.domain.model.ReasoningEffort) -> Unit)?,
+    onOpenEffort: (String, String, com.aharou.feature.agent.domain.model.ReasoningEffort) -> Unit,
     onTest: () -> Unit,
     onClick: () -> Unit,
     modifier: Modifier = Modifier
@@ -821,7 +865,10 @@ private fun ModelSelectionRow(
                 overflow = TextOverflow.Ellipsis
             )
             Spacer(Modifier.height(4.dp))
-            ModelMetadataTags(metadata)
+            val visibleEffort = currentEffort.takeIf { onEffortChange != null }
+            ModelSelectionTags(metadata, visibleEffort) {
+                onOpenEffort(providerId, model, visibleEffort ?: com.aharou.feature.agent.domain.model.ReasoningEffort.DEFAULT)
+            }
             (testState as? ModelTestRowState.Done)?.let { done ->
                 Spacer(Modifier.height(2.dp))
                 ModelTestResultLine(result = done.result)
@@ -846,84 +893,6 @@ private fun ModelSelectionRow(
         }
     }
 }
-
-@Composable
-@OptIn(ExperimentalLayoutApi::class)
-private fun ModelMetadataTags(metadata: ModelMetadata?) {
-    FlowRow(
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp)
-    ) {
-        if (metadata != null) {
-            if (metadata.supportsVision) {
-                ModelTag(text = "Image", isHighlight = true)
-            }
-            if (metadata.supportsTools) {
-                ModelTag(text = "Tools")
-            }
-            val input = metadata.inputTokens?.takeIf { it > 0 } ?: metadata.contextTokens.takeIf { it > 0 }
-            if (input != null) {
-                ModelTag(text = formatTokenLimit(input), icon = FeatherIcons.ArrowUp)
-            }
-            metadata.outputTokens?.takeIf { it > 0 }?.let { output ->
-                ModelTag(text = formatTokenLimit(output), icon = FeatherIcons.ArrowDown)
-            }
-        }
-    }
-}
-
-@Composable
-private fun ModelTag(
-    text: String,
-    isHighlight: Boolean = false,
-    icon: androidx.compose.ui.graphics.vector.ImageVector? = null
-) {
-    val backgroundColor = if (isHighlight) {
-        MaterialTheme.colorScheme.primaryContainer
-    } else {
-        MaterialTheme.colorScheme.surfaceVariant
-    }
-    val textColor = if (isHighlight) {
-        MaterialTheme.colorScheme.onPrimaryContainer
-    } else {
-        MaterialTheme.colorScheme.onSurfaceVariant
-    }
-
-    Surface(
-        color = backgroundColor,
-        shape = RoundedCornerShape(50),
-        modifier = Modifier.padding(end = 4.dp)
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            if (icon != null) {
-                Icon(
-                    imageVector = icon,
-                    contentDescription = null,
-                    modifier = Modifier.size(12.dp),
-                    tint = textColor
-                )
-                Spacer(Modifier.width(4.dp))
-            }
-            Text(
-                text = text,
-                style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
-                color = textColor
-            )
-        }
-    }
-}
-
-private fun formatTokenLimit(tokens: Int): String =
-    when {
-        tokens >= 1_000_000 && tokens % 1_000_000 == 0 -> "${tokens / 1_000_000}M"
-        tokens >= 1_000_000 -> "${tokens / 1_000_000.0}".trimDecimal() + "M"
-        tokens >= 1_000 && tokens % 1_000 == 0 -> "${tokens / 1_000}K"
-        tokens >= 1_000 -> "${tokens / 1_000.0}".trimDecimal() + "K"
-        else -> tokens.toString()
-    }
 
 /**
  * 判断模型名是否属于「语音模型」（语音转文字 / 文字转语音）。

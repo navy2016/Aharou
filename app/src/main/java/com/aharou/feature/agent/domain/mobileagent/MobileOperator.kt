@@ -19,7 +19,6 @@ import com.aharou.feature.agent.domain.provider.fixedTemperature
 import com.aharou.feature.agent.domain.session.SessionUseCase
 import com.aharou.feature.settings.data.remote.ModelMetadataService
 import com.aharou.feature.settings.data.repository.DefaultModelSettingsRepository
-import com.aharou.feature.settings.data.repository.GeneralSettingsRepository
 import com.aharou.feature.settings.data.repository.ProviderKeyRotator
 import com.aharou.feature.settings.domain.model.AIProviderConfig
 import com.aharou.feature.settings.domain.model.ProviderType
@@ -105,7 +104,7 @@ class MobileOperator @Inject constructor(
     private val anthropicApi: AnthropicApi,
     private val geminiApi: GeminiApi,
     private val modelMetadataService: ModelMetadataService,
-    private val generalSettingsRepository: GeneralSettingsRepository,
+    private val providerRequestSettings: com.aharou.feature.agent.domain.provider.ProviderRequestSettings,
     private val defaultModelSettingsRepository: DefaultModelSettingsRepository,
     private val providerKeyRotator: ProviderKeyRotator,
     private val sessionUseCase: SessionUseCase,
@@ -479,13 +478,10 @@ class MobileOperator @Inject constructor(
         provider.providerId = config.id
         // 隐身会话不落 AI 日志（否则明文落到 ai-logs/session-*.log），判定策略与主链路共用一份。
         provider.logSessionId = AILogger.loggableSessionId(sessionId, sessionUseCase::isGhostSession)
-        provider.customHeaders = config.customHeaders
         val metadata = modelMetadataService.resolve(config.id, config.type, config.effectiveModel)
         provider.maxOutputTokens = metadata.outputTokens
         provider.temperature = if (metadata.supportsCustomTemperature) fixedTemperature(config.effectiveModel) else null
-        provider.firstByteTimeoutMs = generalSettingsRepository.firstByteTimeoutMs()
-        provider.streamIdleTimeoutMs = generalSettingsRepository.streamIdleTimeoutMs()
-        provider.maxNetworkRetries = generalSettingsRepository.maxNetworkRetries()
+        providerRequestSettings.apply(provider, config)
         return provider
     }
 

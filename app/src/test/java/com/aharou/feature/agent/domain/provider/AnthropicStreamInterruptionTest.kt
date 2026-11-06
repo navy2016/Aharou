@@ -28,15 +28,31 @@ class AnthropicStreamInterruptionTest {
         override suspend fun createMessage(
             url: String,
             apiKey: String?,
-            version: String,
+            version: String?,
             extraHeaders: Map<String, String>,
             request: AnthropicMessageRequest
         ): AnthropicMessageResponse = unsupportedNonStreaming()
 
+        override suspend fun createMessageCustom(
+            url: String,
+            apiKey: String?,
+            version: String?,
+            extraHeaders: Map<String, String>,
+            request: okhttp3.RequestBody
+        ): AnthropicMessageResponse = unsupportedNonStreaming()
+
+        override fun streamMessageCustom(
+            url: String,
+            apiKey: String?,
+            version: String?,
+            extraHeaders: Map<String, String>,
+            request: okhttp3.RequestBody
+        ): Call<ResponseBody> = stream()
+
         override fun streamMessage(
             url: String,
             apiKey: String?,
-            version: String,
+            version: String?,
             extraHeaders: Map<String, String>,
             request: AnthropicMessageRequest
         ): Call<ResponseBody> = stream()
@@ -117,6 +133,18 @@ class AnthropicStreamInterruptionTest {
             "断流的流不许产出 Final，否则上层会把残缺内容当完整回复",
             chunks.filterIsInstance<AIStreamChunk.Final>().isEmpty()
         )
+    }
+
+    @Test
+    fun streamApiErrorRetainsCodeForEnhancedRetry() = runTest {
+        val chunks = mutableListOf<AIStreamChunk>()
+        val error = collectInto(chunks) {
+            sse("""{"type":"error","error":{"type":"overloaded_error","message":"overloaded"}}""")
+        }
+        assertTrue(error is StreamApiException)
+        assertEquals("overloaded_error", (error as StreamApiException).code)
+        assertEquals("overloaded", error.message)
+        assertTrue(chunks.none { it is AIStreamChunk.Final })
     }
 
     @Test

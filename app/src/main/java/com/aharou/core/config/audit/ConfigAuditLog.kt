@@ -5,6 +5,8 @@ import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import com.aharou.core.util.FileLogger
+import com.aharou.core.config.isCustomRequestPath
+import com.aharou.core.security.KeystoreCipher
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -42,6 +44,8 @@ class ConfigAuditLog private constructor(context: Context) {
     /** Insert a new audit entry. Caps the table at [MAX_ROWS] in the same tx. */
     @Synchronized
     fun append(entry: ConfigAuditEntry) {
+        val oldValue = if (isCustomRequestPath(entry.key)) KeystoreCipher.encryptString(entry.oldValueJSON) else entry.oldValueJSON
+        val newValue = if (isCustomRequestPath(entry.key)) KeystoreCipher.encryptString(entry.newValueJSON) else entry.newValueJSON
         val db = helper.writableDatabase
         db.beginTransactionNonExclusive()
         try {
@@ -52,8 +56,8 @@ class ConfigAuditLog private constructor(context: Context) {
                 if (entry.sessionId != null) put(COL_SESSION_ID, entry.sessionId) else putNull(COL_SESSION_ID)
                 put(COL_SCOPE, entry.scope)
                 put(COL_KEY, entry.key)
-                put(COL_OLD_VALUE, entry.oldValueJSON)
-                put(COL_NEW_VALUE, entry.newValueJSON)
+                put(COL_OLD_VALUE, oldValue)
+                put(COL_NEW_VALUE, newValue)
                 if (entry.confirmedAt != null) put(COL_CONFIRMED_AT, entry.confirmedAt) else putNull(COL_CONFIRMED_AT)
                 put(COL_STATUS, entry.status.raw)
                 if (entry.revertOf != null) put(COL_REVERT_OF, entry.revertOf) else putNull(COL_REVERT_OF)
@@ -154,8 +158,8 @@ class ConfigAuditLog private constructor(context: Context) {
             sessionId = c.getStringOrNull(COL_SESSION_ID_IDX),
             scope = c.getString(COL_SCOPE_IDX),
             key = c.getString(COL_KEY_IDX),
-            oldValueJSON = c.getString(COL_OLD_VALUE_IDX),
-            newValueJSON = c.getString(COL_NEW_VALUE_IDX),
+            oldValueJSON = KeystoreCipher.decryptString(c.getString(COL_OLD_VALUE_IDX)),
+            newValueJSON = KeystoreCipher.decryptString(c.getString(COL_NEW_VALUE_IDX)),
             confirmedAt = if (c.isNull(COL_CONFIRMED_AT_IDX)) null else c.getLong(COL_CONFIRMED_AT_IDX),
             status = status,
             revertOf = c.getStringOrNull(COL_REVERT_OF_IDX),

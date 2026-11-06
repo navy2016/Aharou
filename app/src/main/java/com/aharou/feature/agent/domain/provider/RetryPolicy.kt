@@ -27,6 +27,7 @@ import javax.net.ssl.SSLException
 import kotlin.coroutines.coroutineContext
 import kotlin.math.min
 import kotlin.math.pow
+import kotlin.random.Random
 
 /**
  * 参考 opencode 的网络请求重试策略：指数退避，仅针对瞬时故障。
@@ -392,16 +393,70 @@ fun extractRetryAfterMillis(t: Throwable): Long? {
  *
  * 对 429（速率限制）尤其重要——尊重服务端要求，避免频繁重试加剧限制。
  */
-fun retryDelayMillis(retryIndex: Int, error: Throwable): Long {
+fun retryDelayMillis(
+    retryIndex: Int,
+    error: Throwable,
+    options: AutoRetryOptions? = null
+): Long {
     val serverDelay = extractRetryAfterMillis(error)
+    val normalized = options?.normalized()
     if (serverDelay != null && serverDelay > 0) {
-        return min(serverDelay, MAX_RETRY_AFTER_MILLIS)
+        val cap = normalized?.maxDelayMs ?: MAX_RETRY_AFTER_MILLIS
+        return min(serverDelay, min(cap, MAX_RETRY_AFTER_MILLIS))
     }
-    return exponentialDelayMillis(retryIndex)
+    if (normalized == null) return exponentialDelayMillis(retryIndex)
+
+    val raw = (normalized.initialDelayMs * normalized.multiplier.pow(retryIndex.toDouble()))
+        .toLong()
+        .coerceAtMost(normalized.maxDelayMs)
+    if (!normalized.jitter || raw <= 0L) return raw
+    val factor = Random.nextDouble(0.8, 1.2)
+    return (raw * factor).toLong().coerceAtMost(normalized.maxDelayMs)
 }
 
 /** Retry-After 头部值的上限，防止服务端返回过大的值导致无限等待。 */
 private const val MAX_RETRY_AFTER_MILLIS = 60_000L
+
+private fun Throwable.retryText(): String {
+    val messages = generateSequence(this) { it.cause }
+        .take(5).joinToString(" ") { it.message.orEmpty() }
+    val streamCode = (this as? StreamApiException)?.code.orEmpty()
+    val detail = (this as? HttpException)?.response()?.errorBody()?.let { body ->
+        runCatching {
+            val source = body.source()
+            source.request(8_192)
+            source.buffer.clone().readUtf8()
+        }.getOrDefault("")
+    }.orEmpty()
+    return "$messages $streamCode $detail".lowercase(Locale.ROOT)
+}
+
+private fun AutoRetryOptions.matchesStopKeyword(text: String): Boolean =
+    stopKeywords.any { it.lowercase(Locale.ROOT) in text }
+
+/** 停止关键字优先于网络、重试关键字与状态码。 */
+fun shouldRetryWithOptions(error: Throwable, options: AutoRetryOptions): Boolean {
+    if (error is CancellationException || error is javax.net.ssl.SSLHandshakeException ||
+        error is java.security.cert.CertificateException) return false
+    val normalized = options.normalized()
+    val text = error.retryText()
+    if (normalized.matchesStopKeyword(text)) return false
+    val networkError = error is SocketTimeoutException || error is InterruptedIOException ||
+        error is UnknownHostException || error is ConnectException || error is SSLException || error is IOException
+    if (networkError) return normalized.retryOnNetworkError
+    if (normalized.retryKeywords.any { it.lowercase(Locale.ROOT) in text }) return true
+    val statusCode = when (error) {
+        is HttpException -> error.code()
+        is StreamApiException -> when (error.code?.lowercase(Locale.ROOT)) {
+            "server_error", "internal_error" -> 500
+            "server_is_overloaded", "overloaded" -> 503
+            "rate_limit_exceeded", "rate_limit_error" -> 429
+            else -> null
+        }
+        else -> null
+    }
+    return statusCode != null && statusCode in normalized.retryStatusCodes
+}
 
 /**
  * 供重试日志使用的错误描述：非 HTTP 错误保持 `类名 message`；[HttpException] 额外读出并附上
@@ -431,8 +486,11 @@ suspend fun <T> retryStaircase(
     maxRetries: Int = MAX_NETWORK_RETRIES,
     onKeyFailure: (suspend (Throwable, Boolean) -> Boolean)? = null,
     onRetry: (suspend (attempt: Int, maxRetries: Int, error: RetryErrorInfo) -> Unit)? = null,
+    retryOptions: AutoRetryOptions? = null,
     block: suspend () -> T
 ): T {
+    val normalizedOptions = retryOptions?.normalized()?.takeIf { it.enabled }
+    val effectiveMaxRetries = normalizedOptions?.maxRetries ?: maxRetries
     var attempt = 0
     while (true) {
         try {
@@ -441,20 +499,21 @@ suspend fun <T> retryStaircase(
             throw e
         } catch (e: Throwable) {
             coroutineContext.ensureActive()
+            if (normalizedOptions?.matchesStopKeyword(e.retryText()) == true) throw e
             if (!isRetriableNetworkError(e)) {
                 if (onKeyFailure?.invoke(e, true) == true) {
                     attempt = 0
                     continue
                 }
-                // 限流没有“换 Key”这条路时不能直接抛（单 Key 用户会彻底失败），
-                // 落到下面的退避重试上。
-                if (!isRateLimitError(e)) throw e
+                // 单 Key 限流时仍允许退避重试；增强策略则由状态码/关键字决定。
+                if (normalizedOptions == null && !isRateLimitError(e)) throw e
             }
-            if (attempt >= maxRetries) throw e
+            if (normalizedOptions != null && !shouldRetryWithOptions(e, normalizedOptions)) throw e
+            if (attempt >= effectiveMaxRetries) throw e
             awaitNetworkIfOffline()
-            val wait = retryDelayMillis(attempt, e)
-            FileLogger.w(TAG, "网络请求失败，第 ${attempt + 1}/$maxRetries 次重试（等待 ${wait}ms）: ${e.describeForRetryLog()}")
-            onRetry?.invoke(attempt + 1, maxRetries, e.toRetryErrorInfo())
+            val wait = retryDelayMillis(attempt, e, normalizedOptions)
+            FileLogger.w(TAG, "网络请求失败，第 ${attempt + 1}/$effectiveMaxRetries 次重试（等待 ${wait}ms）: ${e.describeForRetryLog()}")
+            onRetry?.invoke(attempt + 1, effectiveMaxRetries, e.toRetryErrorInfo())
             attempt++
             if (wait > 0) delay(wait)
         }
@@ -477,8 +536,11 @@ suspend fun streamWithStaircaseRetry(
     maxRetries: Int = MAX_NETWORK_RETRIES,
     onKeyFailure: (suspend (Throwable, Boolean) -> Boolean)? = null,
     attemptOnce: suspend (onContent: () -> Unit) -> Unit,
-    onRetry: (suspend (attempt: Int, maxRetries: Int, error: RetryErrorInfo) -> Unit)? = null
+    onRetry: (suspend (attempt: Int, maxRetries: Int, error: RetryErrorInfo) -> Unit)? = null,
+    retryOptions: AutoRetryOptions? = null
 ) {
+    val normalizedOptions = retryOptions?.normalized()?.takeIf { it.enabled }
+    val effectiveMaxRetries = normalizedOptions?.maxRetries ?: maxRetries
     var attempt = 0
     while (true) {
         var receivedContent = false
@@ -489,19 +551,21 @@ suspend fun streamWithStaircaseRetry(
             throw e
         } catch (e: Throwable) {
             coroutineContext.ensureActive()
+            if (normalizedOptions?.matchesStopKeyword(e.retryText()) == true) throw e
             if (!isRetriableNetworkError(e)) {
                 if (onKeyFailure?.invoke(e, !receivedContent) == true) {
                     attempt = 0
                     continue
                 }
-                // 同上：单 Key 撞限流时退避重试；已吐过字则不重发（避免用户看到重复内容）。
-                if (!isRateLimitError(e) || receivedContent) throw e
+                // 单 Key 限流时仍允许退避重试；已吐过字则不能重复发送已有内容。
+                if (normalizedOptions == null && (!isRateLimitError(e) || receivedContent)) throw e
             }
-            if (attempt >= maxRetries) throw e
+            if (normalizedOptions != null && (!shouldRetryWithOptions(e, normalizedOptions) || receivedContent)) throw e
+            if (attempt >= effectiveMaxRetries) throw e
             awaitNetworkIfOffline()
-            val wait = retryDelayMillis(attempt, e)
-            FileLogger.w(TAG, "流式请求失败，第 ${attempt + 1}/$maxRetries 次重试（等待 ${wait}ms）: ${e.describeForRetryLog()}")
-            onRetry?.invoke(attempt + 1, maxRetries, e.toRetryErrorInfo())
+            val wait = retryDelayMillis(attempt, e, normalizedOptions)
+            FileLogger.w(TAG, "流式请求失败，第 ${attempt + 1}/$effectiveMaxRetries 次重试（等待 ${wait}ms）: ${e.describeForRetryLog()}")
+            onRetry?.invoke(attempt + 1, effectiveMaxRetries, e.toRetryErrorInfo())
             attempt++
             if (wait > 0) delay(wait)
         }

@@ -179,3 +179,14 @@ jobs:
       - name: Fail when unit tests failed
         if: always()
         run: test ! -f /tmp/unit-tests-failed
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: Aharou-universal-debug-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            app/build/outputs/apk/universal/debug/app-universal-debug.apk
+            app/build/outputs/apk/universal/debug/output-metadata.json
+          retention-days: 7
+          compression-level: 0
+          if-no-files-found: error

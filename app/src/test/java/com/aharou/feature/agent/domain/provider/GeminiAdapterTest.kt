@@ -33,6 +33,34 @@ class GeminiAdapterTest {
             return JsonParser.parseString(responseJson).asJsonObject
         }
 
+        override suspend fun generateContentCustom(
+            url: String,
+            apiKey: String?,
+            extraHeaders: Map<String, String>,
+            request: okhttp3.RequestBody
+        ): JsonObject = throw UnsupportedOperationException()
+
+        override fun streamGenerateContentCustom(
+            url: String,
+            apiKey: String?,
+            extraHeaders: Map<String, String>,
+            request: okhttp3.RequestBody
+        ): Call<ResponseBody> = throw UnsupportedOperationException()
+
+        override suspend fun createInteractionCustom(
+            url: String,
+            apiKey: String?,
+            extraHeaders: Map<String, String>,
+            request: okhttp3.RequestBody
+        ): JsonObject = throw UnsupportedOperationException()
+
+        override fun streamInteractionCustom(
+            url: String,
+            apiKey: String?,
+            extraHeaders: Map<String, String>,
+            request: okhttp3.RequestBody
+        ): Call<ResponseBody> = throw UnsupportedOperationException()
+
         override fun streamGenerateContent(
             url: String,
             apiKey: String?,

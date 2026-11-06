@@ -46,6 +46,7 @@ class OpenAIAdapter @Inject constructor(
     override var firstByteTimeoutMs: Long = FIRST_BYTE_TIMEOUT_MS
     override var streamIdleTimeoutMs: Long = 0L
     override var maxNetworkRetries: Int = MAX_NETWORK_RETRIES
+    override var autoRetryOptions: AutoRetryOptions = AutoRetryOptions()
 
     /**
      * 是否在 Chat Completion 路径发送 `prompt_cache_key`（缓存 shard 路由）。
@@ -56,6 +57,7 @@ class OpenAIAdapter @Inject constructor(
 
     /** 自定义请求头：占位符替换后写出，完全覆盖同名默认头。 */
     override var customHeaders: Map<String, String> = emptyMap()
+    override var customBody: com.google.gson.JsonObject? = null
 
     /** Codex 标识用的安装 / 会话 id：进程内保持稳定，避免每次请求都换新的。 */
     private val codexInstallationId: String by lazy { java.util.UUID.randomUUID().toString() }
@@ -70,6 +72,9 @@ class OpenAIAdapter @Inject constructor(
 
     // null 时请求体不带 temperature（Gson 跳过 null 字段），交由服务端默认。
     override var temperature: Float? = null
+
+    private fun authorization(): String? =
+        if (customHeaders.containsHeader("Authorization")) null else bearerTokenOrNull(apiKey)
 
     private fun extraHeaders(): Map<String, String> {
         val base = resolveCustomHeaders(customHeaders, logSessionId, apiKey)
@@ -139,9 +144,15 @@ class OpenAIAdapter @Inject constructor(
         val response = try {
             retryStaircase(
                 maxRetries = maxNetworkRetries,
-                onKeyFailure = { e, _ -> switchKeyOnFailure(e, triedKeys) != null }
+                onKeyFailure = { e, _ -> switchKeyOnFailure(e, triedKeys) != null },
+                retryOptions = autoRetryOptions
             ) {
-                api.createChatCompletion(url = url, authorization = bearerTokenOrNull(apiKey), extraHeaders = extraHeaders(), request = request)
+                val custom = customRequestBody(request)
+                if (custom == null) {
+                    api.createChatCompletion(url = url, authorization = authorization(), extraHeaders = extraHeaders(), request = request)
+                } else {
+                    api.createChatCompletionCustom(url = url, authorization = authorization(), extraHeaders = extraHeaders(), request = custom)
+                }
             }
         } catch (e: CancellationException) {
             throw e
@@ -348,9 +359,15 @@ class OpenAIAdapter @Inject constructor(
         val response = try {
             retryStaircase(
                 maxRetries = maxNetworkRetries,
-                onKeyFailure = { e, _ -> switchKeyOnFailure(e, triedKeys) != null }
+                onKeyFailure = { e, _ -> switchKeyOnFailure(e, triedKeys) != null },
+                retryOptions = autoRetryOptions
             ) {
-                api.createResponses(url = url, authorization = bearerTokenOrNull(apiKey), extraHeaders = extraHeaders(), request = request)
+                val custom = customRequestBody(request)
+                if (custom == null) {
+                    api.createResponses(url = url, authorization = authorization(), extraHeaders = extraHeaders(), request = request)
+                } else {
+                    api.createResponsesCustom(url = url, authorization = authorization(), extraHeaders = extraHeaders(), request = custom)
+                }
             }
         } catch (e: CancellationException) {
             throw e
@@ -453,12 +470,13 @@ class OpenAIAdapter @Inject constructor(
             var streamCachedInputTokens = 0
             var streamCacheCreationTokens = 0
 
-            val body = firstContent.awaitBody(api.streamChatCompletion(
-                url = url,
-                authorization = bearerTokenOrNull(apiKey),
-                extraHeaders = extraHeaders(),
-                request = request
-            ))
+            val custom = customRequestBody(request)
+            val call = if (custom == null) {
+                api.streamChatCompletion(url = url, authorization = authorization(), extraHeaders = extraHeaders(), request = request)
+            } else {
+                api.streamChatCompletionCustom(url = url, authorization = authorization(), extraHeaders = extraHeaders(), request = custom)
+            }
+            val body = firstContent.awaitBody(call)
 
             body.use { rb ->
                 firstContent.attach { rb.close() }
@@ -587,7 +605,8 @@ class OpenAIAdapter @Inject constructor(
             send(AIStreamChunk.Final(sanitizeTruncatedToolCalls(AIResponse(content = textBuilder.toString(), toolCalls = toolCalls, stopReason = finishReason, inputTokens = streamInputTokens, outputTokens = streamOutputTokens, cachedInputTokens = streamCachedInputTokens, cacheCreationTokens = streamCacheCreationTokens, images = streamedImages))))
                     }
             },
-            onRetry = { attempt, max, error -> send(AIStreamChunk.Retrying(attempt, max, error)) }
+            onRetry = { attempt, max, error -> send(AIStreamChunk.Retrying(attempt, max, error)) },
+                retryOptions = autoRetryOptions
             )
         } catch (e: CancellationException) {
             throw e
@@ -634,12 +653,13 @@ class OpenAIAdapter @Inject constructor(
                     withFirstContentTimeout(firstByteTimeoutMs) { firstContent ->
                     val acc = ResponsesStreamAccumulator()
 
-                    val body = firstContent.awaitBody(api.streamResponses(
-                        url = url,
-                        authorization = bearerTokenOrNull(apiKey),
-                        extraHeaders = extraHeaders(),
-                        request = request
-                    ))
+                    val custom = customRequestBody(request)
+                    val call = if (custom == null) {
+                        api.streamResponses(url = url, authorization = authorization(), extraHeaders = extraHeaders(), request = request)
+                    } else {
+                        api.streamResponsesCustom(url = url, authorization = authorization(), extraHeaders = extraHeaders(), request = custom)
+                    }
+                    val body = firstContent.awaitBody(call)
 
                     body.use { rb ->
                         firstContent.attach { rb.close() }
@@ -713,7 +733,8 @@ class OpenAIAdapter @Inject constructor(
                     send(AIStreamChunk.Final(sanitizeTruncatedToolCalls(acc.toResponse())))
                     }
                 },
-                onRetry = { attempt, max, error -> send(AIStreamChunk.Retrying(attempt, max, error)) }
+                onRetry = { attempt, max, error -> send(AIStreamChunk.Retrying(attempt, max, error)) },
+                retryOptions = autoRetryOptions
             )
         } catch (e: CancellationException) {
             throw e

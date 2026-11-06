@@ -1,5 +1,6 @@
 package com.aharou.feature.agent.presentation.component
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -53,7 +54,7 @@ internal fun StewardEntryButton(
     val state by panelViewModel.state.collectAsStateWithLifecycle()
     var showSheet by remember { mutableStateOf(false) }
 
-    IconButton(onClick = { showSheet = true }, modifier = modifier.size(36.dp)) {
+    IconButton(onClick = { panelViewModel.refreshAutoRetryOptions(); showSheet = true }, modifier = modifier.size(36.dp)) {
         Icon(
             imageVector = Icons.Default.SmartToy,
             contentDescription = stringResource(R.string.steward_entry_title),
@@ -88,6 +89,17 @@ internal fun StewardSheet(
     val maxLoops by panelViewModel.maxLoops.collectAsStateWithLifecycle()
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val sliderEnabled = state.enabled && !unlimited
+    val retryOptions by panelViewModel.autoRetryOptions.collectAsStateWithLifecycle()
+    var showRetrySettings by remember { mutableStateOf(false) }
+
+    if (showRetrySettings) {
+        AutoRetrySettingsSheet(
+            options = retryOptions,
+            onSave = { panelViewModel.setAutoRetryOptions(it); showRetrySettings = false },
+            onDismiss = { showRetrySettings = false }
+        )
+        return
+    }
 
     AdaptiveModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
         Column(
@@ -176,6 +188,17 @@ internal fun StewardSheet(
             )
 
             Spacer(Modifier.height(Spacing.md))
+            Row(
+                modifier = Modifier.fillMaxWidth().clickable { showRetrySettings = true }.padding(vertical = Spacing.sm),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(stringResource(R.string.retry_enhanced_title), modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    stringResource(if (retryOptions.enabled) R.string.retry_enabled else R.string.retry_disabled),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
             Text(
                 text = stringResource(R.string.steward_status_label, statusLabel(state), state.loopCount),
                 style = MaterialTheme.typography.bodySmall,

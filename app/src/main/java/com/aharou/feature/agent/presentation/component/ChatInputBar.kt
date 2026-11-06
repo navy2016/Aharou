@@ -120,7 +120,6 @@ import com.aharou.feature.agent.presentation.QueuedRequest
 import com.aharou.feature.settings.domain.model.AIProviderConfig
 import com.aharou.feature.settings.domain.model.ModelMetadata
 import com.aharou.feature.settings.domain.model.ProviderDashboardState
-import com.aharou.feature.settings.domain.model.modelMetadataKey
 import com.aharou.feature.workspace.presentation.WorkspaceViewModel
 import com.aharou.feature.workspace.presentation.component.WorkspaceIconButton
 import compose.icons.FeatherIcons
@@ -133,6 +132,7 @@ import compose.icons.feathericons.Minimize
 import compose.icons.feathericons.Plus
 import compose.icons.feathericons.Square
 import compose.icons.feathericons.Shield
+import compose.icons.feathericons.Terminal
 import kotlinx.coroutines.launch
 
 /** 输入框区域蒙版高度：盖住圆角容器，滚动内容滑入时被渐变遮罩；随键盘（IME）上移。 */
@@ -177,6 +177,8 @@ internal fun ChatInputBar(
     onToggleMode: (AgentMode) -> Unit,
     reasoningEffort: ReasoningEffort,
     onReasoningEffortChange: (ReasoningEffort) -> Unit,
+    onModelReasoningEffortChange: (String, String, ReasoningEffort) -> Unit = { _, _, effort -> onReasoningEffortChange(effort) },
+    onNavigateToTerminal: () -> Unit = {},
     pendingAttachments: List<PendingUploadAttachment>,
     onRemoveAttachment: (Int) -> Unit,
     onReadAttachment: suspend (String) -> String?,
@@ -587,6 +589,9 @@ internal fun ChatInputBar(
                             providers = providers,
                             modelMetadata = modelMetadata,
                             onSelectModel = onSelectModel,
+                            reasoningEffort = reasoningEffort,
+                            onReasoningEffortChange = onModelReasoningEffortChange,
+                            currentReasoningEffortEnabled = !isBusy,
                             forceOpenSheet = forceOpenModelSheet,
                             onSelectSuccessInOnboarding = onSelectModelInOnboarding,
                             onSheetDismiss = onModelSheetDismiss,
@@ -602,15 +607,15 @@ internal fun ChatInputBar(
                             )
                         }
 
-                        // 档位一律全列：models.dev 的声明常缺档（例如只给 low/high/max），
-                        // 按声明过滤会让用户选不到「中」这类档位；声明只用来在弹层里提示「未必支持」。
-                        ReasoningEffortSelector(
-                            effort = reasoningEffort,
-                            availableEfforts = ReasoningEffort.entries,
-                            onChange = onReasoningEffortChange,
-                            enabled = !isBusy,
-                            modelMetadata = activeProvider?.let { modelMetadata[modelMetadataKey(it.id, it.effectiveModel)] }
-                        )
+                        IconButton(onClick = onNavigateToTerminal, modifier = Modifier.size(36.dp)) {
+                            Icon(
+                                FeatherIcons.Terminal,
+                                contentDescription = stringResource(R.string.chat_open_terminal),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+
                     }
                     val callContext = LocalContext.current
                     val callRunning by VoiceCallService.running.collectAsState()

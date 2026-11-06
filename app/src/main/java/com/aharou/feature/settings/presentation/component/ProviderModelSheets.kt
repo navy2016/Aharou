@@ -110,6 +110,7 @@ import com.aharou.core.ui.AppTextField
 import com.aharou.core.ui.FloatingTabBar
 import com.aharou.core.ui.FloatingTabItem
 import com.aharou.feature.settings.data.local.CustomModelMetadataStore
+import com.aharou.feature.settings.data.local.CustomRequestOverride
 import com.aharou.feature.settings.data.local.ProviderPreset
 import com.aharou.feature.settings.domain.model.AIProviderConfig
 import com.aharou.feature.settings.domain.model.KeyRotationStrategy
@@ -172,7 +173,8 @@ internal fun AddModelSheet(
     defaultAlias: String? = null,
     /** 所属供应商 id：模型自定义图标的文件名要带上它，否则两个供应商的同名模型会共用一个文件。 */
     providerId: String,
-    onSave: (String, ModelMetadata) -> Unit,
+    initialRequest: CustomRequestOverride,
+    onSave: (String, ModelMetadata, CustomRequestOverride) -> Unit,
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
@@ -181,6 +183,8 @@ internal fun AddModelSheet(
     val screenHeight = configuration.screenHeightDp.dp
     val flingFix = rememberSheetFlingFix(sheetState)
     var modelName by remember { mutableStateOf(initial?.id ?: "") }
+    var customRequest by remember { mutableStateOf(initialRequest) }
+    var showCustomRequest by remember { mutableStateOf(false) }
     // 显示名：列表里给模型起的别名，留空就显示原始模型名。
     var displayName by remember { mutableStateOf(initial?.displayName?.takeIf { it != initial.id } ?: "") }
     var customIcon by remember { mutableStateOf(initial?.customIcon ?: "") }
@@ -224,7 +228,7 @@ internal fun AddModelSheet(
             supportsTools = supportsTools,
             supportsReasoning = supportsReasoning
         )
-        onSave(trimmedModel, meta)
+        onSave(trimmedModel, meta, customRequest)
     }
 
     val iconPickLauncher = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
@@ -426,6 +430,11 @@ internal fun AddModelSheet(
                     }
                 }
 
+                SettingsRow(
+                    title = stringResource(R.string.custom_request_title),
+                    subtitle = stringResource(R.string.custom_request_model),
+                    onClick = { showCustomRequest = true }
+                )
                 Spacer(modifier = Modifier.height(8.dp))
             }
 
@@ -451,6 +460,13 @@ internal fun AddModelSheet(
                 }
             }
         }
+    }
+    if (showCustomRequest) {
+        CustomRequestSheet(
+            initial = customRequest,
+            onSave = { customRequest = it; showCustomRequest = false },
+            onDismiss = { showCustomRequest = false }
+        )
     }
 }
 

@@ -5,6 +5,8 @@ import com.aharou.feature.agent.domain.model.AgentMessage
 import com.aharou.feature.agent.domain.tool.AgentTool
 import com.aharou.feature.agent.domain.tool.ToolCall
 import kotlinx.coroutines.flow.Flow
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 
 data class AIResponse(
     val content: String,
@@ -152,6 +154,9 @@ interface AIProvider {
      */
     var customHeaders: Map<String, String>
 
+    /** 与请求体按层级合并的自定义 JSON 字段。 */
+    var customBody: com.google.gson.JsonObject?
+
     /**
      * 多 Key 自动切换钩子，由工作流在装配 provider 时注入；为 null 表示不启用（如生图等旁路）。
      * 入参为本次失败异常、当前使用的 Key、本次请求已试过的 Key 集合。返回非 null 表示已切到
@@ -191,6 +196,9 @@ interface AIProvider {
      */
     var maxNetworkRetries: Int
 
+    /** 智能托管里的增强重试策略；关闭时保留原有的网络重试判定。 */
+    var autoRetryOptions: AutoRetryOptions
+
     /**
      * 单轮补全。[tools] 会以提供商的 function-calling 格式真正发给模型，
      * 模型若决定调用工具，结果会出现在返回的 [AIResponse.toolCalls] 中。
@@ -217,6 +225,15 @@ interface AIProvider {
         reasoningEffort: String? = null
     ): Flow<AIStreamChunk>
 }
+
+fun AIProvider.customRequestBody(request: Any): okhttp3.RequestBody? {
+    val body = customBody ?: return null
+    val base = com.google.gson.Gson().toJsonTree(request).asJsonObject
+    return com.aharou.feature.settings.data.local.mergeCustomRequestBody(base, body)
+        .toString().toRequestBody("application/json; charset=UTF-8".toMediaType())
+}
+
+fun Map<String, String>.containsHeader(name: String): Boolean = keys.any { it.equals(name, ignoreCase = true) }
 
 private val VERSION_SEGMENT_REGEX = Regex("""^v\d+.*$""", RegexOption.IGNORE_CASE)
 
