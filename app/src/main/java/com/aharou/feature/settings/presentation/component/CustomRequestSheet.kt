@@ -43,7 +43,7 @@ internal fun CustomRequestSheet(
     onSave: (CustomRequestOverride) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    val gson = remember { GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create() }
+    val gson = remember { GsonBuilder().serializeNulls().setPrettyPrinting().disableHtmlEscaping().create() }
     var headers by remember { mutableStateOf(if (initial.headers.isEmpty()) "" else gson.toJson(initial.headers)) }
     var body by remember { mutableStateOf(initial.body?.let { gson.toJson(it) }.orEmpty()) }
     val headerObject = parseObject(headers)
