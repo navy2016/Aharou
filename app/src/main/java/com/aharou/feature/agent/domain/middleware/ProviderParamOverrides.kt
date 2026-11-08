@@ -21,9 +21,10 @@ fun applyProviderParamOverrides(
     model: String,
     provider: AIProvider,
 ) {
-    val resolved = resolveProviderParameters(rawConfig, providerId, providerType, model, provider.temperature, provider.maxOutputTokens)
-    provider.temperature = resolved.temperature
-    provider.maxOutputTokens = resolved.maxOutputTokens
+    val current = ProviderParameters(provider.temperature, provider.maxOutputTokens)
+    val resolved = resolveProviderParameters(rawConfig, providerId, providerType, model, current.temperature, current.maxOutputTokens)
+    if (resolved.temperature != current.temperature) provider.temperature = resolved.temperature
+    if (resolved.maxOutputTokens != current.maxOutputTokens) provider.maxOutputTokens = resolved.maxOutputTokens
 }
 
 data class ProviderParameters(val temperature: Float?, val maxOutputTokens: Int?)

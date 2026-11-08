@@ -31,6 +31,7 @@ import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.annotation.Config
@@ -38,6 +39,9 @@ import org.robolectric.annotation.Config
 @RunWith(AndroidJUnit4::class)
 @Config(application = Application::class)
 class ReasoningConfigAuditTest {
+    @get:Rule
+    val auditIsolation = ConfigAuditIsolationRule()
+
     private lateinit var context: Context
     private lateinit var log: ConfigAuditLog
     private val prefix = "AICODEENC1:"
@@ -54,12 +58,12 @@ class ReasoningConfigAuditTest {
             if (value.startsWith(prefix)) String(Base64.getDecoder().decode(value.removePrefix(prefix))) else value
         }
         log = ConfigAuditLog.init(context)
+        auditIsolation.assertDatabasePath(context, log)
         log.clearAll()
     }
 
     @After
     fun tearDown() {
-        log.clearAll()
         unmockkObject(KeystoreCipher)
     }
 

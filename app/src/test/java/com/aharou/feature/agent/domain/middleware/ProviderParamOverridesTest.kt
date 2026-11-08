@@ -19,6 +19,7 @@ class ProviderParamOverridesTest {
             "provider", "OPENAI", "model", provider
         )
         verify { provider.temperature = 0.2f }
+        verify(exactly = 0) { provider.maxOutputTokens = any() }
     }
 
     @Test
@@ -28,15 +29,18 @@ class ProviderParamOverridesTest {
             "provider", "ANTHROPIC", "model", provider
         )
         verify { provider.maxOutputTokens = 1024 }
+        verify(exactly = 0) { provider.temperature = any() }
     }
 
     @Test
     fun removeOperation_clearsField() {
+        every { provider.maxOutputTokens } returns 8192
         applyProviderParamOverrides(
             raw("""{"paramOverrides":[{"path":"max_tokens","op":"REMOVE"}]}"""),
             "provider", "GEMINI", "model", provider
         )
         verify { provider.maxOutputTokens = null }
+        verify(exactly = 0) { provider.temperature = any() }
     }
 
     @Test
@@ -56,6 +60,7 @@ class ProviderParamOverridesTest {
             "provider", "OPENAI", "model", provider
         )
         verify(exactly = 0) { provider.temperature = any() }
+        verify(exactly = 0) { provider.maxOutputTokens = any() }
     }
 
     @Test
@@ -66,5 +71,6 @@ class ProviderParamOverridesTest {
             "provider", "OPENAI", "model", provider
         )
         verify(exactly = 0) { provider.temperature = any() }
+        verify(exactly = 0) { provider.maxOutputTokens = any() }
     }
 }
