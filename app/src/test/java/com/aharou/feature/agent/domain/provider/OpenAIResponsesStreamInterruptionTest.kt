@@ -6,6 +6,7 @@ import com.aharou.feature.agent.data.remote.openai.ImageGenerationRequest
 import com.aharou.feature.agent.data.remote.openai.ImageGenerationResponse
 import com.aharou.feature.agent.data.remote.openai.OpenAIApi
 import com.aharou.feature.agent.domain.model.AgentMessage
+import com.google.gson.Gson
 import com.google.gson.JsonObject
 import java.io.IOException
 import kotlinx.coroutines.flow.collect
@@ -41,14 +42,18 @@ class OpenAIResponsesStreamInterruptionTest {
             authorization: String?,
             extraHeaders: Map<String, String>,
             request: okhttp3.RequestBody
-        ): ChatCompletionResponse = unsupportedNonStreaming()
+        ): ChatCompletionResponse = createChatCompletion(
+            url, authorization, extraHeaders, Gson().fromJson(request.decodeJsonObject(), ChatCompletionRequest::class.java)
+        )
 
         override fun streamChatCompletionCustom(
             url: String,
             authorization: String?,
             extraHeaders: Map<String, String>,
             request: okhttp3.RequestBody
-        ): Call<ResponseBody> = unsupportedNonStreaming()
+        ): Call<ResponseBody> = streamChatCompletion(
+            url, authorization, extraHeaders, Gson().fromJson(request.decodeJsonObject(), ChatCompletionRequest::class.java)
+        )
 
         override fun streamChatCompletion(
             url: String,
@@ -76,14 +81,14 @@ class OpenAIResponsesStreamInterruptionTest {
             authorization: String?,
             extraHeaders: Map<String, String>,
             request: okhttp3.RequestBody
-        ): JsonObject = unsupportedNonStreaming()
+        ): JsonObject = createResponses(url, authorization, extraHeaders, request.decodeJsonMap())
 
         override fun streamResponsesCustom(
             url: String,
             authorization: String?,
             extraHeaders: Map<String, String>,
             request: okhttp3.RequestBody
-        ): Call<ResponseBody> = stream()
+        ): Call<ResponseBody> = streamResponses(url, authorization, extraHeaders, request.decodeJsonMap())
 
         override suspend fun createImage(
             url: String,

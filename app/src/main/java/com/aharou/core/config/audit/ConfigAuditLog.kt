@@ -44,8 +44,9 @@ class ConfigAuditLog private constructor(context: Context) {
     /** Insert a new audit entry. Caps the table at [MAX_ROWS] in the same tx. */
     @Synchronized
     fun append(entry: ConfigAuditEntry) {
-        val oldValue = if (isCustomRequestPath(entry.key)) KeystoreCipher.encryptString(entry.oldValueJSON) else entry.oldValueJSON
-        val newValue = if (isCustomRequestPath(entry.key)) KeystoreCipher.encryptString(entry.newValueJSON) else entry.newValueJSON
+        val encrypted = isCustomRequestPath(entry.key)
+        val oldValue = if (encrypted) KeystoreCipher.encryptString(entry.oldValueJSON) else entry.oldValueJSON
+        val newValue = if (encrypted) KeystoreCipher.encryptString(entry.newValueJSON) else entry.newValueJSON
         val db = helper.writableDatabase
         db.beginTransactionNonExclusive()
         try {

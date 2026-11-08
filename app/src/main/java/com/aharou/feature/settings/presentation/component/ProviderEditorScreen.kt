@@ -237,6 +237,8 @@ fun ProviderEditorScreen(
     }
     val customMetadataStore = remember { CustomModelMetadataStore(context.applicationContext) }
     val customRequestStore = remember { CustomRequestStore(context.applicationContext) }
+    val reasoningConfigStore = remember { com.aharou.feature.settings.data.local.ReasoningConfigStore(context.applicationContext) }
+    val reasoningEffortStore = remember { com.aharou.feature.settings.data.repository.ModelReasoningEffortRepository(context.applicationContext) }
     val scope = rememberCoroutineScope()
     var customMetadata by remember { mutableStateOf<Map<String, ModelMetadata>>(emptyMap()) }
     var editingModel by remember { mutableStateOf<String?>(null) }
@@ -1025,11 +1027,25 @@ fun ProviderEditorScreen(
                         ?.takeIf { it.isNotBlank() && it != model }
                 },
                 providerId = providerId,
+                providerType = type,
                 initialRequest = editingModel?.let { customRequestStore.getModel(providerId, it) } ?: CustomRequestOverride(),
-                onSave = { model, meta, request ->
+                initialReasoning = editingModel?.let { reasoningConfigStore.getModel(providerId, it) }
+                    ?: com.aharou.feature.settings.domain.model.ReasoningConfig(),
+                initialEffort = editingModel?.let { reasoningEffortStore.get(providerId, it) }
+                    ?.let { runCatching { com.aharou.feature.agent.domain.model.ReasoningEffort.valueOf(it) }.getOrNull() }
+                    ?: com.aharou.feature.agent.domain.model.ReasoningEffort.DEFAULT,
+                previewReasoning = { model, config, effort, request, meta ->
+                    com.aharou.feature.agent.domain.provider.buildReasoningPreview(
+                        currentConfig(), model, effort, config, meta,
+                        customRequestStore.getGlobal(), customRequestStore.getProvider(providerId), request
+                    )
+                },
+                onSave = { model, meta, request, reasoning ->
                     customRequestStore.setModel(providerId, model, request)
+                    reasoningConfigStore.setModel(providerId, model, reasoning)
                     val editing = editingModel
                     if (editing != null && model != editing) {
+                        reasoningConfigStore.removeModel(providerId, editing)
                         val idx = models.indexOf(editing)
                         if (idx >= 0) models[idx] = model else models.add(model)
                     } else if (model !in models) {

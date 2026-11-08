@@ -79,7 +79,6 @@ import compose.icons.feathericons.Minimize2
 import compose.icons.feathericons.Mic
 import compose.icons.feathericons.Type
 import compose.icons.feathericons.Volume2
-import com.aharou.feature.agent.presentation.component.ModelReasoningEffortSheet
 import com.aharou.feature.settings.data.repository.ModelReasoningEffortRepository
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
@@ -808,10 +807,12 @@ internal fun ModelSelectionSheet(
             modelMetadata[modelMetadataKey(providerId, model)],
             customMetadata[modelMetadataKey(providerId, model)]
         )
-        ModelReasoningEffortSheet(
+        val provider = providers.firstOrNull { it.id == providerId } ?: return@let
+        ModelReasoningSheet(
+            provider = provider,
             model = model,
             effort = reasoningEffort,
-            modelMetadata = metadata,
+            metadata = metadata,
             enabled = canChange,
             onChange = { effort ->
                 if (canChange) {

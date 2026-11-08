@@ -111,6 +111,9 @@ import com.aharou.core.ui.FloatingTabBar
 import com.aharou.core.ui.FloatingTabItem
 import com.aharou.feature.settings.data.local.CustomModelMetadataStore
 import com.aharou.feature.settings.data.local.CustomRequestOverride
+import com.aharou.feature.settings.domain.model.ReasoningConfig
+import com.aharou.feature.agent.domain.model.ReasoningEffort
+import com.aharou.feature.agent.domain.provider.ReasoningPreview
 import com.aharou.feature.settings.data.local.ProviderPreset
 import com.aharou.feature.settings.domain.model.AIProviderConfig
 import com.aharou.feature.settings.domain.model.KeyRotationStrategy
@@ -173,8 +176,12 @@ internal fun AddModelSheet(
     defaultAlias: String? = null,
     /** 所属供应商 id：模型自定义图标的文件名要带上它，否则两个供应商的同名模型会共用一个文件。 */
     providerId: String,
+    providerType: ProviderType,
     initialRequest: CustomRequestOverride,
-    onSave: (String, ModelMetadata, CustomRequestOverride) -> Unit,
+    initialReasoning: ReasoningConfig,
+    initialEffort: ReasoningEffort,
+    previewReasoning: (String, ReasoningConfig, ReasoningEffort, CustomRequestOverride, ModelMetadata) -> ReasoningPreview,
+    onSave: (String, ModelMetadata, CustomRequestOverride, ReasoningConfig) -> Unit,
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
@@ -184,6 +191,8 @@ internal fun AddModelSheet(
     val flingFix = rememberSheetFlingFix(sheetState)
     var modelName by remember { mutableStateOf(initial?.id ?: "") }
     var customRequest by remember { mutableStateOf(initialRequest) }
+    var reasoningConfig by remember { mutableStateOf(initialReasoning) }
+    var showReasoningConfig by remember { mutableStateOf(false) }
     var showCustomRequest by remember { mutableStateOf(false) }
     // 显示名：列表里给模型起的别名，留空就显示原始模型名。
     var displayName by remember { mutableStateOf(initial?.displayName?.takeIf { it != initial.id } ?: "") }
@@ -206,6 +215,7 @@ internal fun AddModelSheet(
     val inputError = inputTokens.isNotBlank() && (inputTokens.trim().toIntOrNull() ?: 0) <= 0
     val outputError = outputTokens.isNotBlank() && (outputTokens.trim().toIntOrNull() ?: 0) <= 0
     val canSave = trimmedModel.isNotEmpty() && !duplicate && !contextError && !inputError && !outputError
+    val previewMetadata = rememberReasoningMetadata("", providerType, trimmedModel)
 
     // 保存逻辑抽出来，保存按钮和「重置」共用：重置得立刻落盘才算真的重置，只改输入框等于没生效。
     val saveWithName: (String) -> Unit = { rawName ->
@@ -228,7 +238,7 @@ internal fun AddModelSheet(
             supportsTools = supportsTools,
             supportsReasoning = supportsReasoning
         )
-        onSave(trimmedModel, meta, customRequest)
+        onSave(trimmedModel, meta, customRequest, reasoningConfig)
     }
 
     val iconPickLauncher = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
@@ -431,6 +441,11 @@ internal fun AddModelSheet(
                 }
 
                 SettingsRow(
+                    title = stringResource(R.string.reasoning_config_title),
+                    enabled = previewMetadata != null && !outputError,
+                    onClick = { showReasoningConfig = true }
+                )
+                SettingsRow(
                     title = stringResource(R.string.custom_request_title),
                     subtitle = stringResource(R.string.custom_request_model),
                     onClick = { showCustomRequest = true }
@@ -460,6 +475,19 @@ internal fun AddModelSheet(
                 }
             }
         }
+    }
+    if (showReasoningConfig && previewMetadata != null) {
+        ReasoningConfigSheet(
+            model = trimmedModel,
+            initial = reasoningConfig,
+            effort = initialEffort,
+            preview = { config, effort ->
+                previewReasoning(trimmedModel, config, effort, customRequest,
+                    previewMetadata.copy(outputTokens = outputTokens.trim().toIntOrNull() ?: previewMetadata.outputTokens))
+            },
+            onSave = { reasoningConfig = it; showReasoningConfig = false },
+            onDismiss = { showReasoningConfig = false },
+        )
     }
     if (showCustomRequest) {
         CustomRequestSheet(

@@ -156,6 +156,7 @@ interface AIProvider {
 
     /** 与请求体按层级合并的自定义 JSON 字段。 */
     var customBody: com.google.gson.JsonObject?
+    var reasoningConfig: com.aharou.feature.settings.domain.model.ReasoningConfig
 
     /**
      * 多 Key 自动切换钩子，由工作流在装配 provider 时注入；为 null 表示不启用（如生图等旁路）。
@@ -202,8 +203,7 @@ interface AIProvider {
     /**
      * 单轮补全。[tools] 会以提供商的 function-calling 格式真正发给模型，
      * 模型若决定调用工具，结果会出现在返回的 [AIResponse.toolCalls] 中。
-     * [reasoningEffort] 为思考强度（"low"/"medium"/"high"），仅 OpenAI 系生效；
-     * Anthropic/Gemini 与不支持该参数的模型忽略。
+     * [reasoningEffort] 通过模型推理配置映射为当前协议参数，null 表示不指定强度。
      */
     suspend fun complete(
         systemPrompt: String,
@@ -226,11 +226,20 @@ interface AIProvider {
     ): Flow<AIStreamChunk>
 }
 
-fun AIProvider.customRequestBody(request: Any): okhttp3.RequestBody? {
-    val body = customBody ?: return null
+fun AIProvider.resolvedRequestBody(
+    request: Any,
+    reasoningEffort: String?,
+    transport: ReasoningTransport,
+): okhttp3.RequestBody {
     val base = com.google.gson.Gson().toJsonTree(request).asJsonObject
-    return com.aharou.feature.settings.data.local.mergeCustomRequestBody(base, body)
-        .toString().toRequestBody("application/json; charset=UTF-8".toMediaType())
+    val effort = com.aharou.feature.agent.domain.model.ReasoningEffort.entries
+        .firstOrNull { it.apiValue == reasoningEffort }
+        ?: com.aharou.feature.agent.domain.model.ReasoningEffort.DEFAULT
+    val generated = ReasoningRequestResolver.apply(
+        base, ReasoningRequestResolver.resolve(model, baseUrl, transport, effort, reasoningConfig), transport
+    )
+    val body = customBody?.let { com.aharou.feature.settings.data.local.mergeCustomRequestBody(generated, it) } ?: generated
+    return body.toString().toRequestBody("application/json; charset=UTF-8".toMediaType())
 }
 
 fun Map<String, String>.containsHeader(name: String): Boolean = keys.any { it.equals(name, ignoreCase = true) }

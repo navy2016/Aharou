@@ -21,27 +21,44 @@ fun applyProviderParamOverrides(
     model: String,
     provider: AIProvider,
 ) {
-    val config = RequestMiddleware.parseConfig(rawConfig)?.takeIf { it.enabled } ?: return
-    if (config.paramOverrides.isEmpty()) return
+    val resolved = resolveProviderParameters(rawConfig, providerId, providerType, model, provider.temperature, provider.maxOutputTokens)
+    provider.temperature = resolved.temperature
+    provider.maxOutputTokens = resolved.maxOutputTokens
+}
+
+data class ProviderParameters(val temperature: Float?, val maxOutputTokens: Int?)
+
+fun resolveProviderParameters(
+    rawConfig: String?,
+    providerId: String,
+    providerType: String,
+    model: String,
+    temperature: Float?,
+    maxOutputTokens: Int?,
+): ProviderParameters {
+    var resolved = ProviderParameters(temperature, maxOutputTokens)
+    val config = RequestMiddleware.parseConfig(rawConfig)?.takeIf { it.enabled } ?: return resolved
     val ctx = MiddlewareContext(providerId, providerType, model, model)
     for (rule in config.paramOverrides) {
         if (!ruleMatches(rule, ctx)) continue
         when (rule.path.trim().lowercase()) {
             "temperature" -> {
                 val value = (rule.value as? JsonPrimitive)?.content?.toFloatOrNull()
-                if (rule.op == ParamOp.REMOVE) provider.temperature = null else if (value != null) provider.temperature = value
+                if (rule.op == ParamOp.REMOVE) resolved = resolved.copy(temperature = null)
+                else if (value != null) resolved = resolved.copy(temperature = value)
             }
             "max_tokens", "maxtokens", "max_output_tokens" -> {
                 val value = (rule.value as? JsonPrimitive)?.content?.toIntOrNull()
                 if (rule.op == ParamOp.REMOVE) {
-                    provider.maxOutputTokens = null
+                    resolved = resolved.copy(maxOutputTokens = null)
                 } else if (value != null) {
-                    provider.maxOutputTokens = value
+                    resolved = resolved.copy(maxOutputTokens = value)
                 }
             }
             else -> FileLogger.w("ProviderParamOverrides", "跳过不支持的参数路径：${rule.path}")
         }
     }
+    return resolved
 }
 
 /** 条件匹配与 [RequestMiddleware] 保持一致：为空即不限，大小写不敏感。 */

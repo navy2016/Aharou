@@ -72,6 +72,7 @@ internal fun CustomRequestSheet(
         ) {
             Text(stringResource(R.string.custom_request_title), style = MaterialTheme.typography.titleMedium)
             Text(stringResource(R.string.custom_request_hint), style = MaterialTheme.typography.bodySmall)
+            Text(stringResource(R.string.reasoning_custom_request_override_hint), style = MaterialTheme.typography.bodySmall)
             AppTextField(
                 value = headers, onValueChange = { headers = it },
                 label = stringResource(R.string.custom_request_headers),

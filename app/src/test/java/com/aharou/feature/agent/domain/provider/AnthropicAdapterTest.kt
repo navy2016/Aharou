@@ -8,11 +8,18 @@ import com.aharou.feature.agent.data.remote.anthropic.AnthropicMessageResponse
 import com.aharou.feature.agent.data.remote.anthropic.AnthropicStopDetails
 import com.aharou.feature.agent.data.remote.anthropic.AnthropicUsage
 import com.aharou.feature.agent.domain.model.AgentMessage
+import com.aharou.feature.agent.domain.model.ReasoningEffort
 import com.aharou.feature.agent.domain.tool.ToolCall
+import com.aharou.feature.settings.domain.model.ReasoningConfig
+import com.aharou.feature.settings.domain.model.ReasoningDialect
+import com.google.gson.Gson
+import com.google.gson.JsonParser
+import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.JsonObject
 import okhttp3.ResponseBody
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -23,6 +30,7 @@ class AnthropicAdapterTest {
     /** 捕获实际上送的请求体，并返回可配置的响应。 */
     private class FakeApi(var response: AnthropicMessageResponse) : AnthropicApi {
         var lastRequest: AnthropicMessageRequest? = null
+        var lastBody: com.google.gson.JsonObject? = null
 
         override suspend fun createMessage(
             url: String,
@@ -41,7 +49,11 @@ class AnthropicAdapterTest {
             version: String?,
             extraHeaders: Map<String, String>,
             request: okhttp3.RequestBody
-        ): AnthropicMessageResponse = response
+        ): AnthropicMessageResponse {
+            val body = request.decodeJsonObject()
+            lastBody = body
+            return createMessage(url, apiKey, version, extraHeaders, Gson().fromJson(body, AnthropicMessageRequest::class.java))
+        }
 
         override fun streamMessageCustom(
             url: String,
@@ -49,7 +61,11 @@ class AnthropicAdapterTest {
             version: String?,
             extraHeaders: Map<String, String>,
             request: okhttp3.RequestBody
-        ): Call<ResponseBody> = throw UnsupportedOperationException()
+        ): Call<ResponseBody> {
+            val body = request.decodeJsonObject()
+            lastBody = body
+            return streamMessage(url, apiKey, version, extraHeaders, Gson().fromJson(body, AnthropicMessageRequest::class.java))
+        }
 
         override fun streamMessage(
             url: String,
@@ -57,7 +73,15 @@ class AnthropicAdapterTest {
             version: String?,
             extraHeaders: Map<String, String>,
             request: AnthropicMessageRequest
-        ): Call<ResponseBody> = throw UnsupportedOperationException("本测试只覆盖非流式路径")
+        ): Call<ResponseBody> {
+            lastRequest = request
+            return FakeStreamCall {
+                FakeSseStream.body(
+                    """{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}""",
+                    """{"type":"message_stop"}"""
+                )
+            }
+        }
     }
 
     private fun response(
@@ -85,9 +109,11 @@ class AnthropicAdapterTest {
 
     private fun blocksOf(request: AnthropicMessageRequest?, role: String): List<AnthropicContentBlock> {
         val message = request?.messages?.first { it.role == role } ?: return emptyList()
-        @Suppress("UNCHECKED_CAST")
-        return message.content as? List<AnthropicContentBlock> ?: emptyList()
+        return contentBlocks(message.content)
     }
+
+    private fun contentBlocks(content: Any): List<AnthropicContentBlock> =
+        Gson().fromJson(Gson().toJsonTree(content), Array<AnthropicContentBlock>::class.java).toList()
 
     private fun toolCall(id: String) = ToolCall(id = id, name = "readFile", arguments = JsonObject(emptyMap()))
 
@@ -119,6 +145,88 @@ class AnthropicAdapterTest {
 
         assertEquals(8192, api.lastRequest?.thinking?.budget_tokens)
         assertEquals(8192 + 4096, api.lastRequest?.max_tokens)
+    }
+
+    @Test
+    fun reasoning_budget_patch_and_custom_body_reach_sync_and_stream_requests() = runTest {
+        for (stream in listOf(false, true)) {
+            val api = FakeApi(response())
+            val adapter = adapter(api, maxOutput = 2048).apply {
+                maxNetworkRetries = 0
+                temperature = 0.7f
+                reasoningConfig = ReasoningConfig(
+                    dialect = ReasoningDialect.ANTHROPIC_BUDGET,
+                    budgets = mapOf(ReasoningEffort.HIGH to 6144),
+                    patches = mapOf(ReasoningEffort.HIGH to JsonParser.parseString(
+                        """{"nullable":null}"""
+                    ).asJsonObject)
+                )
+            }
+            val messages = listOf(AgentMessage.UserMessage(content = "hi"))
+
+            if (stream) adapter.completeStream("sys", messages, reasoningEffort = "high").toList()
+            else adapter.complete("sys", messages, reasoningEffort = "high")
+            val generated = api.lastBody!!
+            assertEquals("enabled", generated.getAsJsonObject("thinking").get("type").asString)
+            assertEquals(6144, generated.getAsJsonObject("thinking").get("budget_tokens").asInt)
+            assertFalse(generated.getAsJsonObject("thinking").has("display"))
+            assertEquals(10240, generated.get("max_tokens").asInt)
+            assertFalse(generated.has("temperature"))
+            assertTrue(generated.get("nullable").isJsonNull)
+            assertEquals(stream, generated.get("stream").asBoolean)
+            assertEquals(1, generated.getAsJsonArray("messages").size())
+
+            adapter.customBody = JsonParser.parseString(
+                """{"thinking":{"budget_tokens":2048,"display":null},"max_tokens":1024,"temperature":0.2,"nullable":null}"""
+            ).asJsonObject
+            if (stream) adapter.completeStream("sys", messages, reasoningEffort = "high").toList()
+            else adapter.complete("sys", messages, reasoningEffort = "high")
+            val overridden = api.lastBody!!
+            assertFalse(overridden.getAsJsonObject("thinking").has("type"))
+            assertEquals(2048, overridden.getAsJsonObject("thinking").get("budget_tokens").asInt)
+            assertTrue(overridden.getAsJsonObject("thinking").get("display").isJsonNull)
+            assertEquals(1024, overridden.get("max_tokens").asInt)
+            assertEquals(0.2, overridden.get("temperature").asDouble, 0.0001)
+            assertTrue(overridden.get("nullable").isJsonNull)
+            assertEquals(stream, overridden.get("stream").asBoolean)
+        }
+    }
+
+    @Test
+    fun adaptive_default_and_none_keep_base_temperature_in_sync_and_stream_requests() = runTest {
+        for (stream in listOf(false, true)) {
+            val api = FakeApi(response())
+            val adapter = adapter(api, maxOutput = 4096).apply {
+                model = "claude-sonnet-4-6"
+                maxNetworkRetries = 0
+                temperature = 0.7f
+            }
+            val messages = listOf(AgentMessage.UserMessage(content = "hi"))
+
+            if (stream) adapter.completeStream("sys", messages).toList()
+            else adapter.complete("sys", messages)
+            val defaultBody = api.lastBody!!
+            assertFalse(defaultBody.has("thinking"))
+            assertFalse(defaultBody.has("output_config"))
+            assertEquals(4096, defaultBody.get("max_tokens").asInt)
+            assertEquals(0.7, defaultBody.get("temperature").asDouble, 0.0001)
+
+            if (stream) adapter.completeStream("sys", messages, reasoningEffort = "none").toList()
+            else adapter.complete("sys", messages, reasoningEffort = "none")
+            val disabled = api.lastBody!!
+            assertEquals("disabled", disabled.getAsJsonObject("thinking").get("type").asString)
+            assertFalse(disabled.has("output_config"))
+            assertEquals(4096, disabled.get("max_tokens").asInt)
+            assertEquals(0.7, disabled.get("temperature").asDouble, 0.0001)
+
+            if (stream) adapter.completeStream("sys", messages, reasoningEffort = "high").toList()
+            else adapter.complete("sys", messages, reasoningEffort = "high")
+            val adaptive = api.lastBody!!
+            assertEquals("adaptive", adaptive.getAsJsonObject("thinking").get("type").asString)
+            assertEquals("high", adaptive.getAsJsonObject("output_config").get("effort").asString)
+            assertFalse(adaptive.has("temperature"))
+            assertEquals(4096, adaptive.get("max_tokens").asInt)
+        }
     }
 
     @Test
@@ -251,8 +359,7 @@ class AnthropicAdapterTest {
         // "tool_use ids were found without tool_result blocks immediately after"。
         val messages = api.lastRequest!!.messages
         assertEquals(listOf("user", "assistant", "user"), messages.map { it.role })
-        @Suppress("UNCHECKED_CAST")
-        val resultBlocks = messages.last().content as List<AnthropicContentBlock>
+        val resultBlocks = contentBlocks(messages.last().content)
         assertEquals(listOf("tool_result", "tool_result"), resultBlocks.map { it.type })
         assertEquals(listOf("c1", "c2"), resultBlocks.map { it.tool_use_id })
     }
@@ -263,8 +370,7 @@ class AnthropicAdapterTest {
         adapter(api).complete("sys", listOf(AgentMessage.UserMessage(content = "hi")))
 
         val user: AnthropicMessage = api.lastRequest!!.messages.last { it.role == "user" }
-        @Suppress("UNCHECKED_CAST")
-        val blocks = user.content as List<AnthropicContentBlock>
+        val blocks = contentBlocks(user.content)
         assertEquals("ephemeral", blocks.last().cache_control?.get("type"))
     }
 }

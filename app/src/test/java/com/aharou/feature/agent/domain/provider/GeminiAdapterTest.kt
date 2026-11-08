@@ -2,9 +2,14 @@ package com.aharou.feature.agent.domain.provider
 
 import com.aharou.feature.agent.data.remote.gemini.GeminiApi
 import com.aharou.feature.agent.domain.model.AgentMessage
+import com.aharou.feature.agent.domain.model.ReasoningEffort
 import com.aharou.feature.agent.domain.tool.ToolCall
+import com.aharou.feature.settings.domain.model.ReasoningConfig
+import com.aharou.feature.settings.domain.model.ReasoningDialect
+import com.google.gson.Gson
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.JsonObject as KxJsonObject
 import okhttp3.ResponseBody
@@ -38,35 +43,39 @@ class GeminiAdapterTest {
             apiKey: String?,
             extraHeaders: Map<String, String>,
             request: okhttp3.RequestBody
-        ): JsonObject = throw UnsupportedOperationException()
+        ): JsonObject = generateContent(url, apiKey, extraHeaders, request.decodeJsonMap())
 
         override fun streamGenerateContentCustom(
             url: String,
             apiKey: String?,
             extraHeaders: Map<String, String>,
             request: okhttp3.RequestBody
-        ): Call<ResponseBody> = throw UnsupportedOperationException()
+        ): Call<ResponseBody> = streamGenerateContent(url, apiKey, extraHeaders, request.decodeJsonMap())
 
         override suspend fun createInteractionCustom(
             url: String,
             apiKey: String?,
             extraHeaders: Map<String, String>,
             request: okhttp3.RequestBody
-        ): JsonObject = throw UnsupportedOperationException()
+        ): JsonObject = createInteraction(url, apiKey, extraHeaders, request.decodeJsonMap())
 
         override fun streamInteractionCustom(
             url: String,
             apiKey: String?,
             extraHeaders: Map<String, String>,
             request: okhttp3.RequestBody
-        ): Call<ResponseBody> = throw UnsupportedOperationException()
+        ): Call<ResponseBody> = streamInteraction(url, apiKey, extraHeaders, request.decodeJsonMap())
 
         override fun streamGenerateContent(
             url: String,
             apiKey: String?,
             extraHeaders: Map<String, String>,
             request: Any
-        ): Call<ResponseBody> = throw UnsupportedOperationException("本测试只覆盖非流式路径")
+        ): Call<ResponseBody> {
+            lastUrl = url
+            lastRequest = request as Map<*, *>
+            return FakeStreamCall { FakeSseStream.body(JsonParser.parseString(responseJson).toString()) }
+        }
 
         override suspend fun createInteraction(
             url: String,
@@ -84,7 +93,14 @@ class GeminiAdapterTest {
             apiKey: String?,
             extraHeaders: Map<String, String>,
             request: Any
-        ): Call<ResponseBody> = throw UnsupportedOperationException("本测试只覆盖非流式路径")
+        ): Call<ResponseBody> {
+            lastUrl = url
+            lastRequest = request as Map<*, *>
+            return FakeStreamCall {
+                val response = JsonParser.parseString(responseJson)
+                FakeSseStream.body("""{"event_type":"interaction.completed","interaction":$response}""")
+            }
+        }
     }
 
     private fun textResponse(
@@ -130,6 +146,55 @@ class GeminiAdapterTest {
         val config = generationConfig(api.lastRequest)
         assertEquals(64000, config["maxOutputTokens"])
         assertEquals(mapOf("thinkingBudget" to 8192, "includeThoughts" to true), config["thinkingConfig"])
+    }
+
+    @Test
+    fun content_reasoning_budget_patch_and_custom_body_reach_sync_and_stream_requests() = runTest {
+        for (stream in listOf(false, true)) {
+            val api = FakeApi(textResponse())
+            val adapter = adapter(api, maxOutput = 64000).apply {
+                maxNetworkRetries = 0
+                reasoningConfig = ReasoningConfig(
+                    dialect = ReasoningDialect.GEMINI_BUDGET,
+                    budgets = mapOf(ReasoningEffort.HIGH to 6144),
+                    patches = mapOf(ReasoningEffort.HIGH to JsonParser.parseString(
+                        """{"nullable":null}"""
+                    ).asJsonObject)
+                )
+            }
+
+            if (stream) adapter.completeStream("sys", listOf(user("hi")), reasoningEffort = "high").toList()
+            else adapter.complete("sys", listOf(user("hi")), reasoningEffort = "high")
+            val generated = api.lastRequest!!
+            val generatedConfig = generationConfig(generated)
+            val generatedThinking = generatedConfig["thinkingConfig"] as Map<*, *>
+            assertEquals(64000, generatedConfig["maxOutputTokens"])
+            assertEquals(6144, generatedThinking["thinkingBudget"])
+            assertEquals(true, generatedThinking["includeThoughts"])
+            assertTrue(generated.containsKey("nullable"))
+            assertNull(generated["nullable"])
+            assertFalse(generated.containsKey("generation_config"))
+            assertFalse(generatedConfig.containsKey("temperature"))
+            assertEquals(1, contents(generated).size)
+            assertTrue(api.lastUrl!!.endsWith(if (stream) ":streamGenerateContent?alt=sse" else ":generateContent"))
+
+            adapter.customBody = JsonParser.parseString(
+                """{"generationConfig":{"thinkingConfig":{"thinkingBudget":2048,"includeThoughts":null},"maxOutputTokens":4096},"large_integer":2147483648,"nullable":null}"""
+            ).asJsonObject
+            if (stream) adapter.completeStream("sys", listOf(user("hi")), reasoningEffort = "high").toList()
+            else adapter.complete("sys", listOf(user("hi")), reasoningEffort = "high")
+            val overridden = api.lastRequest!!
+            val overriddenConfig = generationConfig(overridden)
+            val overriddenThinking = overriddenConfig["thinkingConfig"] as Map<*, *>
+            assertEquals(4096, overriddenConfig["maxOutputTokens"])
+            assertEquals(2048, overriddenThinking["thinkingBudget"])
+            assertTrue(overriddenThinking.containsKey("includeThoughts"))
+            assertNull(overriddenThinking["includeThoughts"])
+            assertTrue(overridden.containsKey("nullable"))
+            assertNull(overridden["nullable"])
+            assertEquals(2147483648L, overridden["large_integer"])
+            assertFalse(overridden.containsKey("generation_config"))
+        }
     }
 
     @Test
@@ -250,7 +315,7 @@ class GeminiAdapterTest {
         )
 
         val model = contents(api.lastRequest).first { it["role"] == "model" }
-        val parts = model["parts"] as com.google.gson.JsonArray
+        val parts = Gson().toJsonTree(model["parts"]).asJsonArray
         assertEquals("sig-a", parts[0].asJsonObject.get("thoughtSignature").asString)
         assertEquals("call-1", parts[1].asJsonObject.getAsJsonObject("functionCall").get("id").asString)
     }
@@ -435,6 +500,55 @@ class GeminiAdapterTest {
         assertEquals("auto", config["thinking_summaries"])
         // Interactions 的 GenerationConfig 里没有 temperature 字段
         assertFalse(config.containsKey("temperature"))
+    }
+
+    @Test
+    fun interactions_reasoning_patch_and_custom_body_reach_sync_and_stream_requests() = runTest {
+        for (stream in listOf(false, true)) {
+            val api = FakeApi(interactionResponse())
+            val adapter = interactionsAdapter(api, maxOutput = 64000).apply {
+                maxNetworkRetries = 0
+                reasoningConfig = ReasoningConfig(
+                    dialect = ReasoningDialect.GEMINI_LEVEL,
+                    effortValues = mapOf(ReasoningEffort.HIGH to "minimal"),
+                    patches = mapOf(ReasoningEffort.HIGH to JsonParser.parseString(
+                        """{"generation_config":{"thinking_summaries":"none"},"nullable":null}"""
+                    ).asJsonObject)
+                )
+            }
+
+            if (stream) adapter.completeStream("sys", listOf(user("hi")), reasoningEffort = "high").toList()
+            else adapter.complete("sys", listOf(user("hi")), reasoningEffort = "high")
+            val generated = api.lastRequest!!
+            val generatedConfig = generated["generation_config"] as Map<*, *>
+            assertEquals(64000, generatedConfig["max_output_tokens"])
+            assertEquals("minimal", generatedConfig["thinking_level"])
+            assertEquals("none", generatedConfig["thinking_summaries"])
+            assertFalse(generated.containsKey("generationConfig"))
+            assertFalse(generatedConfig.containsKey("temperature"))
+            assertEquals(false, generated["store"])
+            assertEquals("sys", generated["system_instruction"])
+            assertTrue(generated.containsKey("nullable"))
+            assertNull(generated["nullable"])
+            assertEquals(stream, generated.containsKey("stream"))
+            if (stream) assertEquals(true, generated["stream"])
+            assertTrue(api.lastUrl!!.endsWith(if (stream) "/interactions?alt=sse" else "/interactions"))
+
+            adapter.customBody = JsonParser.parseString(
+                """{"generation_config":{"thinking_level":"high","thinking_summaries":null,"max_output_tokens":4096},"nullable":null}"""
+            ).asJsonObject
+            if (stream) adapter.completeStream("sys", listOf(user("hi")), reasoningEffort = "high").toList()
+            else adapter.complete("sys", listOf(user("hi")), reasoningEffort = "high")
+            val overridden = api.lastRequest!!
+            val overriddenConfig = overridden["generation_config"] as Map<*, *>
+            assertEquals(4096, overriddenConfig["max_output_tokens"])
+            assertEquals("high", overriddenConfig["thinking_level"])
+            assertTrue(overriddenConfig.containsKey("thinking_summaries"))
+            assertNull(overriddenConfig["thinking_summaries"])
+            assertTrue(overridden.containsKey("nullable"))
+            assertNull(overridden["nullable"])
+            assertFalse(overridden.containsKey("generationConfig"))
+        }
     }
 
     @Test

@@ -16,9 +16,12 @@ private val customRequestPath = Regex(
     """^(custom_request\.global|providers\.[^.]+(?:\.models\..+)?\.custom_request)\.(headers|body)$"""
 )
 
-internal fun isCustomRequestPath(path: String): Boolean = customRequestPath.matches(path)
+private val reasoningConfigPath = Regex("""^providers\.[^.]+\.models\..+\.reasoning_config$""")
 
-/** 自定义请求在模型或供应商删除后仍包含敏感数据，不能依赖动态字段是否存在。 */
+internal fun isCustomRequestPath(path: String): Boolean =
+    customRequestPath.matches(path) || reasoningConfigPath.matches(path)
+
+/** 请求覆盖与推理配置在模型或供应商删除后仍包含敏感数据，不能依赖动态字段是否存在。 */
 fun isSensitivePath(path: String): Boolean =
     isCustomRequestPath(path) || runCatching { ConfigRegistry.get().resolveField(path)?.risk }
         .getOrNull() == ConfigRisk.SENSITIVE

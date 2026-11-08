@@ -4,6 +4,7 @@ import com.aharou.feature.agent.data.remote.anthropic.AnthropicApi
 import com.aharou.feature.agent.data.remote.anthropic.AnthropicMessageRequest
 import com.aharou.feature.agent.data.remote.anthropic.AnthropicMessageResponse
 import com.aharou.feature.agent.domain.model.AgentMessage
+import com.google.gson.Gson
 import java.io.IOException
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.test.runTest
@@ -39,7 +40,9 @@ class AnthropicStreamInterruptionTest {
             version: String?,
             extraHeaders: Map<String, String>,
             request: okhttp3.RequestBody
-        ): AnthropicMessageResponse = unsupportedNonStreaming()
+        ): AnthropicMessageResponse = createMessage(
+            url, apiKey, version, extraHeaders, Gson().fromJson(request.decodeJsonObject(), AnthropicMessageRequest::class.java)
+        )
 
         override fun streamMessageCustom(
             url: String,
@@ -47,7 +50,9 @@ class AnthropicStreamInterruptionTest {
             version: String?,
             extraHeaders: Map<String, String>,
             request: okhttp3.RequestBody
-        ): Call<ResponseBody> = stream()
+        ): Call<ResponseBody> = streamMessage(
+            url, apiKey, version, extraHeaders, Gson().fromJson(request.decodeJsonObject(), AnthropicMessageRequest::class.java)
+        )
 
         override fun streamMessage(
             url: String,

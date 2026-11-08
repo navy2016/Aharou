@@ -37,28 +37,28 @@ class GeminiStreamInterruptionTest {
             apiKey: String?,
             extraHeaders: Map<String, String>,
             request: okhttp3.RequestBody
-        ): JsonObject = unsupportedNonStreaming()
+        ): JsonObject = generateContent(url, apiKey, extraHeaders, request.decodeJsonMap())
 
         override fun streamGenerateContentCustom(
             url: String,
             apiKey: String?,
             extraHeaders: Map<String, String>,
             request: okhttp3.RequestBody
-        ): Call<ResponseBody> = stream()
+        ): Call<ResponseBody> = streamGenerateContent(url, apiKey, extraHeaders, request.decodeJsonMap())
 
         override suspend fun createInteractionCustom(
             url: String,
             apiKey: String?,
             extraHeaders: Map<String, String>,
             request: okhttp3.RequestBody
-        ): JsonObject = unsupportedNonStreaming()
+        ): JsonObject = createInteraction(url, apiKey, extraHeaders, request.decodeJsonMap())
 
         override fun streamInteractionCustom(
             url: String,
             apiKey: String?,
             extraHeaders: Map<String, String>,
             request: okhttp3.RequestBody
-        ): Call<ResponseBody> = unsupportedNonStreaming()
+        ): Call<ResponseBody> = streamInteraction(url, apiKey, extraHeaders, request.decodeJsonMap())
 
         override fun streamGenerateContent(
             url: String,
