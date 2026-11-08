@@ -36,9 +36,11 @@ class GeminiAdapter @Inject constructor(
     override var firstByteTimeoutMs: Long = FIRST_BYTE_TIMEOUT_MS
     override var streamIdleTimeoutMs: Long = 0L
     override var maxNetworkRetries: Int = MAX_NETWORK_RETRIES
+    override var autoRetryOptions: AutoRetryOptions = AutoRetryOptions()
 
     /** 自定义请求头：占位符替换后写出，完全覆盖同名默认头。 */
     override var customHeaders: Map<String, String> = emptyMap()
+    override var customBody: JsonObject? = null
 
     // Gemini 发 generationConfig.maxOutputTokens（模型元数据的输出上限）；为 null 时不发该参数，用服务端默认。
     override var maxOutputTokens: Int? = null
@@ -48,6 +50,9 @@ class GeminiAdapter @Inject constructor(
 
     private fun extraHeaders(): Map<String, String> =
         resolveCustomHeaders(customHeaders, logSessionId, apiKey)
+
+    private fun requestKey(): String? =
+        if (customHeaders.containsHeader("x-goog-api-key")) null else apiKey.takeIf { it.isNotBlank() }
 
     /**
      * Interactions API 的目标端点。与 generateContent 的两点不同：
@@ -88,9 +93,15 @@ class GeminiAdapter @Inject constructor(
         val response = try {
             retryStaircase(
                 maxRetries = maxNetworkRetries,
-                onKeyFailure = { e, _ -> switchKeyOnFailure(e, triedKeys) != null }
+                onKeyFailure = { e, _ -> switchKeyOnFailure(e, triedKeys) != null },
+                retryOptions = autoRetryOptions
             ) {
-                api.generateContent(url = url, apiKey = apiKey.takeIf { it.isNotBlank() }, extraHeaders = extraHeaders(), request = request)
+                val custom = customRequestBody(request)
+                if (custom == null) {
+                    api.generateContent(url = url, apiKey = requestKey(), extraHeaders = extraHeaders(), request = request)
+                } else {
+                    api.generateContentCustom(url = url, apiKey = requestKey(), extraHeaders = extraHeaders(), request = custom)
+                }
             }
         } catch (e: CancellationException) {
             throw e
@@ -226,7 +237,13 @@ class GeminiAdapter @Inject constructor(
                 var streamOutputTokens = 0
                 var streamCachedInputTokens = 0
 
-                val body = firstContent.awaitBody(api.streamGenerateContent(url = url, apiKey = apiKey.takeIf { it.isNotBlank() }, extraHeaders = extraHeaders(), request = request))
+                val custom = customRequestBody(request)
+                val call = if (custom == null) {
+                    api.streamGenerateContent(url = url, apiKey = requestKey(), extraHeaders = extraHeaders(), request = request)
+                } else {
+                    api.streamGenerateContentCustom(url = url, apiKey = requestKey(), extraHeaders = extraHeaders(), request = custom)
+                }
+                val body = firstContent.awaitBody(call)
 
                 body.use { rb ->
                     firstContent.attach { rb.close() }
@@ -339,7 +356,8 @@ class GeminiAdapter @Inject constructor(
                 send(AIStreamChunk.Final(sanitizeTruncatedToolCalls(AIResponse(content = textBuilder.toString(), toolCalls = toolCalls, stopReason = currentFinishReason, thinkingBlocksJson = snapshotOf(snapshotParts), inputTokens = streamInputTokens, outputTokens = streamOutputTokens, cachedInputTokens = streamCachedInputTokens, images = images))))
                     }
                 },
-                onRetry = { attempt, max, error -> send(AIStreamChunk.Retrying(attempt, max, error)) }
+                onRetry = { attempt, max, error -> send(AIStreamChunk.Retrying(attempt, max, error)) },
+                retryOptions = autoRetryOptions
             )
         } catch (e: CancellationException) {
             throw e
@@ -418,9 +436,15 @@ class GeminiAdapter @Inject constructor(
         val response = try {
             retryStaircase(
                 maxRetries = maxNetworkRetries,
-                onKeyFailure = { e, _ -> switchKeyOnFailure(e, triedKeys) != null }
+                onKeyFailure = { e, _ -> switchKeyOnFailure(e, triedKeys) != null },
+                retryOptions = autoRetryOptions
             ) {
-                api.createInteraction(url = url, apiKey = apiKey.takeIf { it.isNotBlank() }, extraHeaders = extraHeaders(), request = request)
+                val custom = customRequestBody(request)
+                if (custom == null) {
+                    api.createInteraction(url = url, apiKey = requestKey(), extraHeaders = extraHeaders(), request = request)
+                } else {
+                    api.createInteractionCustom(url = url, apiKey = requestKey(), extraHeaders = extraHeaders(), request = custom)
+                }
             }
         } catch (e: CancellationException) {
             throw e
@@ -484,12 +508,13 @@ class GeminiAdapter @Inject constructor(
                     withFirstContentTimeout(firstByteTimeoutMs) { firstContent ->
                     val acc = GeminiInteractionsStreamAccumulator()
 
-                    val body = firstContent.awaitBody(api.streamInteraction(
-                        url = url,
-                        apiKey = apiKey.takeIf { it.isNotBlank() },
-                        extraHeaders = extraHeaders(),
-                        request = request
-                    ))
+                    val custom = customRequestBody(request)
+                    val call = if (custom == null) {
+                        api.streamInteraction(url = url, apiKey = requestKey(), extraHeaders = extraHeaders(), request = request)
+                    } else {
+                        api.streamInteractionCustom(url = url, apiKey = requestKey(), extraHeaders = extraHeaders(), request = custom)
+                    }
+                    val body = firstContent.awaitBody(call)
 
                     body.use { rb ->
                         firstContent.attach { rb.close() }
@@ -557,7 +582,8 @@ class GeminiAdapter @Inject constructor(
                     send(AIStreamChunk.Final(sanitizeTruncatedToolCalls(acc.toResponse())))
                     }
                 },
-                onRetry = { attempt, max, error -> send(AIStreamChunk.Retrying(attempt, max, error)) }
+                onRetry = { attempt, max, error -> send(AIStreamChunk.Retrying(attempt, max, error)) },
+                retryOptions = autoRetryOptions
             )
         } catch (e: CancellationException) {
             throw e

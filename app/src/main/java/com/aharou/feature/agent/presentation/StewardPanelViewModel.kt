@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.aharou.core.util.FileLogger
 import com.aharou.feature.agent.domain.session.MessagePersistenceUseCase
+import com.aharou.feature.agent.domain.provider.AutoRetryOptions
 import com.aharou.feature.agent.domain.steward.StewardController
 import com.aharou.feature.agent.domain.steward.StewardSettings
 import com.aharou.feature.agent.domain.steward.StewardState
@@ -34,6 +35,18 @@ class StewardPanelViewModel @Inject constructor(
 
     private val _unlimited = MutableStateFlow(settings.unlimited)
     val unlimited: StateFlow<Boolean> = _unlimited.asStateFlow()
+
+    private val _autoRetryOptions = MutableStateFlow(settings.autoRetryOptions)
+    val autoRetryOptions: StateFlow<AutoRetryOptions> = _autoRetryOptions.asStateFlow()
+
+    fun refreshAutoRetryOptions() {
+        _autoRetryOptions.value = settings.autoRetryOptions
+    }
+
+    fun setAutoRetryOptions(options: AutoRetryOptions) {
+        settings.autoRetryOptions = options
+        _autoRetryOptions.value = settings.autoRetryOptions
+    }
 
     /**
      * 开关托管。打开时以本会话最后一条用户消息为基准——那正是这一轮任务的起点；

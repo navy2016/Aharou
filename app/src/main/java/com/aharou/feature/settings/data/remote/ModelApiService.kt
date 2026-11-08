@@ -4,6 +4,11 @@ import android.content.Context
 import com.aharou.R
 import com.aharou.feature.agent.domain.provider.joinUrl
 import com.aharou.feature.settings.domain.model.ProviderType
+import com.aharou.feature.settings.data.local.CustomRequestStore
+import com.aharou.feature.settings.data.local.mergeCustomRequestBody
+import com.aharou.feature.settings.data.local.mergeCustomRequestOverrides
+import com.aharou.feature.settings.data.local.CustomRequestOverride
+import com.aharou.feature.agent.domain.provider.resolveCustomHeaders
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.InterruptedIOException
 import java.net.ConnectException
@@ -66,6 +71,7 @@ data class ModelTestResult(
 @Singleton
 class ModelApiService @Inject constructor(
     private val client: OkHttpClient,
+    private val customRequestStore: CustomRequestStore,
     @param:ApplicationContext private val context: Context
 ) {
     private val json = Json { ignoreUnknownKeys = true }
@@ -76,7 +82,8 @@ class ModelApiService @Inject constructor(
         apiKey: String,
         type: ProviderType,
         useFullUrl: Boolean = false,
-        customHeaders: Map<String, String> = emptyMap()
+        customHeaders: Map<String, String> = emptyMap(),
+        providerId: String = ""
     ): Result<FetchModelsResult> = withContext(Dispatchers.IO) {
         val start = System.nanoTime()
         // recoverCatching 在外层作用域，看不到块内的 url 与请求头；
@@ -89,14 +96,21 @@ class ModelApiService @Inject constructor(
             val modelsPath = if (type == ProviderType.GEMINI) "v1beta/models" else "v1/models"
             val url = if (useFullUrl) baseUrl else joinUrl(baseUrl, modelsPath)
             failedUrl = url
+            val headers = resolveCustomHeaders(
+                mergeCustomRequestOverrides(
+                    customRequestStore.getGlobal(),
+                    CustomRequestOverride(headers = customHeaders),
+                    customRequestStore.getProvider(providerId)
+                ).headers, null, apiKey
+            )
             val request = Request.Builder()
                 .url(url)
                 .applyAuth(apiKey, type)
-                .applyCustomHeaders(customHeaders)
+                .applyCustomHeaders(headers)
                 .get()
                 .build()
 
-            val reqHeadersMap = maskedHeaders(request)
+            val reqHeadersMap = maskedHeaders(request, headers.keys)
             failedHeaders = reqHeadersMap
 
             client.newCall(request).execute().use { response ->
@@ -198,14 +212,17 @@ class ModelApiService @Inject constructor(
         useFullUrl: Boolean,
         useResponseApi: Boolean,
         model: String,
-        customHeaders: Map<String, String> = emptyMap()
+        customHeaders: Map<String, String> = emptyMap(),
+        providerId: String = ""
     ): ModelTestResult = withContext(Dispatchers.IO) {
+        val custom = customRequestStore.resolve(providerId, model, customHeaders)
+        val headers = resolveCustomHeaders(custom.headers, null, apiKey)
         val start = System.nanoTime()
-        val first = testModelOnce(start, baseUrl, apiKey, type, useFullUrl, useResponseApi, model, customHeaders)
+        val first = testModelOnce(start, baseUrl, apiKey, type, useFullUrl, useResponseApi, model, headers, custom.body)
         if (!first.retryable) return@withContext first.result
         // DNS 解析失败会被 libcore 缓存，紧接着重试必然重复失败；退避 3 秒再试一次（delay 不占线程）。
         delay(NETWORK_RETRY_DELAY_MS)
-        testModelOnce(start, baseUrl, apiKey, type, useFullUrl, useResponseApi, model, customHeaders).result
+        testModelOnce(start, baseUrl, apiKey, type, useFullUrl, useResponseApi, model, headers, custom.body).result
     }
 
     /** 一次尝试；「是否值得重试」随结果带出，因为网络异常类型只在 catch 里看得到。 */
@@ -217,7 +234,8 @@ class ModelApiService @Inject constructor(
         useFullUrl: Boolean,
         useResponseApi: Boolean,
         model: String,
-        customHeaders: Map<String, String>
+        customHeaders: Map<String, String>,
+        customBody: com.google.gson.JsonObject?
     ): TestAttempt {
         // 空 Key 也放行（免鉴权供应商）；真正需要 Key 的平台会由上游返回鉴权错误。
         val (url, payload) = when (type) {
@@ -259,12 +277,15 @@ class ModelApiService @Inject constructor(
             }
         }
 
+        val finalPayload = customBody?.let {
+            mergeCustomRequestBody(com.google.gson.JsonParser.parseString(payload).asJsonObject, it).toString()
+        } ?: payload
         val request = runCatching {
             Request.Builder()
                 .url(url)
                 .applyAuth(apiKey, type)
                 .applyCustomHeaders(customHeaders)
-                .post(payload.toRequestBody("application/json".toMediaType()))
+                .post(finalPayload.toRequestBody("application/json".toMediaType()))
                 .build()
         }.getOrElse { e ->
             // 地址本身就非法（如少写协议头）：没有可发的请求，直接回失败结果。
@@ -274,8 +295,8 @@ class ModelApiService @Inject constructor(
         // 失败时用户要能看清「发到哪、带了什么头、发了什么体」：不回填这三项就分不清
         // 是地址错、鉴权错还是网络错，故在请求构造完就固定下来。
         val requestUrl = request.url.toString()
-        val requestHeaders = maskedHeaders(request)
-        val requestBody = payload.take(MAX_REQUEST_BODY_CHARS)
+        val requestHeaders = maskedHeaders(request, customHeaders.keys)
+        val requestBody = if (customBody == null) finalPayload.take(MAX_REQUEST_BODY_CHARS) else "[custom request body]"
 
         return try {
             client.newCall(request).execute().use { response ->
@@ -347,11 +368,11 @@ class ModelApiService @Inject constructor(
     }
 
     /** 带凭据的请求头一律打码（保留前 7 位与后 4 位，便于核对是哪把 Key）：调试详情会展示给用户。 */
-    private fun maskedHeaders(request: Request): Map<String, String> =
+    private fun maskedHeaders(request: Request, customNames: Set<String> = emptySet()): Map<String, String> =
         request.headers.names().associateWith { name ->
             val raw = request.header(name).orEmpty()
             val header = name.lowercase()
-            val sensitive = header == "authorization" || header.contains("key") ||
+            val sensitive = customNames.any { it.equals(name, ignoreCase = true) } || header == "authorization" || header.contains("key") ||
                 header.contains("token") || header.contains("secret") || header.contains("cookie")
             if (sensitive) maskSecret(raw) else raw
         }

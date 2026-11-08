@@ -16,6 +16,23 @@ interface OpenAIApi {
         @Body request: ChatCompletionRequest
     ): ChatCompletionResponse
 
+    @POST
+    suspend fun createChatCompletionCustom(
+        @Url url: String,
+        @retrofit2.http.Header("Authorization") authorization: String?,
+        @HeaderMap extraHeaders: Map<String, String> = emptyMap(),
+        @Body request: okhttp3.RequestBody
+    ): ChatCompletionResponse
+
+    @Streaming
+    @POST
+    fun streamChatCompletionCustom(
+        @Url url: String,
+        @retrofit2.http.Header("Authorization") authorization: String?,
+        @HeaderMap extraHeaders: Map<String, String> = emptyMap(),
+        @Body request: okhttp3.RequestBody
+    ): retrofit2.Call<ResponseBody>
+
     /** 流式（SSE）补全：返回原始响应体，由调用方逐行解析 event-stream。请求需带 stream=true。 */
     @Streaming
     @POST
@@ -41,6 +58,23 @@ interface OpenAIApi {
         @retrofit2.http.Header("Authorization") authorization: String?,
         @HeaderMap extraHeaders: Map<String, String> = emptyMap(),
         @Body request: Any
+    ): retrofit2.Call<ResponseBody>
+
+    @POST
+    suspend fun createResponsesCustom(
+        @Url url: String,
+        @retrofit2.http.Header("Authorization") authorization: String?,
+        @HeaderMap extraHeaders: Map<String, String> = emptyMap(),
+        @Body request: okhttp3.RequestBody
+    ): com.google.gson.JsonObject
+
+    @Streaming
+    @POST
+    fun streamResponsesCustom(
+        @Url url: String,
+        @retrofit2.http.Header("Authorization") authorization: String?,
+        @HeaderMap extraHeaders: Map<String, String> = emptyMap(),
+        @Body request: okhttp3.RequestBody
     ): retrofit2.Call<ResponseBody>
 
     /** Images API：生成图片（POST /v1/images/generations）。 */

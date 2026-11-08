@@ -42,6 +42,7 @@ class CrossCheckCoordinator @Inject constructor(
     private val aiProviderRepository: AIProviderRepository,
     private val defaultModelSettingsRepository: DefaultModelSettingsRepository,
     private val generalSettingsRepository: GeneralSettingsRepository,
+    private val providerRequestSettings: com.aharou.feature.agent.domain.provider.ProviderRequestSettings,
     private val sessionUseCase: SessionUseCase,
     private val providerKeyRotator: ProviderKeyRotator,
     private val modelMetadataService: ModelMetadataService,
@@ -128,13 +129,10 @@ class CrossCheckCoordinator @Inject constructor(
         provider.providerId = target.id
         // 复审同样是模型请求，隐身会话不能留 AI 日志（主链路、手机子代理、视觉调用同走一份判定）。
         provider.logSessionId = AILogger.loggableSessionId(sessionId, sessionUseCase::isGhostSession)
-        provider.customHeaders = target.customHeaders
         val metadata = modelMetadataService.resolve(target.id, target.type, target.effectiveModel)
         provider.maxOutputTokens = metadata.outputTokens
         provider.temperature = if (metadata.supportsCustomTemperature) fixedTemperature(target.effectiveModel) else null
-        provider.firstByteTimeoutMs = generalSettingsRepository.firstByteTimeoutMs()
-        provider.streamIdleTimeoutMs = generalSettingsRepository.streamIdleTimeoutMs()
-        provider.maxNetworkRetries = generalSettingsRepository.maxNetworkRetries()
+        providerRequestSettings.apply(provider, target)
         return provider
     }
 

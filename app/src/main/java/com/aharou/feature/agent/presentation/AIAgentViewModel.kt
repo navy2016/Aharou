@@ -2662,22 +2662,15 @@ class AIAgentViewModel @Inject constructor(
 
     fun setSessionReasoningEffort(effort: ReasoningEffort) {
         val sid = _currentSessionId.value ?: return
-        viewModelScope.launch {
-            sessionUseCase.updateReasoningEffort(sid, effort.name)
-            // 同步记忆到模型级默认档位，供后续新建会话沿用
-            val s = sessionUseCase.getSessionById(sid)?.toDomain()
-            val pid = s?.providerId
-            val model = s?.model
-            if (!pid.isNullOrBlank() && !model.isNullOrBlank()) {
-                modelReasoningEffortRepository.set(pid, model, effort.name)
-            }
-        }
+        if (sessionJobs[sid]?.isActive == true) return
+        viewModelScope.launch { sessionUseCase.updateReasoningEffort(sid, effort.name) }
     }
 
     fun setSessionProviderModel(providerId: String, model: String) {
         val sid = _currentSessionId.value ?: return
         viewModelScope.launch {
             sessionUseCase.updateProviderModel(sid, providerId, model)
+            sessionUseCase.updateReasoningEffort(sid, modelReasoningEffortRepository.get(providerId, model) ?: ReasoningEffort.DEFAULT.name)
             _contextUsages.value = _contextUsages.value - sid
             // 空会话中的选择视为「新会话默认模型」，供下次新建会话沿用
             if (sessionUseCase.isSessionEmpty(sid)) {

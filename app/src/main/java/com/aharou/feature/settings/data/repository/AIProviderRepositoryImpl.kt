@@ -4,6 +4,7 @@ import com.aharou.core.security.KeystoreCipher
 import com.aharou.core.util.FileLogger
 import com.aharou.feature.agent.data.local.database.AgentDatabase
 import com.aharou.feature.settings.data.local.dao.AIProviderDao
+import com.aharou.feature.settings.data.local.CustomRequestStore
 import com.aharou.feature.settings.data.local.entity.AIProviderEntity
 import com.aharou.feature.settings.domain.model.AIProviderConfig
 import com.aharou.feature.settings.domain.model.DEFAULT_KEY_WEIGHT
@@ -28,7 +29,8 @@ import javax.inject.Singleton
 @Singleton
 class AIProviderRepositoryImpl @Inject constructor(
     private val aiProviderDao: AIProviderDao,
-    private val agentDatabase: AgentDatabase
+    private val agentDatabase: AgentDatabase,
+    private val customRequestStore: CustomRequestStore
 ) : AIProviderRepository {
 
     private companion object {
@@ -76,6 +78,9 @@ class AIProviderRepositoryImpl @Inject constructor(
             val sortOrder = current?.sortOrder ?: (aiProviderDao.getMaxSortOrder() + 1)
             FileLogger.i(TAG, "保存提供商 id=${provider.id} name=${provider.name} sortOrder=$sortOrder")
             aiProviderDao.insertProvider(provider.copy(sortOrder = sortOrder).sanitized().toEntity())
+            current?.models?.lineSequence()?.map { it.substringBefore('|').trim() }
+                ?.filter { it.isNotEmpty() && it !in provider.models }
+                ?.forEach { customRequestStore.removeModel(provider.id, it) }
         }
     }
 
@@ -93,6 +98,7 @@ class AIProviderRepositoryImpl @Inject constructor(
     override suspend fun deleteProvider(id: String) {
         FileLogger.i(TAG, "删除提供商 id=$id")
         aiProviderDao.deleteProvider(id)
+        customRequestStore.removeProvider(id)
     }
 
     override suspend fun setSelectedModel(id: String, model: String) {
@@ -102,7 +108,13 @@ class AIProviderRepositoryImpl @Inject constructor(
 
     override suspend fun updateModels(id: String, models: List<String>) {
         FileLogger.d(TAG, "更新模型列表 provider=$id 共 ${models.size} 个")
-        aiProviderDao.setModels(id, models.joinToString("\n"))
+        agentDatabase.withTransaction {
+            val current = aiProviderDao.getProviderById(id)
+            aiProviderDao.setModels(id, models.joinToString("\n"))
+            current?.models?.lineSequence()?.map { it.substringBefore('|').trim() }
+                ?.filter { it.isNotEmpty() && it !in models }
+                ?.forEach { customRequestStore.removeModel(id, it) }
+        }
     }
 
     override suspend fun setProviderEnabled(id: String, isEnabled: Boolean) {
@@ -114,6 +126,7 @@ class AIProviderRepositoryImpl @Inject constructor(
         if (ids.isEmpty()) return
         FileLogger.i(TAG, "批量删除提供商 共 ${ids.size} 个")
         aiProviderDao.deleteProviders(ids)
+        ids.forEach(customRequestStore::removeProvider)
     }
 
     override suspend fun setProvidersEnabled(ids: List<String>, isEnabled: Boolean) {

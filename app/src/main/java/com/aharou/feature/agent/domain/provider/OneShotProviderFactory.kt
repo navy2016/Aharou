@@ -7,7 +7,6 @@ import com.aharou.feature.agent.data.remote.openai.OpenAIApi
 import com.aharou.feature.agent.domain.session.SessionUseCase
 import com.aharou.feature.settings.data.remote.ModelMetadataService
 import com.aharou.feature.settings.data.repository.DefaultModelSettingsRepository
-import com.aharou.feature.settings.data.repository.GeneralSettingsRepository
 import com.aharou.feature.settings.data.repository.ProviderKeyRotator
 import com.aharou.feature.settings.domain.model.AIProviderConfig
 import com.aharou.feature.settings.domain.model.ProviderType
@@ -28,7 +27,7 @@ class OneShotProviderFactory @Inject constructor(
     private val defaultModelSettingsRepository: DefaultModelSettingsRepository,
     private val providerKeyRotator: ProviderKeyRotator,
     private val modelMetadataService: ModelMetadataService,
-    private val generalSettingsRepository: GeneralSettingsRepository,
+    private val providerRequestSettings: ProviderRequestSettings,
     private val anthropicApi: AnthropicApi,
     private val openAIApi: OpenAIApi,
     private val geminiApi: GeminiApi,
@@ -52,13 +51,10 @@ class OneShotProviderFactory @Inject constructor(
         provider.useResponseApi = config.useResponseApi
         provider.providerId = config.id
         provider.logSessionId = AILogger.loggableSessionId(sessionId, sessionUseCase::isGhostSession)
-        provider.customHeaders = config.customHeaders
         val metadata = modelMetadataService.resolve(config.id, config.type, config.effectiveModel)
         provider.maxOutputTokens = metadata.outputTokens
         provider.temperature = if (metadata.supportsCustomTemperature) fixedTemperature(config.effectiveModel) else null
-        provider.firstByteTimeoutMs = generalSettingsRepository.firstByteTimeoutMs()
-        provider.streamIdleTimeoutMs = generalSettingsRepository.streamIdleTimeoutMs()
-        provider.maxNetworkRetries = generalSettingsRepository.maxNetworkRetries()
+        providerRequestSettings.apply(provider, config)
         return provider
     }
 

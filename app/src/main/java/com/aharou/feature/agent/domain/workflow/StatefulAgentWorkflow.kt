@@ -129,6 +129,7 @@ class StatefulAgentWorkflow @Inject constructor(
     private val titleModelSettingsRepository: TitleModelSettingsRepository,
     private val defaultModelSettingsRepository: DefaultModelSettingsRepository,
     private val generalSettingsRepository: GeneralSettingsRepository,
+    private val providerRequestSettings: com.aharou.feature.agent.domain.provider.ProviderRequestSettings,
     private val sessionUseCase: SessionUseCase,
     private val messagePersistenceUseCase: MessagePersistenceUseCase,
     private val checkpointManager: CheckpointManager,
@@ -380,16 +381,13 @@ class StatefulAgentWorkflow @Inject constructor(
         provider.useResponseApi = config.useResponseApi
         provider.providerId = config.id
         provider.logSessionId = AILogger.loggableSessionId(sessionId, messagePersistenceUseCase::isGhost)
-        provider.customHeaders = config.customHeaders
         val metadata = modelMetadataService.resolve(config.id, config.type, config.effectiveModel)
         // 模型元数据的输出上限（models.dev limit.output）：不传时 Anthropic 会把输出卡在 adapter 兜底值上。
         provider.maxOutputTokens = metadata.outputTokens
         // 元数据说不接受自定义温度就不发该字段（kimi-k3、gpt-5 系带了直接 400）；允许的只发官方固定值。
         provider.temperature = if (metadata.supportsCustomTemperature) fixedTemperature(config.effectiveModel) else null
         applyProviderParamOverrides(config.requestMiddleware, config.id, config.type.name, provider.model, provider)
-        provider.firstByteTimeoutMs = generalSettingsRepository.firstByteTimeoutMs()
-        provider.streamIdleTimeoutMs = generalSettingsRepository.streamIdleTimeoutMs()
-        provider.maxNetworkRetries = generalSettingsRepository.maxNetworkRetries()
+        providerRequestSettings.apply(provider, config)
         return provider
     }
 
