@@ -54,8 +54,12 @@ object ReasoningRequestResolver {
                 }
             }
             ReasoningDialect.ANTHROPIC_ADAPTIVE -> {
-                parameters.add("thinking", if (off) type("disabled") else type("adaptive").apply { addProperty("display", "summarized") })
-                if (!off) parameters.add("output_config", JsonObject().apply { addProperty("effort", value) })
+                if (off && automatic && !claudeThinkingProfile(model).canDisable) {
+                    warnings += ReasoningWarning.CANNOT_DISABLE
+                } else {
+                    parameters.add("thinking", if (off) type("disabled") else type("adaptive").apply { addProperty("display", "summarized") })
+                    if (!off) parameters.add("output_config", JsonObject().apply { addProperty("effort", value) })
+                }
             }
             ReasoningDialect.GEMINI_BUDGET -> {
                 if (!off || explicitOff) {
@@ -169,16 +173,11 @@ object ReasoningRequestResolver {
     }
 
     private fun automaticDialect(model: String, baseUrl: String, transport: ReasoningTransport, effort: ReasoningEffort): ReasoningDialect {
-        val name = model.trim().lowercase(Locale.ROOT).substringAfterLast('/').replace('_', '-')
+        val name = canonicalModelName(model)
         return when (transport) {
             ReasoningTransport.ANTHROPIC -> {
-                val match = Regex("""(?:^|[.:])claude-(opus|sonnet|haiku|fable|mythos)-(\d+)(?:[.-](\d{1,2})(?=$|[-.:@]))?(?=$|[-.:@])""").find(name)
-                val family = match?.groupValues?.get(1)
-                val major = match?.groupValues?.get(2)?.toIntOrNull() ?: 0
-                val minor = match?.groupValues?.get(3)?.toIntOrNull() ?: 0
-                if (major >= 5 || (family in setOf("opus", "sonnet") && major == 4 && minor >= 6)) {
-                    ReasoningDialect.ANTHROPIC_ADAPTIVE
-                } else ReasoningDialect.ANTHROPIC_BUDGET
+                if (claudeThinkingProfile(model).adaptive) ReasoningDialect.ANTHROPIC_ADAPTIVE
+                else ReasoningDialect.ANTHROPIC_BUDGET
             }
             ReasoningTransport.GEMINI_CONTENT -> {
                 if (Regex("""^gemini-[34](?=$|[-.:@])""").containsMatchIn(name)) ReasoningDialect.GEMINI_LEVEL
@@ -204,6 +203,28 @@ object ReasoningRequestResolver {
                 }
             }
         }
+    }
+
+    private data class ClaudeThinkingProfile(val adaptive: Boolean, val canDisable: Boolean)
+
+    private fun canonicalModelName(model: String): String =
+        model.trim().lowercase(Locale.ROOT).substringAfterLast('/').replace('_', '-')
+
+    private fun claudeThinkingProfile(model: String): ClaudeThinkingProfile {
+        val name = canonicalModelName(model)
+        if (Regex("""(?:^|[.:])claude-mythos-preview(?=$|[-.:@])""").containsMatchIn(name)) {
+            return ClaudeThinkingProfile(adaptive = true, canDisable = false)
+        }
+        val match = Regex("""(?:^|[.:])claude-(opus|sonnet|haiku|fable|mythos)-(\d+)(?:[.-](\d{1,2})(?=$|[-.:@]))?(?=$|[-.:@])""").find(name)
+        val family = match?.groupValues?.get(1)
+        val major = match?.groupValues?.get(2)?.toIntOrNull() ?: 0
+        val minor = match?.groupValues?.get(3)?.toIntOrNull() ?: 0
+        val adaptive = major >= 5 || (family in setOf("opus", "sonnet") && major == 4 && minor >= 6)
+        val cannotDisable = major == 5 && (
+            (family in setOf("fable", "mythos") && minor in 0..1) ||
+                (family in setOf("opus", "sonnet") && minor == 5)
+            )
+        return ClaudeThinkingProfile(adaptive, !cannotDisable)
     }
 
     private fun isCompatible(dialect: ReasoningDialect, transport: ReasoningTransport): Boolean = when (transport) {

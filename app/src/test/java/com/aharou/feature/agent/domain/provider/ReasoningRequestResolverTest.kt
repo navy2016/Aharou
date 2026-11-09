@@ -56,16 +56,21 @@ class ReasoningRequestResolverTest {
 
     @Test
     fun modelIdentificationHandlesPrefixesCaseAndVersionSeparators() {
-        listOf(" CLAUDE-SONNET-4.6 ", "anthropic/claude-opus-4-6", "us.anthropic.claude-sonnet-4-6-v1:0", "Claude_Opus_4_7", "claude-sonnet-5").forEach { model ->
+        listOf(
+            " CLAUDE-SONNET-4.6 ", "anthropic/claude-opus-4-6", "us.anthropic.claude-sonnet-4-6-v1:0",
+            "Claude_Opus_4_7", "claude-sonnet-5", "anthropic.claude-haiku-5-5", "Claude-Sonnet-5.5",
+            "eu.anthropic.claude-opus-5-5", "claude-opus-4-6@20260205", "global.anthropic.claude-fable-5-1",
+            "claude-mythos-preview", "anthropic/CLAUDE-MYTHOS-PREVIEW"
+        ).forEach { model ->
             val resolved = ReasoningRequestResolver.resolve(model, "", ReasoningTransport.ANTHROPIC, ReasoningEffort.MAX)
             assertEquals(model, ReasoningDialect.ANTHROPIC_ADAPTIVE, resolved.dialect)
             assertEquals("max", resolved.parameters.getAsJsonObject("output_config")["effort"].asString)
         }
-        listOf("claude-sonnet-4-20250514", "claude-sonnet-4-5", "notclaude-sonnet-4-6").forEach { model ->
+        listOf("claude-sonnet-4-20250514", "claude-sonnet-4-5", "notclaude-sonnet-4-6", "anthropic.claude-3-7-sonnet-20250219-v1:0").forEach { model ->
             val resolved = ReasoningRequestResolver.resolve(model, "", ReasoningTransport.ANTHROPIC, ReasoningEffort.HIGH)
             assertEquals(model, ReasoningDialect.ANTHROPIC_BUDGET, resolved.dialect)
         }
-        listOf(" Google/GEMINI-3.1-Pro-Preview ", "models/gemini-4-argon", "GEMINI_3_FLASH").forEach { model ->
+        listOf(" Google/GEMINI-3.1-Pro-Preview ", "models/gemini-4-argon", "GEMINI_3_FLASH", "publishers/google/models/gemini-3.8-flash", "google/gemini-4-argon@20261013").forEach { model ->
             val resolved = ReasoningRequestResolver.resolve(model, "", ReasoningTransport.GEMINI_CONTENT, ReasoningEffort.MAX)
             assertEquals(model, ReasoningDialect.GEMINI_LEVEL, resolved.dialect)
         }
@@ -73,6 +78,24 @@ class ReasoningRequestResolverTest {
             val resolved = ReasoningRequestResolver.resolve(model, "", ReasoningTransport.GEMINI_CONTENT, ReasoningEffort.HIGH)
             assertEquals(model, ReasoningDialect.GEMINI_BUDGET, resolved.dialect)
         }
+    }
+
+    @Test
+    fun automaticClaudeThinkingOnlyGenerationsKeepOffWarningAndAllowManualOverride() {
+        listOf("claude-mythos-preview", "anthropic/claude-fable-5", "claude-mythos-5.1", "eu.anthropic.claude-opus-5-5", "Claude-Sonnet-5.5").forEach { model ->
+            val off = ReasoningRequestResolver.resolve(model, "", ReasoningTransport.ANTHROPIC, ReasoningEffort.NONE)
+            assertEquals(model, 0, off.parameters.size())
+            assertTrue(model, ReasoningWarning.CANNOT_DISABLE in off.warnings)
+            val default = ReasoningRequestResolver.resolve(model, "", ReasoningTransport.ANTHROPIC, ReasoningEffort.DEFAULT)
+            assertEquals(0, default.parameters.size())
+        }
+        listOf("claude-sonnet-5", "claude-opus-4.8", "claude-haiku-5.5").forEach { model ->
+            val off = ReasoningRequestResolver.resolve(model, "", ReasoningTransport.ANTHROPIC, ReasoningEffort.NONE)
+            assertEquals(model, "disabled", off.parameters.getAsJsonObject("thinking")["type"].asString)
+        }
+        val manual = ReasoningRequestResolver.resolve("claude-opus-5.5", "", ReasoningTransport.ANTHROPIC, ReasoningEffort.NONE,
+            ReasoningConfig(dialect = ReasoningDialect.ANTHROPIC_ADAPTIVE))
+        assertEquals("disabled", manual.parameters.getAsJsonObject("thinking")["type"].asString)
     }
 
     @Test
