@@ -1,6 +1,8 @@
 package com.aharou.feature.agent.domain.provider
 
 import com.aharou.core.util.AILogger
+import com.aharou.feature.agent.data.remote.gemini.InteractionDelta
+import com.aharou.feature.agent.data.remote.gemini.InteractionEvent
 import com.aharou.feature.agent.data.remote.gemini.GeminiApi
 import com.aharou.feature.agent.domain.model.AgentImage
 import com.aharou.feature.agent.domain.model.AgentMessage
@@ -8,6 +10,7 @@ import com.aharou.feature.agent.domain.tool.AgentTool
 import com.aharou.feature.agent.domain.tool.ToolCall
 import com.aharou.feature.agent.domain.tool.modelToolResultText
 import com.aharou.feature.settings.domain.model.ReasoningConfig
+import com.aharou.feature.settings.domain.model.ProviderType
 import com.google.gson.JsonParser
 import com.google.gson.JsonObject
 import javax.inject.Inject
@@ -49,6 +52,7 @@ class GeminiAdapter @Inject constructor(
 
     // 原生 generateContent 不发 generationConfig.temperature：Gemini 2.0 起服务端默认就是 1.0，与推荐值一致。
     override var temperature: Float? = null
+    override var serviceTier: String? = null
 
     private fun extraHeaders(): Map<String, String> =
         resolveCustomHeaders(customHeaders, logSessionId, apiKey)
@@ -61,6 +65,10 @@ class GeminiAdapter @Inject constructor(
      * 模型名在请求体里（故没有「baseUrl 末尾是模型名」那种特例），流式与非流式**同一个端点**，
      * 靠 `?alt=sse` + 请求体 `stream: true` 切换。useFullUrl 时直接用用户填的完整 baseUrl。
      */
+    private val usesInteractionsApi: Boolean
+        get() = reasoningTransport(ProviderType.GEMINI, useResponseApi, model,
+            if (useFullUrl) baseUrl else "") == ReasoningTransport.GEMINI_INTERACTIONS
+
     private fun resolveInteractionsUrl(stream: Boolean): String {
         if (useFullUrl) return baseUrl
         val url = joinUrl(baseUrl, "v1beta/interactions")
@@ -73,7 +81,7 @@ class GeminiAdapter @Inject constructor(
         tools: List<AgentTool>,
         reasoningEffort: String?
     ): AIResponse {
-        if (useResponseApi) {
+        if (usesInteractionsApi) {
             return completeViaInteractions(systemPrompt, messages, tools, reasoningEffort)
         }
 
@@ -192,7 +200,7 @@ class GeminiAdapter @Inject constructor(
     // 取消信号可能落在挂起的 emit 上；flow{} 里恢复后再次 emit（如 Retrying/KeySwitched）会触发
     // Flow 异常透明性违规（IllegalStateException），channel 的 send 不受该检查约束。
     ): Flow<AIStreamChunk> = channelFlow {
-        if (useResponseApi) {
+        if (usesInteractionsApi) {
             streamViaInteractions(systemPrompt, messages, tools, reasoningEffort)
             return@channelFlow
         }
@@ -330,6 +338,9 @@ class GeminiAdapter @Inject constructor(
                                             if (name.isNotEmpty()) send(AIStreamChunk.ToolCallDeclared(name))
                                             val callId = fnCall.get("id")?.takeIf { !it.isJsonNull }?.asString?.takeIf { it.isNotBlank() } ?: name
                                             val argsStr = fnCall.getAsJsonObject("args")?.toString() ?: "{}"
+                                            // 本协议参数据整块到达、没有增量可节流：用一次性节流器只按体积门限判断，
+                                            // 大文件写入才值得把「正在编辑文件」说得更具体。
+                                            ToolArgProgressThrottle().sample(name, argsStr)?.let { send(it) }
                                             val argsJson = parseToolArguments(argsStr)
                                             toolCalls.add(ToolCall(id = callId, name = name, arguments = argsJson))
                                         }
@@ -489,6 +500,7 @@ class GeminiAdapter @Inject constructor(
                 attemptOnce = { onContent ->
                     withFirstContentTimeout(firstByteTimeoutMs) { firstContent ->
                     val acc = GeminiInteractionsStreamAccumulator()
+                    val argProgress = ToolArgProgressSampler()
 
                     val call = api.streamInteractionCustom(
                         url = url, apiKey = requestKey(), extraHeaders = extraHeaders(),
@@ -518,6 +530,7 @@ class GeminiAdapter @Inject constructor(
                                 // 单个事件的字段类型异常不应废掉整条流，只跳过该事件；
                                 // 但 StreamApiException（error 事件）与取消信号必须放行。
                                 val delta = try {
+                                    sampleInteractionsArgProgress(obj, argProgress)?.let { send(it) }
                                     acc.accept(obj).also {
                                         if (acc.receivedContent) {
                                             firstContent.receivedContent()
@@ -574,6 +587,41 @@ class GeminiAdapter @Inject constructor(
             throw enriched
         } finally {
             sseLog.finish()
+        }
+    }
+
+    /**
+     * Interactions 流的参数进度：step.start 里拿工具名，arguments 增量里数长度。
+     * 与累加器同用 `index` 作 key，保证同一 step 的不同事件落在同一条累计里。
+     */
+    private fun sampleInteractionsArgProgress(
+        event: com.google.gson.JsonObject,
+        sampler: ToolArgProgressSampler
+    ): AIStreamChunk.ToolCallArgumentProgress? {
+        val key = event.get("index")?.takeIf { it.isJsonPrimitive }?.asString ?: "0"
+        val type = event.get("event_type")?.takeIf { it.isJsonPrimitive }?.asString
+            ?: event.get("type")?.takeIf { it.isJsonPrimitive }?.asString
+        return when (type) {
+            InteractionEvent.STEP_START -> {
+                event.get("step")?.takeIf { it.isJsonObject }?.asJsonObject
+                    ?.get("name")?.takeIf { !it.isJsonNull }?.asString
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { sampler.declare(key, it) }
+                null
+            }
+
+            InteractionEvent.STEP_DELTA -> {
+                val delta = event.get("delta")?.takeIf { it.isJsonObject }?.asJsonObject ?: return null
+                val deltaType = delta.get("type")?.takeIf { it.isJsonPrimitive }?.asString
+                if (deltaType != InteractionDelta.ARGUMENTS && deltaType != InteractionDelta.ARGUMENTS_LEGACY) {
+                    return null
+                }
+                val piece = delta.get("arguments")?.takeIf { !it.isJsonNull }?.asString
+                    ?: delta.get("partial_arguments")?.takeIf { !it.isJsonNull }?.asString
+                if (piece.isNullOrEmpty()) null else sampler.append(key, piece)
+            }
+
+            else -> null
         }
     }
 

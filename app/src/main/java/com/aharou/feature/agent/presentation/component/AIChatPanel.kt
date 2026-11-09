@@ -241,13 +241,15 @@ fun AIChatPanel(
     val streamingReasoning by viewModel.streamingReasoning.collectAsStateWithLifecycle()
     val reasoningTiming by viewModel.reasoningTiming.collectAsStateWithLifecycle()
     val preparingTool by viewModel.preparingTool.collectAsStateWithLifecycle()
+    val preparingToolProgress by viewModel.preparingToolProgress.collectAsStateWithLifecycle()
     // 等待模型或工具执行时的状态文案：
     // 1. 若当前有正在执行的工具（runningTool）或模型正在准备的工具（preparingTool，工具名先到参数还在流式），
-    //    直接说清在做什么（「正在读取文件」、「正在编辑文件」等，见 toolRunningLabelRes）；
+    //    直接说清在做什么（「正在读取文件」、「正在写入 342 行」等，见 toolStatusLabel）；
     // 2. 否则（如等待模型首字吐出、纯思考间隙）兜底显示「正在思考」。
     val activeToolName = runningTool.lastOrNull()?.toolName?.takeIf { it.isNotBlank() } ?: preparingTool
-    val thinkingLabel = activeToolName?.let { stringResource(toolRunningLabelRes(it)) }
-        ?: stringResource(R.string.chat_status_thinking)
+    // 轮头说粗粒度，底部呈现细粒度（写到多少了）；两处挂同一句会在同一屏刷两次。
+    val turnLiveLabel = activeToolName?.let { stringResource(toolRunningLabelRes(it)) } ?: stringResource(R.string.chat_status_thinking)
+    val thinkingLabel = toolStatusLabel(activeToolName, preparingToolProgress)
     val pendingPermission by viewModel.pendingToolPermission.collectAsStateWithLifecycle()
     val pendingBatch by viewModel.pendingPermissionBatch.collectAsStateWithLifecycle()
     val pendingPermissionSessionTitle by viewModel.pendingToolPermissionSessionTitle.collectAsStateWithLifecycle()
@@ -658,30 +660,8 @@ fun AIChatPanel(
         handlePickedAttachments(uris, images = true)
     }
 
-    // 拍照：输出到 cache 临时文件（FileProvider 授权 uri），拍完按图片附件处理。
-    var cameraPhotoUri by remember { mutableStateOf<Uri?>(null) }
-    val takePictureLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
-        val uri = cameraPhotoUri
-        cameraPhotoUri = null
-        if (success && uri != null) {
-            handlePickedAttachments(listOf(uri), images = true)
-        }
-    }
-    fun takePhoto() {
-        val photoFile = File(context.cacheDir, "camera_${System.currentTimeMillis()}.jpg")
-        val uri = runCatching {
-            androidx.core.content.FileProvider.getUriForFile(
-                context,
-                "${context.packageName}.fileprovider",
-                photoFile
-            )
-        }.getOrNull()
-        if (uri == null) {
-            Toast.makeText(context, context.getString(R.string.chat_camera_file_failed), Toast.LENGTH_SHORT).show()
-            return
-        }
-        cameraPhotoUri = uri
-        takePictureLauncher.launch(uri)
+    val takePhoto = rememberChatCameraCapture { uri ->
+        handlePickedAttachments(listOf(uri), images = true)
     }
 
     // 缓冲流式文本与思考过程：流式期间跟随 streamingText / streamingReasoning；流式刚结束而数据库尚未完成派发期间（messages 末尾仍是 USER/TOOL 消息），
@@ -1099,12 +1079,8 @@ fun AIChatPanel(
         chatImageLoader(viewModel.fileAccess, viewerDecodeSpec.maxEdge, viewerDecodeSpec.maxPixels)
     }
 
-    // 文件卡片点击用系统 app 打开：重取/拷贝需要在 IO 线程跑（远程模式要下载），故由这里注入协程。
-    val attachmentOpener = remember(viewModel.fileAccess, context) {
-        AttachmentOpener { attachment ->
-            scope.launch { openSentAttachment(context, attachment, viewModel.fileAccess) }
-        }
-    }
+    // 附件点击：普通文件交给系统 app（远程模式要先下载），HTML 走应用内预览。
+    val attachmentOpener = rememberAttachmentOpener(context, viewModel.fileAccess, scope)
 
     // 过程项一律由 [flattenTurnProcesses] 平铺成主列表 item：折叠头与分组头在这里只画自己那一行，
     // 不再内联展开子项——展开就是列表里多出几个顶层 item，交给 LazyColumn 按可见范围组合。
@@ -1118,7 +1094,7 @@ fun AIChatPanel(
                 startMs = item.message.timestamp,
                 durationMs = header.endMessageId?.let { taskDurations[it] },
                 outcome = item.turnOutcome,
-                liveLabel = thinkingLabel.takeIf { header.running },
+                liveLabel = turnLiveLabel.takeIf { header.running },
                 expanded = header.expanded,
                 onToggle = {
                     viewModel.setTurnExpanded(header.key, !header.expanded)
@@ -1136,14 +1112,16 @@ fun AIChatPanel(
                 )
             }
             group != null -> {
+                val groupRunning = group.any { it.id in runningToolIds || it.isToolRunning(null) }
                 ToolCallGroupHeader(
                     count = group.size,
-                    running = group.any { it.id in runningToolIds || it.isToolRunning(null) },
+                    running = groupRunning,
                     expanded = item.groupExpanded,
                     onToggle = {
                         viewModel.setToolExpanded(item.key, !item.groupExpanded)
                         onToolItemToggled()
-                    }
+                    },
+                    summary = toolGroupActivitySummary(group)
                 )
             }
             else -> {
@@ -1525,7 +1503,7 @@ fun AIChatPanel(
                             PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
                         )
                     },
-                    onTakePhoto = ::takePhoto,
+                    onTakePhoto = takePhoto,
                     slashCommands = slashCommands,
                     queuedRequests = queuedRequests,
                     onRemoveQueued = { viewModel.removeQueuedRequest(it) },
@@ -1556,7 +1534,8 @@ fun AIChatPanel(
                             settingsViewModel?.refreshProviderDashboard(it, context = context, force = true)
                         }
                     },
-                    tokenEstimated = contextUsages[currentSessionId]?.estimated ?: (sessionLastInputTokens <= 0 && currentSessionId != null), contextBreakdown = contextUsages[currentSessionId]?.breakdown,
+                    tokenEstimated = contextUsages[currentSessionId]?.estimated ?: (sessionLastInputTokens <= 0 && currentSessionId != null),
+                    contextBreakdown = contextUsages[currentSessionId]?.breakdown,
                     tokenProgress = run {
                         val contextLimit = activeModelMetadata?.let {
                             com.aharou.feature.settings.domain.model.ModelContextPolicy.effectiveInputBudget(it)

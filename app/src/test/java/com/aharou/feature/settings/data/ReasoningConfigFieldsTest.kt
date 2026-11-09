@@ -16,6 +16,7 @@ import com.aharou.feature.settings.data.local.CustomModelMetadataStore
 import com.aharou.feature.settings.data.local.CustomRequestStore
 import com.aharou.feature.settings.data.local.ReasoningConfigStore
 import com.aharou.feature.settings.data.repository.ModelReasoningEffortRepository
+import com.aharou.feature.settings.data.repository.ModelServiceTierRepository
 import com.aharou.feature.settings.domain.model.AIProviderConfig
 import com.aharou.feature.settings.domain.model.ProviderType
 import com.aharou.feature.settings.domain.model.ReasoningConfig
@@ -52,6 +53,7 @@ class ReasoningConfigFieldsTest {
         context = ApplicationProvider.getApplicationContext()
         context.getSharedPreferences("aharou_reasoning_config", Context.MODE_PRIVATE).edit().clear().commit()
         context.getSharedPreferences("model_reasoning_effort_prefs", Context.MODE_PRIVATE).edit().clear().commit()
+        context.getSharedPreferences("model_service_tier_prefs", Context.MODE_PRIVATE).edit().clear().commit()
         mockkObject(KeystoreCipher)
         every { KeystoreCipher.encryptString(any()) } answers { firstArg<String>() }
         every { KeystoreCipher.decryptString(any()) } answers { firstArg<String>() }
@@ -67,6 +69,7 @@ class ReasoningConfigFieldsTest {
     fun tearDown() {
         context.getSharedPreferences("aharou_reasoning_config", Context.MODE_PRIVATE).edit().clear().commit()
         context.getSharedPreferences("model_reasoning_effort_prefs", Context.MODE_PRIVATE).edit().clear().commit()
+        context.getSharedPreferences("model_service_tier_prefs", Context.MODE_PRIVATE).edit().clear().commit()
         unmockkObject(KeystoreCipher)
     }
 
@@ -133,6 +136,7 @@ class ReasoningConfigFieldsTest {
             provider?.takeIf { it.id == firstArg<String>() }
         }
         val defaultEffort = ModelReasoningEffortRepository(context)
+        val serviceTier = ModelServiceTierRepository(context)
         defaultEffort.set("reasoning-fields", "model-2.5:latest", ReasoningEffort.XHIGH.name)
         val registry = ConfigRegistry.init(context)
         ConfigProviderFields(
@@ -141,6 +145,7 @@ class ReasoningConfigFieldsTest {
             customRequestStore = CustomRequestStore(context),
             reasoningConfigStore = store,
             reasoningStore = defaultEffort,
+            serviceTierStore = serviceTier,
             providers = providers,
         ).registerInto(registry)
         val basePath = "providers.reasoning-fields.models.model-2.5:latest"
@@ -154,7 +159,17 @@ class ReasoningConfigFieldsTest {
         effortField.write(ConfigValue.Str("max"))
         assertEquals(ReasoningEffort.MAX.name, defaultEffort.get("reasoning-fields", "model-2.5:latest"))
         assertEquals(config, store.getModel("reasoning-fields", "model-2.5:latest"))
+        val tierField = registry.resolveField("$basePath.service_tier")!!
+        assertEquals(ConfigValue.Str(""), tierField.read())
+        tierField.write(ConfigValue.Str("fast"))
+        assertEquals("fast", serviceTier.apiValueFor("reasoning-fields", "model-2.5:latest"))
+        assertEquals(ConfigValue.Str("max"), effortField.read())
+        assertEquals(config, store.getModel("reasoning-fields", "model-2.5:latest"))
+        tierField.write(ConfigValue.Str(""))
+        assertNull(serviceTier.apiValueFor("reasoning-fields", "model-2.5:latest"))
+        assertThrows(ConfigError.InvalidValue::class.java) { tierField.write(ConfigValue.Str("unsupported")) }
         provider = provider?.copy(models = emptyList())
+        assertNull(registry.resolveField("$basePath.service_tier"))
         assertNull(registry.resolveField("$basePath.reasoning_config"))
         provider = null
         assertNull(registry.resolveField("$basePath.reasoning_config"))

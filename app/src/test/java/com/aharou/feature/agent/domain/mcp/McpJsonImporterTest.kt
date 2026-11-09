@@ -31,7 +31,8 @@ class McpJsonImporterTest {
         fileChangeHub = mockk<FileChangeHub>(relaxed = true).also { hub ->
             every { hub.watchAicode() } returns emptyFlow<FileChangeBatch>()
             every { hub.watchWorkspace(any()) } returns emptyFlow<FileChangeBatch>()
-        }
+        },
+        pluginServers = mockk(relaxed = true)
     )
 
     private fun stubNewGlobal() {

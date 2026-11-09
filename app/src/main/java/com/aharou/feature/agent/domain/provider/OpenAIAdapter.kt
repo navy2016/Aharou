@@ -25,6 +25,8 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.serialization.json.JsonObject
+import com.aharou.feature.agent.data.remote.openai.ResponsesEvent
+import com.aharou.feature.agent.data.remote.openai.ResponsesItem
 import com.aharou.feature.agent.data.remote.openai.OpenAIToolCall
 import com.aharou.feature.agent.data.remote.openai.OpenAIToolDefinition
 import com.aharou.feature.agent.data.remote.openai.OpenAIFunctionDefinition
@@ -73,6 +75,7 @@ class OpenAIAdapter @Inject constructor(
 
     // null 时请求体不带 temperature（Gson 跳过 null 字段），交由服务端默认。
     override var temperature: Float? = null
+    override var serviceTier: String? = null
 
     private fun authorization(): String? =
         if (customHeaders.containsHeader("Authorization")) null else bearerTokenOrNull(apiKey)
@@ -97,6 +100,10 @@ class OpenAIAdapter @Inject constructor(
      * useResponseApi 时请求体是 Responses 格式（`input`），若仍打到 chat/completions 会被服务端以
      * 「missing field `messages`」拒绝，故必须同步切端点。useFullUrl 时直接用用户填的完整 baseUrl。
      */
+    private val usesResponsesApi: Boolean
+        get() = reasoningTransport(ProviderType.OPENAI, useResponseApi, model,
+            if (useFullUrl) baseUrl else "") == ReasoningTransport.OPENAI_RESPONSES
+
     private fun resolveApiUrl(): String {
         if (useFullUrl) return baseUrl
         val path = if (useResponseApi) "v1/responses" else defaultProviderApiPath(ProviderType.OPENAI)
@@ -109,7 +116,7 @@ class OpenAIAdapter @Inject constructor(
         tools: List<AgentTool>,
         reasoningEffort: String?
     ): AIResponse {
-        if (useResponseApi) return completeViaResponses(systemPrompt, messages, tools, reasoningEffort)
+        if (usesResponsesApi) return completeViaResponses(systemPrompt, messages, tools, reasoningEffort)
 
         val openAIMessages = buildList {
             if (systemPrompt.isNotBlank()) {
@@ -136,7 +143,8 @@ class OpenAIAdapter @Inject constructor(
             tools = toolDefs,
             tool_choice = if (toolDefs != null) "auto" else null,
             stream = false,
-            prompt_cache_key = if (chatCacheKeyEnabled) logSessionId else null
+            prompt_cache_key = if (chatCacheKeyEnabled) logSessionId else null,
+            service_tier = serviceTier
         )
         val seq = AILogger.logRequest(logSessionId, "OpenAI", model, "POST", url, request)
 
@@ -219,6 +227,8 @@ class OpenAIAdapter @Inject constructor(
         // OpenAI 官方 Responses 原生支持 prompt_cache_key（同会话路由到同一缓存 shard）；
         // 自动管理缓存的服务（如 DeepSeek）会静默忽略该字段，不会报错。
         logSessionId?.let { request["prompt_cache_key"] = it }
+        // 服务档位：只有用户在该模型下显式选了标准/Fast/Ultrafast 才带，默认不带以保持请求体不变。
+        serviceTier?.let { request["service_tier"] = it }
         codexClientMetadata()?.let { request["client_metadata"] = it }
         return request
     }
@@ -333,7 +343,7 @@ class OpenAIAdapter @Inject constructor(
     // 取消信号可能落在挂起的 emit 上；flow{} 里恢复后再次 emit（如 Retrying/KeySwitched）会触发
     // Flow 异常透明性违规（IllegalStateException），channel 的 send 不受该检查约束。
     ): Flow<AIStreamChunk> = channelFlow {
-        if (useResponseApi) {
+        if (usesResponsesApi) {
             streamViaResponses(systemPrompt, messages, tools, reasoningEffort)
             return@channelFlow
         }
@@ -364,7 +374,8 @@ class OpenAIAdapter @Inject constructor(
             tool_choice = if (toolDefs != null) "auto" else null,
             stream = true,
             stream_options = StreamOptions(include_usage = true),
-            prompt_cache_key = if (chatCacheKeyEnabled) logSessionId else null
+            prompt_cache_key = if (chatCacheKeyEnabled) logSessionId else null,
+            service_tier = serviceTier
         )
         val seq = AILogger.logRequest(logSessionId, "OpenAI", model, "POST", url, request)
         // 原始 SSE 分批落盘（见 AILogger.beginRawSse），本轮结束在 finally 收尾。
@@ -410,14 +421,16 @@ class OpenAIAdapter @Inject constructor(
                 }
                 try {
                     val reader = rb.charStream().buffered()
-                    // 收到服务端 [DONE] 标记即 break 正常结束；readLine() 返回 null 则视为
-                    // 流被异常截断（网络中断/TCP 重置/readTimeout），必须抛异常让重试/日志接管——
-                    // 否则原本会用截断数据「正常完成」，表现为 AI 突然中断且无任何错误日志。
-                    // （收到 [DONE] 即 break，故走到 readLine()==null 时必然未收到过结束标记。）
+                    // 收到 [DONE] 即 break；部分兼容服务（第三方中转最常见）发完 finish_reason 就关流，
+                    // 这种内容已完整、按正常结束收尾。既无终止事件又无 finish_reason 才算真断流，
+                    // 抛异常交给重试，否则会用截断数据「正常完成」且不留错误日志。
                     while (true) {
                         coroutineContext.ensureActive()
                         val line = reader.readLine()
-                            ?: throw IOException("SSE 流被中断：未收到 [DONE] 结束标记（疑似网络断开）")
+                        if (line == null) {
+                            if (finishReason != null) break
+                            throw IOException("SSE 流被中断：未收到 [DONE] 结束标记（疑似网络断开）")
+                        }
                         idleWatchdog.touch()
                         if (!line.startsWith("data:")) continue
                         val data = line.removePrefix("data:").trim()
@@ -443,11 +456,11 @@ class OpenAIAdapter @Inject constructor(
                                 streamCacheCreationTokens = u.getAsJsonObject("prompt_tokens_details")?.get("cache_write_tokens")?.takeIf { !it.isJsonNull }?.asInt ?: streamCacheCreationTokens
                             }
                             val choice = obj.getAsJsonArray("choices")?.firstOrNull()?.asJsonObject ?: continue
-                            val delta = choice.getAsJsonObject("delta") ?: continue
-
+                            // 结束标记必须先读：部分兼容服务末帧只带 finish_reason、没有 delta 字段。
                             choice.get("finish_reason")?.takeIf { !it.isJsonNull }?.asString?.let {
                                 finishReason = it
                             }
+                            val delta = choice.getAsJsonObject("delta") ?: continue
 
                             // 文字增量
                             delta.get("content")?.takeIf { !it.isJsonNull }?.asString?.let { c ->
@@ -496,7 +509,11 @@ class OpenAIAdapter @Inject constructor(
                                         if (acc.name.isEmpty()) send(AIStreamChunk.ToolCallDeclared(name))
                                         acc.name = name
                                     }
-                                    fn.get("arguments")?.takeIf { !it.isJsonNull }?.asString?.let { budget.add(it); acc.args.append(it) }
+                                    fn.get("arguments")?.takeIf { !it.isJsonNull }?.asString?.let { piece ->
+                                        budget.add(piece)
+                                        acc.args.append(piece)
+                                        acc.progress.sample(acc.name, acc.args)?.let { send(it) }
+                                    }
                                 }
                             }
                             // 生图扩展：图片整块到达、无增量，累积待 Final 交工作流落盘。
@@ -576,6 +593,7 @@ class OpenAIAdapter @Inject constructor(
                 attemptOnce = { onContent ->
                     withFirstContentTimeout(firstByteTimeoutMs) { firstContent ->
                     val acc = ResponsesStreamAccumulator()
+                    val argProgress = ToolArgProgressSampler()
 
                     val call = api.streamResponsesCustom(
                         url = url, authorization = authorization(), extraHeaders = extraHeaders(),
@@ -611,6 +629,7 @@ class OpenAIAdapter @Inject constructor(
                                 // 单个事件的字段类型异常不应废掉整条流，只跳过该事件；
                                 // 但 StreamApiException（response.failed）与取消信号必须放行。
                                 val delta = try {
+                                    sampleResponsesArgProgress(obj, argProgress)?.let { send(it) }
                                     acc.accept(obj).also {
                                         if (acc.receivedContent) {
                                             firstContent.receivedContent()
@@ -675,7 +694,43 @@ class OpenAIAdapter @Inject constructor(
         var id = ""
         var name = ""
         val args = StringBuilder()
+        val progress = ToolArgProgressThrottle()
     }
+
+    /**
+     * Responses 流的参数进度：delta 事件只带片段，工具名在 output_item 事件里，
+     * 所以先按同一个 call key 记下名字，再按片段累积长度。
+     */
+    private fun sampleResponsesArgProgress(
+        event: com.google.gson.JsonObject,
+        sampler: ToolArgProgressSampler
+    ): AIStreamChunk.ToolCallArgumentProgress? {
+        val key = event.responsesCallKey()
+        return when (event.get("type")?.takeIf { it.isJsonPrimitive }?.asString) {
+            ResponsesEvent.OUTPUT_ITEM_ADDED, ResponsesEvent.OUTPUT_ITEM_DONE -> {
+                val item = event.get("item")?.takeIf { it.isJsonObject }?.asJsonObject
+                if (item?.get("type")?.takeIf { it.isJsonPrimitive }?.asString == ResponsesItem.FUNCTION_CALL) {
+                    item.get("name")?.takeIf { !it.isJsonNull }?.asString
+                        ?.takeIf { it.isNotEmpty() }
+                        ?.let { sampler.declare(key, it) }
+                }
+                null
+            }
+
+            ResponsesEvent.FUNCTION_CALL_ARGS_DELTA -> {
+                val piece = event.get("delta")?.takeIf { !it.isJsonNull }?.asString
+                if (piece.isNullOrEmpty()) null else sampler.append(key, piece)
+            }
+
+            else -> null
+        }
+    }
+
+    /** 与累加器的 callKey 同口径：同一调用的不同事件必须落在同一个 key 上。 */
+    private fun com.google.gson.JsonObject.responsesCallKey(): String =
+        get("output_index")?.takeIf { it.isJsonPrimitive }?.asString
+            ?: get("item_id")?.takeIf { it.isJsonPrimitive }?.asString
+            ?: "0"
 
     private fun convertToOpenAIMessages(messages: List<AgentMessage>): MutableList<OpenAIChatMessage> {
         val raw = messages.map { message ->

@@ -7,10 +7,11 @@ import com.aharou.feature.settings.domain.model.ProviderType
 import com.aharou.feature.settings.data.local.CustomRequestStore
 import com.aharou.feature.settings.data.local.ReasoningConfigStore
 import com.aharou.feature.settings.data.repository.ModelReasoningEffortRepository
+import com.aharou.feature.settings.data.repository.ModelServiceTierRepository
 import com.aharou.feature.settings.domain.model.ReasoningConfig
 import com.aharou.feature.agent.domain.model.ReasoningEffort
 import com.aharou.feature.agent.domain.provider.ReasoningRequestResolver
-import com.aharou.feature.agent.domain.provider.reasoningTransport
+import com.aharou.feature.agent.domain.provider.ReasoningTransport
 import com.aharou.feature.agent.domain.middleware.RequestMiddleware
 import com.aharou.feature.settings.data.local.mergeCustomRequestBody
 import com.aharou.feature.settings.data.local.mergeCustomRequestOverrides
@@ -81,6 +82,7 @@ class ModelApiService @Inject constructor(
     private val customRequestStore: CustomRequestStore,
     private val reasoningConfigStore: ReasoningConfigStore,
     private val reasoningEffortStore: ModelReasoningEffortRepository,
+    private val serviceTierStore: ModelServiceTierRepository,
     @param:ApplicationContext private val context: Context
 ) {
     private val json = Json { ignoreUnknownKeys = true }
@@ -231,13 +233,20 @@ class ModelApiService @Inject constructor(
         val config = reasoningConfigStore.getModel(providerId, model)
         val effort = reasoningEffortStore.get(providerId, model)
             ?.let { runCatching { ReasoningEffort.valueOf(it) }.getOrNull() } ?: ReasoningEffort.DEFAULT
+        val serviceTier = serviceTierStore.apiValueFor(providerId, model)
         val middleware = RequestMiddleware.parseConfig(requestMiddleware)?.takeIf { it.enabled }
         val actualModel = middleware?.modelMap?.get(model)?.takeIf { it.isNotBlank() } ?: model
-        val first = testModelOnce(start, baseUrl, apiKey, type, useFullUrl, useResponseApi, actualModel, headers, custom.body, config, effort)
+        val first = testModelOnce(
+            start, baseUrl, apiKey, type, useFullUrl, useResponseApi, actualModel,
+            headers, custom.body, config, effort, serviceTier
+        )
         if (!first.retryable) return@withContext first.result
         // DNS 解析失败会被 libcore 缓存，紧接着重试必然重复失败；退避 3 秒再试一次（delay 不占线程）。
         delay(NETWORK_RETRY_DELAY_MS)
-        testModelOnce(start, baseUrl, apiKey, type, useFullUrl, useResponseApi, actualModel, headers, custom.body, config, effort).result
+        testModelOnce(
+            start, baseUrl, apiKey, type, useFullUrl, useResponseApi, actualModel,
+            headers, custom.body, config, effort, serviceTier
+        ).result
     }
 
     /** 一次尝试；「是否值得重试」随结果带出，因为网络异常类型只在 catch 里看得到。 */
@@ -253,18 +262,20 @@ class ModelApiService @Inject constructor(
         customBody: com.google.gson.JsonObject?,
         reasoningConfig: ReasoningConfig,
         effort: ReasoningEffort,
+        serviceTier: String?,
     ): TestAttempt {
         // 空 Key 也放行（免鉴权供应商）；真正需要 Key 的平台会由上游返回鉴权错误。
-        val (url, payload) = when (type) {
-            ProviderType.ANTHROPIC -> {
+        val protocol = ModelTestResponseValidator.protocol(type, useResponseApi, model, if (useFullUrl) baseUrl else "")
+        val (url, payload) = when (protocol) {
+            ModelTestProtocol.ANTHROPIC -> {
                 val u = if (useFullUrl) baseUrl else joinUrl(baseUrl, "v1/messages")
                 u to """{"model":${model.jsonStr()},"max_tokens":1,"messages":[{"role":"user","content":"hi"}]}"""
             }
-            ProviderType.GEMINI -> {
+            ModelTestProtocol.GEMINI, ModelTestProtocol.INTERACTIONS -> {
                 // Interactions 的请求体是 `input`（step 序列或纯字符串），必须同时切到
                 // v1beta/interactions 端点；仍打到 generateContent 会被以缺 `contents` 拒绝。
                 // 图像模型（Nano Banana 系）只支持 Interactions，无论开关是否开启都强制切。
-                if (useResponseApi || model.endsWith("-image", ignoreCase = true)) {
+                if (protocol == ModelTestProtocol.INTERACTIONS) {
                     val u = if (useFullUrl) baseUrl else joinUrl(baseUrl, "v1beta/interactions")
                     u to """{"model":${model.jsonStr()},"input":"hi","store":false}"""
                 } else {
@@ -284,9 +295,9 @@ class ModelApiService @Inject constructor(
             else -> {
                 // Responses API 的请求体是 `input` 格式，必须同时切到 v1/responses 端点；
                 // 仍打到 chat/completions 会被服务端以「missing field `messages`」拒绝。
-                val path = if (useResponseApi) "v1/responses" else "v1/chat/completions"
+                val path = if (protocol == ModelTestProtocol.RESPONSES) "v1/responses" else "v1/chat/completions"
                 val u = if (useFullUrl) baseUrl else joinUrl(baseUrl, path)
-                if (useResponseApi) {
+                if (protocol == ModelTestProtocol.RESPONSES) {
                     u to """{"model":${model.jsonStr()},"input":[{"role":"user","content":"hi"}]}"""
                 } else {
                     u to """{"model":${model.jsonStr()},"max_completion_tokens":1,"messages":[{"role":"user","content":"hi"}]}"""
@@ -294,10 +305,20 @@ class ModelApiService @Inject constructor(
             }
         }
 
-        val transport = reasoningTransport(type, useResponseApi || (type == ProviderType.GEMINI && model.endsWith("-image", true)))
+        val transport = when (protocol) {
+            ModelTestProtocol.CHAT -> ReasoningTransport.OPENAI_CHAT
+            ModelTestProtocol.RESPONSES -> ReasoningTransport.OPENAI_RESPONSES
+            ModelTestProtocol.ANTHROPIC -> ReasoningTransport.ANTHROPIC
+            ModelTestProtocol.GEMINI -> ReasoningTransport.GEMINI_CONTENT
+            ModelTestProtocol.INTERACTIONS -> ReasoningTransport.GEMINI_INTERACTIONS
+        }
+        val base = com.google.gson.JsonParser.parseString(payload).asJsonObject.apply {
+            if (protocol == ModelTestProtocol.CHAT || protocol == ModelTestProtocol.RESPONSES) {
+                serviceTier?.let { addProperty("service_tier", it) }
+            }
+        }
         val generated = ReasoningRequestResolver.apply(
-            com.google.gson.JsonParser.parseString(payload).asJsonObject,
-            ReasoningRequestResolver.resolve(model, baseUrl, transport, effort, reasoningConfig), transport
+            base, ReasoningRequestResolver.resolve(model, baseUrl, transport, effort, reasoningConfig), transport
         )
         val finalPayload = (customBody?.let { mergeCustomRequestBody(generated, it) } ?: generated).toString()
         val request = runCatching {
@@ -323,14 +344,19 @@ class ModelApiService @Inject constructor(
                 val latency = elapsedMs(start)
                 val body = response.body?.string().orEmpty()
                 val respHeadersMap = response.headers.names().associateWith { response.header(it).orEmpty() }
+                val validation = if (response.isSuccessful) ModelTestResponseValidator.validate(
+                    protocol, body
+                ) else null
+                val success = response.isSuccessful && validation == null
                 TestAttempt(
                     ModelTestResult(
-                        success = response.isSuccessful,
+                        success = success,
                         latencyMs = latency,
-                        message = if (response.isSuccessful) {
-                            context.getString(R.string.provider_test_success, latency)
-                        } else {
-                            "HTTP ${response.code}: ${body.take(160)}"
+                        message = when {
+                            success -> context.getString(R.string.provider_test_success, latency)
+                            validation == "error" -> context.getString(R.string.provider_test_response_error)
+                            validation != null -> context.getString(R.string.provider_test_response_invalid)
+                            else -> "HTTP ${response.code}: ${body.take(160)}"
                         },
                         requestUrl = requestUrl,
                         requestHeaders = requestHeaders,
@@ -338,7 +364,7 @@ class ModelApiService @Inject constructor(
                         responseCode = response.code,
                         responseHeaders = respHeadersMap,
                         responseBody = body,
-                        errorDetail = if (response.isSuccessful) "" else body
+                        errorDetail = if (success) "" else body
                     )
                 )
             }

@@ -79,6 +79,31 @@ class ReasoningPreviewTest {
     }
 
     @Test
+    fun previewUsesFullEndpointAndMappedImageProtocol() {
+        val cases = listOf(
+            Triple(ProviderType.OPENAI, "/v1/responses", "reasoning"),
+            Triple(ProviderType.GEMINI, "/v1beta/interactions", "generation_config.thinking_level"),
+        )
+        for ((type, endpoint, field) in cases) {
+            val configured = provider.copy(type = type, baseUrl = "https://example.invalid$endpoint", useFullUrl = true)
+            val preview = buildReasoningPreview(configured, "model", ReasoningEffort.MAX, ReasoningConfig(), null,
+                CustomRequestOverride(), CustomRequestOverride(), CustomRequestOverride())
+            val body = JsonParser.parseString(preview.parameters).asJsonObject
+            val value = if (type == ProviderType.OPENAI) body.getAsJsonObject(field)["effort"] else body[field]
+            assertEquals("max", value.asString)
+        }
+        val image = provider.copy(type = ProviderType.GEMINI,
+            requestMiddleware = """{"modelMap":{"alias":"gemini-3-pro-image"}}""")
+        val preview = buildReasoningPreview(image, "alias", ReasoningEffort.HIGH, ReasoningConfig(), null,
+            CustomRequestOverride(), CustomRequestOverride(), CustomRequestOverride())
+        assertEquals("high", JsonParser.parseString(preview.parameters).asJsonObject["generation_config.thinking_level"].asString)
+        assertEquals(ReasoningTransport.OPENAI_RESPONSES,
+            reasoningTransport(ProviderType.OPENAI, true, "model", "https://example.invalid/custom"))
+        assertEquals(ReasoningTransport.ANTHROPIC,
+            reasoningTransport(ProviderType.ANTHROPIC, true, "model", "https://example.invalid/v1/responses"))
+    }
+
+    @Test
     fun chatPreviewUsesMiddlewareModelMapping() {
         val mapped = provider.copy(type = ProviderType.ANTHROPIC, requestMiddleware = """{"modelMap":{"alias":"claude-sonnet-4-6"}}""")
         val preview = buildReasoningPreview(mapped, "alias", ReasoningEffort.HIGH, ReasoningConfig(), null,

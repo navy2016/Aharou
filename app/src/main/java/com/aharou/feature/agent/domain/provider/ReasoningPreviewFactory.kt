@@ -16,10 +16,23 @@ import com.google.gson.JsonElement
 import com.google.gson.JsonObject
 import com.google.gson.JsonPrimitive
 
-fun reasoningTransport(type: ProviderType, useResponseApi: Boolean): ReasoningTransport = when (type) {
-    ProviderType.OPENAI -> if (useResponseApi) ReasoningTransport.OPENAI_RESPONSES else ReasoningTransport.OPENAI_CHAT
-    ProviderType.ANTHROPIC -> ReasoningTransport.ANTHROPIC
-    ProviderType.GEMINI -> if (useResponseApi) ReasoningTransport.GEMINI_INTERACTIONS else ReasoningTransport.GEMINI_CONTENT
+fun reasoningTransport(type: ProviderType, useResponseApi: Boolean, model: String, endpoint: String): ReasoningTransport {
+    val path = endpoint.substringBefore('?').substringBefore('#').trimEnd('/')
+    return when (type) {
+        ProviderType.OPENAI -> when {
+            path.endsWith("/chat/completions") -> ReasoningTransport.OPENAI_CHAT
+            path.endsWith("/responses") -> ReasoningTransport.OPENAI_RESPONSES
+            useResponseApi -> ReasoningTransport.OPENAI_RESPONSES
+            else -> ReasoningTransport.OPENAI_CHAT
+        }
+        ProviderType.ANTHROPIC -> ReasoningTransport.ANTHROPIC
+        ProviderType.GEMINI -> when {
+            path.endsWith(":generateContent") || path.endsWith(":streamGenerateContent") -> ReasoningTransport.GEMINI_CONTENT
+            path.endsWith("/interactions") -> ReasoningTransport.GEMINI_INTERACTIONS
+            useResponseApi || model.endsWith("-image", true) -> ReasoningTransport.GEMINI_INTERACTIONS
+            else -> ReasoningTransport.GEMINI_CONTENT
+        }
+    }
 }
 
 fun buildReasoningPreview(
@@ -32,9 +45,10 @@ fun buildReasoningPreview(
     providerRequest: CustomRequestOverride,
     modelRequest: CustomRequestOverride,
 ): ReasoningPreview {
-    val transport = reasoningTransport(provider.type, provider.useResponseApi)
     val middleware = RequestMiddleware.parseConfig(provider.requestMiddleware)?.takeIf { it.enabled }
     val actualModel = middleware?.modelMap?.get(model)?.takeIf { it.isNotBlank() } ?: model
+    val transport = reasoningTransport(provider.type, provider.useResponseApi, actualModel,
+        if (provider.useFullUrl) provider.baseUrl else "")
     val limits = resolveProviderParameters(
         provider.requestMiddleware, provider.id, provider.type.name, actualModel,
         if (metadata?.supportsCustomTemperature == true) fixedTemperature(model) else null, metadata?.outputTokens

@@ -42,6 +42,7 @@ import com.aharou.core.theme.Radius
 import com.aharou.core.theme.Spacing
 import com.aharou.core.ui.AdaptiveModalBottomSheet
 import com.aharou.feature.agent.domain.model.ReasoningEffort
+import com.aharou.feature.settings.domain.model.ServiceTier
 import com.aharou.feature.settings.data.local.CustomModelMetadataStore
 import com.aharou.feature.settings.domain.model.AIProviderConfig
 import com.aharou.feature.settings.domain.model.ModelMetadata
@@ -117,7 +118,10 @@ internal fun ModelReasoningEffortSheet(
     enabled: Boolean = true,
     preview: ReasoningPreview?,
     onOpenConfig: () -> Unit,
+    serviceTier: ServiceTier = ServiceTier.FOLLOW,
+    onServiceTierChange: ((ServiceTier) -> Unit)? = null,
 ) {
+    var tierTab by remember(model, onServiceTierChange != null) { mutableStateOf(false) }
     AdaptiveModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
@@ -127,67 +131,113 @@ internal fun ModelReasoningEffortSheet(
             modifier = Modifier.fillMaxWidth().heightIn(max = LocalConfiguration.current.screenHeightDp.dp * 0.85f)
                 .verticalScroll(rememberScrollState()).padding(horizontal = Spacing.lg).padding(bottom = Spacing.xl)
         ) {
-            Text(
-                text = stringResource(R.string.chat_reasoning_effort),
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold,
-            )
+            if (onServiceTierChange != null) {
+                Row(modifier = Modifier.padding(bottom = Spacing.sm), verticalAlignment = Alignment.CenterVertically) {
+                    listOf(false to R.string.chat_reasoning_effort, true to R.string.service_tier_title).forEachIndexed { index, (isTier, labelRes) ->
+                        if (index > 0) Spacer(Modifier.width(Spacing.lg))
+                        val active = isTier == tierTab
+                        Text(
+                            text = stringResource(labelRes),
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
+                            color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.clip(RoundedCornerShape(Radius.sm))
+                                .clickable { tierTab = isTier }
+                                .padding(vertical = Spacing.xs, horizontal = Spacing.xs)
+                        )
+                    }
+                }
+            } else {
+                Text(
+                    text = stringResource(R.string.chat_reasoning_effort),
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
             Text(
                 text = model,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(bottom = Spacing.sm)
             )
-            if (preview != null) ReasoningPreviewCard(preview)
-            else Text(stringResource(R.string.reasoning_preview_loading))
-            TextButton(onClick = onOpenConfig, enabled = enabled && preview != null) {
-                Text(stringResource(R.string.reasoning_config_open))
-            }
-            val declaredEfforts = modelMetadata?.reasoningEffortOptions
-            if (declaredEfforts.isNullOrEmpty()) {
-                when {
-                    modelMetadata?.reasoningBudgetTokens == true -> EffortHint(
-                        stringResource(R.string.model_reasoning_budget_tokens),
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    modelMetadata?.reasoningSupportsToggle == true -> EffortHint(
-                        stringResource(R.string.model_reasoning_toggle_only),
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+            if (tierTab && onServiceTierChange != null) {
+                EffortHint(stringResource(R.string.service_tier_hint), MaterialTheme.colorScheme.onSurfaceVariant)
+                listOf(
+                    ServiceTier.FOLLOW to R.string.service_tier_follow,
+                    ServiceTier.STANDARD to R.string.service_tier_standard,
+                    ServiceTier.FAST to R.string.service_tier_fast,
+                    ServiceTier.ULTRAFAST to R.string.service_tier_ultrafast
+                ).forEach { (tier, label) ->
+                    val selected = tier == serviceTier
+                    Row(
+                        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(Radius.sm))
+                            .clickable(enabled = enabled) { onServiceTierChange(tier) }.padding(Spacing.md),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = stringResource(label),
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.weight(1f)
+                        )
+                        if (selected) {
+                            Icon(FeatherIcons.Check, contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
+                        }
+                    }
                 }
-            }
-            val toggleExpressesNone = modelMetadata?.reasoningSupportsToggle == true && effort == ReasoningEffort.NONE
-            val reasoningCapable = modelMetadata?.supportsReasoning == true || !declaredEfforts.isNullOrEmpty()
-            val effortValue = effort.apiValue
-            if (reasoningCapable && effortValue != null && !toggleExpressesNone &&
-                declaredEfforts?.contains(effortValue) != true
-            ) {
-                EffortHint(stringResource(R.string.model_reasoning_effort_unverified), MaterialTheme.colorScheme.tertiary)
-            }
-            ReasoningEffort.entries.forEach { value ->
-                val selected = value == effort
-                Row(
-                    modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(Radius.sm))
-                        .clickable(enabled = enabled) { onChange(value) }.padding(Spacing.md),
-                    verticalAlignment = Alignment.CenterVertically
+            } else {
+                if (preview != null) ReasoningPreviewCard(preview)
+                else Text(stringResource(R.string.reasoning_preview_loading))
+                TextButton(onClick = onOpenConfig, enabled = enabled && preview != null) {
+                    Text(stringResource(R.string.reasoning_config_open))
+                }
+                val declaredEfforts = modelMetadata?.reasoningEffortOptions
+                if (declaredEfforts.isNullOrEmpty()) {
+                    when {
+                        modelMetadata?.reasoningBudgetTokens == true -> EffortHint(
+                            stringResource(R.string.model_reasoning_budget_tokens),
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        modelMetadata?.reasoningSupportsToggle == true -> EffortHint(
+                            stringResource(R.string.model_reasoning_toggle_only),
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                val toggleExpressesNone = modelMetadata?.reasoningSupportsToggle == true && effort == ReasoningEffort.NONE
+                val reasoningCapable = modelMetadata?.supportsReasoning == true || !declaredEfforts.isNullOrEmpty()
+                val effortValue = effort.apiValue
+                if (reasoningCapable && effortValue != null && !toggleExpressesNone &&
+                    declaredEfforts?.contains(effortValue) != true
                 ) {
-                    Icon(
-                        FeatherIcons.Zap, contentDescription = null,
-                        tint = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Spacer(Modifier.width(Spacing.md))
-                    Text(
-                        reasoningEffortLabel(value),
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
-                        modifier = Modifier.weight(1f),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    if (selected) {
-                        Icon(FeatherIcons.Check, contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
+                    EffortHint(stringResource(R.string.model_reasoning_effort_unverified), MaterialTheme.colorScheme.tertiary)
+                }
+                ReasoningEffort.entries.forEach { value ->
+                    val selected = value == effort
+                    Row(
+                        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(Radius.sm))
+                            .clickable(enabled = enabled) { onChange(value) }.padding(Spacing.md),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            FeatherIcons.Zap, contentDescription = null,
+                            tint = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(Modifier.width(Spacing.md))
+                        Text(
+                            reasoningEffortLabel(value),
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.weight(1f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        if (selected) {
+                            Icon(FeatherIcons.Check, contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
+                        }
                     }
                 }
             }

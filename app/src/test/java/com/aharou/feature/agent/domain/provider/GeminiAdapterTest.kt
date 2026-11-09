@@ -9,9 +9,14 @@ import com.aharou.feature.settings.domain.model.ReasoningDialect
 import com.google.gson.Gson
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import io.mockk.coEvery
+import io.mockk.every
+import io.mockk.mockk
+import io.mockk.slot
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.JsonObject as KxJsonObject
+import okhttp3.RequestBody
 import okhttp3.ResponseBody
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -136,6 +141,124 @@ class GeminiAdapterTest {
     @Suppress("UNCHECKED_CAST")
     private fun generationConfig(request: Map<*, *>?): Map<*, *> =
         request?.get("generationConfig") as? Map<*, *> ?: emptyMap<Any, Any>()
+
+    @Test
+    fun serviceTier_is_not_generated_but_fixed_json_is_preserved_for_both_protocols() = runTest {
+        for (interactions in listOf(false, true)) for (stream in listOf(false, true)) {
+            val api = mockk<GeminiApi>()
+            val request = slot<RequestBody>()
+            coEvery { api.generateContentCustom(any(), any(), any(), capture(request)) } returns
+                JsonParser.parseString(textResponse()).asJsonObject
+            coEvery { api.createInteractionCustom(any(), any(), any(), capture(request)) } returns
+                JsonParser.parseString(interactionResponse()).asJsonObject
+            every { api.streamGenerateContentCustom(any(), any(), any(), capture(request)) } answers {
+                FakeStreamCall { FakeSseStream.body(textResponse().replace("\n", "")) }
+            }
+            every { api.streamInteractionCustom(any(), any(), any(), capture(request)) } answers {
+                FakeStreamCall { FakeSseStream.body("""{"event_type":"interaction.completed","interaction":{"status":"completed"}}""") }
+            }
+            val adapter = GeminiAdapter(api).apply {
+                useResponseApi = interactions
+                maxNetworkRetries = 0
+                serviceTier = "fast"
+            }
+            for (fixedJson in listOf(null, """{"service_tier":"custom"}""")) {
+                adapter.customBody = fixedJson?.let { JsonParser.parseString(it).asJsonObject }
+                if (stream) adapter.completeStream("", emptyList()).toList() else adapter.complete("", emptyList())
+                val body = request.captured.decodeJsonObject()
+                if (fixedJson == null) assertFalse(body.has("service_tier"))
+                else assertEquals("custom", body.get("service_tier").asString)
+            }
+        }
+    }
+
+    @Test
+    fun fullEndpointSelectsMatchingReasoningProtocolForSyncAndStream() = runTest {
+        for (interactions in listOf(false, true)) for (stream in listOf(false, true)) {
+            val api = FakeApi(if (interactions) interactionResponse() else textResponse())
+            val endpoint = "https://example.invalid/v1beta/" + if (interactions) "interactions"
+                else "models/gemini-3-pro:" + if (stream) "streamGenerateContent?alt=sse" else "generateContent"
+            val provider = adapter(api).apply {
+                baseUrl = endpoint
+                model = "gemini-3-pro"
+                useFullUrl = true
+                useResponseApi = !interactions
+                maxNetworkRetries = 0
+            }
+            if (stream) provider.completeStream("", emptyList(), reasoningEffort = "max").toList()
+            else provider.complete("", emptyList(), reasoningEffort = "max")
+            assertEquals(endpoint, api.lastUrl)
+            val body = Gson().toJsonTree(api.lastRequest).asJsonObject
+            assertTrue(body.has(if (interactions) "input" else "contents"))
+            assertFalse(body.has(if (interactions) "contents" else "input"))
+            val actual = if (interactions) body.getAsJsonObject("generation_config")["thinking_level"]
+                else body.getAsJsonObject("generationConfig").getAsJsonObject("thinkingConfig")["thinkingLevel"]
+            assertEquals("max", actual.asString)
+        }
+    }
+
+    @Test
+    fun imageModelSelectsInteractionsForSyncAndStream() = runTest {
+        for (stream in listOf(false, true)) {
+            val api = FakeApi(interactionResponse())
+            val provider = adapter(api).apply { model = "gemini-3-pro-image"; maxNetworkRetries = 0 }
+            if (stream) provider.completeStream("", emptyList()).toList() else provider.complete("", emptyList())
+            assertTrue(api.lastUrl!!.contains("/interactions"))
+            assertTrue(api.lastRequest!!.containsKey("input"))
+            assertFalse(api.lastRequest!!.containsKey("contents"))
+        }
+    }
+
+    @Test
+    fun content_stream_reports_tool_argument_progress_and_preserves_arguments() = runTest {
+        val api = mockk<GeminiApi>()
+        val content = "line\n".repeat(240)
+        val args = JsonObject().apply { addProperty("path", "a.txt"); addProperty("content", content) }
+        every { api.streamGenerateContentCustom(any(), any(), any(), any()) } answers {
+            FakeStreamCall { FakeSseStream.body(
+                """{"candidates":[{"content":{"parts":[{"functionCall":{"id":"call-1","name":"writeFile","args":$args}}]},"finishReason":"STOP"}]}"""
+            ) }
+        }
+        val chunks = GeminiAdapter(api).apply { maxNetworkRetries = 0 }.completeStream("", emptyList()).toList()
+        assertEquals(listOf("writeFile"), chunks.filterIsInstance<AIStreamChunk.ToolCallDeclared>().map { it.name })
+        val progress = chunks.filterIsInstance<AIStreamChunk.ToolCallArgumentProgress>().single()
+        assertEquals("writeFile", progress.name)
+        assertEquals(args.toString().length, progress.argsSoFarChars)
+        assertEquals(240, progress.argsSoFarLines)
+        val final = chunks.filterIsInstance<AIStreamChunk.Final>().single().response
+        assertEquals("call-1", final.toolCalls.single().id)
+        assertEquals(kotlinx.serialization.json.JsonPrimitive(content), final.toolCalls.single().arguments["content"])
+        assertTrue(chunks.indexOf(progress) < chunks.indexOfLast { it is AIStreamChunk.Final })
+    }
+
+    @Test
+    fun interactions_stream_reports_argument_progress_and_skips_malformed_progress_event() = runTest {
+        val api = mockk<GeminiApi>()
+        val content = "line\n".repeat(240)
+        val args = Gson().toJson(mapOf("path" to "a.txt", "content" to content))
+        val splitAt = args.indexOf("\\n", args.length / 2) + 2
+        every { api.streamInteractionCustom(any(), any(), any(), any()) } answers {
+            FakeStreamCall { FakeSseStream.body(
+                """{"event_type":"step.start","index":1,"step":{"type":"function_call","id":"call-1","name":"writeFile"}}""",
+                """{"event_type":"step.delta","index":1,"delta":{"type":"arguments_delta","arguments":{}}}""",
+                """{"event_type":"step.delta","index":1,"delta":{"type":"arguments_delta","arguments":${Gson().toJson(args.take(splitAt))}}}""",
+                """{"type":"step.delta","index":1,"delta":{"type":"arguments","partial_arguments":${Gson().toJson(args.drop(splitAt))}}}""",
+                """{"event_type":"interaction.status_update","status":"requires_action"}"""
+            ) }
+        }
+        val chunks = GeminiAdapter(api).apply { useResponseApi = true; maxNetworkRetries = 0 }
+            .completeStream("", emptyList()).toList()
+        assertEquals(listOf("writeFile"), chunks.filterIsInstance<AIStreamChunk.ToolCallDeclared>().map { it.name })
+        val progress = chunks.filterIsInstance<AIStreamChunk.ToolCallArgumentProgress>()
+        assertEquals(listOf(splitAt, args.length), progress.map { it.argsSoFarChars })
+        assertTrue(progress.all { it.name == "writeFile" })
+        assertEquals(240, progress.last().argsSoFarLines)
+        val final = chunks.filterIsInstance<AIStreamChunk.Final>().single().response
+        assertEquals("requires_action", final.stopReason)
+        assertEquals("call-1", final.toolCalls.single().id)
+        assertEquals(kotlinx.serialization.json.JsonPrimitive(content), final.toolCalls.single().arguments["content"])
+        assertTrue(chunks.indexOf(progress.last()) < chunks.indexOfLast { it is AIStreamChunk.Final })
+    }
 
     @Test
     fun max_output_tokens_and_thinking_config_coexist_in_generation_config() = runTest {

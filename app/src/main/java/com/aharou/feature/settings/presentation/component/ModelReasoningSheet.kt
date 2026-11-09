@@ -12,9 +12,11 @@ import com.aharou.feature.agent.domain.provider.buildReasoningPreview
 import com.aharou.feature.agent.presentation.component.ModelReasoningEffortSheet
 import com.aharou.feature.settings.data.local.CustomRequestStore
 import com.aharou.feature.settings.data.local.ReasoningConfigStore
+import com.aharou.feature.settings.data.repository.ModelServiceTierRepository
 import com.aharou.feature.settings.domain.model.AIProviderConfig
 import com.aharou.feature.settings.domain.model.ModelMetadata
 import com.aharou.feature.settings.domain.model.ProviderType
+import com.aharou.feature.settings.domain.model.ServiceTier
 import dagger.hilt.android.EntryPointAccessors
 
 @Composable
@@ -31,6 +33,10 @@ internal fun ModelReasoningSheet(
     val resolvedMetadata = rememberReasoningMetadata(provider.id, provider.type, model)
     val store = remember { ReasoningConfigStore(context.applicationContext) }
     val requests = remember { CustomRequestStore(context.applicationContext) }
+    val serviceTiers = remember { ModelServiceTierRepository(context.applicationContext) }
+    var serviceTier by remember(provider.id, model) {
+        mutableStateOf(ServiceTier.fromName(serviceTiers.get(provider.id, model)) ?: ServiceTier.FOLLOW)
+    }
     var config by remember(provider.id, model) { mutableStateOf(store.getModel(provider.id, model)) }
     var editing by remember(provider.id, model) { mutableStateOf(false) }
     val global = remember(provider.id, model, editing) { requests.getGlobal() }
@@ -61,8 +67,18 @@ internal fun ModelReasoningSheet(
             enabled = enabled,
             preview = resolvedMetadata?.let { buildReasoningPreview(provider, model, effort, config, it, global, providerRequest, modelRequest) },
             onOpenConfig = { if (enabled && resolvedMetadata != null) editing = true },
-            onChange = onChange,
+            onChange = { if (enabled) onChange(it) },
             onDismiss = onDismiss,
+            serviceTier = serviceTier,
+            onServiceTierChange = if (provider.type == ProviderType.OPENAI) {
+                { tier ->
+                    if (enabled) {
+                        serviceTiers.set(provider.id, model, tier.name)
+                        serviceTier = tier
+                        onDismiss()
+                    }
+                }
+            } else null,
         )
     }
 }
