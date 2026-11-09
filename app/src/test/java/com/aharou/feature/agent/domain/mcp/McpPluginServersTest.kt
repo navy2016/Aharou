@@ -8,6 +8,7 @@ import com.aharou.feature.plugin.data.PluginRecord
 import com.aharou.feature.plugin.data.PluginRecordStore
 import com.aharou.feature.plugin.domain.PluginManager
 import com.aharou.feature.plugin.domain.model.PluginManifest
+import io.mockk.Called
 import io.mockk.Runs
 import io.mockk.coEvery
 import io.mockk.coVerify
