@@ -9,6 +9,7 @@ import com.aharou.core.security.KeystoreCipher
 import com.aharou.feature.agent.data.local.database.AgentDatabase
 import com.aharou.feature.settings.data.local.CustomRequestOverride
 import com.aharou.feature.settings.data.local.CustomRequestStore
+import com.aharou.feature.settings.data.local.ReasoningConfigStore
 import com.aharou.feature.settings.domain.model.AIProviderConfig
 import com.aharou.feature.settings.domain.model.ProviderType
 import com.google.gson.JsonParser
@@ -52,7 +53,7 @@ class CustomRequestLifecycleTest {
         every { KeystoreCipher.decryptString(any()) } answers { firstArg<String>() }
         database = Room.inMemoryDatabaseBuilder(context, AgentDatabase::class.java).build()
         store = CustomRequestStore(context)
-        repository = AIProviderRepositoryImpl(database.aiProviderDao(), database, store)
+        repository = AIProviderRepositoryImpl(database.aiProviderDao(), database, store, ReasoningConfigStore(context))
     }
 
     @After

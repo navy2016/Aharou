@@ -3,10 +3,10 @@ package com.aharou.feature.agent.domain.provider
 import com.aharou.core.util.AILogger
 import com.aharou.feature.agent.data.remote.openai.OpenAIApi
 import com.aharou.feature.settings.domain.model.ProviderType
+import com.aharou.feature.settings.domain.model.ReasoningConfig
 import com.aharou.feature.settings.domain.model.defaultProviderApiPath
 import java.io.IOException
 import com.aharou.feature.agent.data.remote.openai.ChatCompletionRequest
-import com.aharou.feature.agent.data.remote.openai.ThinkingConfig
 import com.aharou.feature.agent.data.remote.openai.OpenAIChatMessage
 import com.aharou.feature.agent.domain.model.AgentImage
 import com.aharou.feature.agent.domain.model.AgentMessage
@@ -58,6 +58,7 @@ class OpenAIAdapter @Inject constructor(
     /** 自定义请求头：占位符替换后写出，完全覆盖同名默认头。 */
     override var customHeaders: Map<String, String> = emptyMap()
     override var customBody: com.google.gson.JsonObject? = null
+    override var reasoningConfig: ReasoningConfig = ReasoningConfig()
 
     /** Codex 标识用的安装 / 会话 id：进程内保持稳定，避免每次请求都换新的。 */
     private val codexInstallationId: String by lazy { java.util.UUID.randomUUID().toString() }
@@ -132,12 +133,11 @@ class OpenAIAdapter @Inject constructor(
             model = model,
             messages = openAIMessages,
             temperature = temperature,
-            reasoning_effort = normalizeReasoningEffort(reasoningEffort),
             tools = toolDefs,
             tool_choice = if (toolDefs != null) "auto" else null,
             stream = false,
             prompt_cache_key = if (chatCacheKeyEnabled) logSessionId else null
-        ).withThinkingDisabled(reasoningEffort)
+        )
         val seq = AILogger.logRequest(logSessionId, "OpenAI", model, "POST", url, request)
 
         val triedKeys = mutableSetOf(apiKey)
@@ -147,12 +147,10 @@ class OpenAIAdapter @Inject constructor(
                 onKeyFailure = { e, _ -> switchKeyOnFailure(e, triedKeys) != null },
                 retryOptions = autoRetryOptions
             ) {
-                val custom = customRequestBody(request)
-                if (custom == null) {
-                    api.createChatCompletion(url = url, authorization = authorization(), extraHeaders = extraHeaders(), request = request)
-                } else {
-                    api.createChatCompletionCustom(url = url, authorization = authorization(), extraHeaders = extraHeaders(), request = custom)
-                }
+                api.createChatCompletionCustom(
+                    url = url, authorization = authorization(), extraHeaders = extraHeaders(),
+                    request = resolvedRequestBody(request, reasoningEffort, ReasoningTransport.OPENAI_CHAT)
+                )
             }
         } catch (e: CancellationException) {
             throw e
@@ -188,56 +186,6 @@ class OpenAIAdapter @Inject constructor(
     }
 
     /**
-     * 思考强度 → OpenAI reasoning_effort。
-     * OpenAI 官方 Chat Completions 的 reasoning_effort 仅接受 low/medium/high（gpt-5 系额外支持 none，
-     * 但 o 系列不接受），"none" 原样透传会在多数推理模型上 400。
-     * 这里把 "none" 明确跳过（不发该字段，交由服务端默认），"xhigh"/"max" 归一到 high
-     * （OpenAI 无更高档），low/medium/high 原样透传。与 Anthropic/Gemini 对齐「不可表达即跳过」的策略。
-     */
-    private fun normalizeReasoningEffort(effort: String?): String? = when (effort) {
-        null -> null
-        "none" -> null
-        "xhigh", "max" -> "high"
-        else -> effort
-    }
-
-    /** 各兼容渠道表达「关闭思考」的字段形态。 */
-    private enum class ThinkingOffField { THINKING_DISABLED, ENABLE_THINKING_FALSE }
-
-    /**
-     * 「不思考」在 OpenAI 兼容渠道没有统一表达：[normalizeReasoningEffort] 对 none 只是「不发字段」，
-     * 服务端随即回退自家默认（多数兼容渠道默认开思考），等于关不掉。
-     *
-     * 判定只看 baseUrl 域名：providerId 是建提供商时生成的时间戳/UUID、name 用户可随意改，都识别不出厂商。
-     * 域名认不出（中转站、自建网关）一律不发——未知字段会被服务端 400，比关不掉更糟。
-     */
-    private fun thinkingOffField(): ThinkingOffField? {
-        val url = baseUrl.lowercase()
-        return when {
-            // DeepSeek / Kimi / 智谱 GLM / MiniMax 的 OpenAI 兼容端点接受 Anthropic 式 thinking 开关。
-            listOf(
-                "api.deepseek.com",
-                "api.moonshot.cn", "api.moonshot.ai",
-                "open.bigmodel.cn", "api.z.ai",
-                "api.minimax.io", "api.minimaxi.com", "api.minimax.chat"
-            ).any { host -> url.contains(host) } -> ThinkingOffField.THINKING_DISABLED
-            // 阿里 Qwen / DashScope 兼容模式用独立布尔开关。
-            url.contains("dashscope") -> ThinkingOffField.ENABLE_THINKING_FALSE
-            else -> null
-        }
-    }
-
-    /** 只在用户选「不思考」时补发厂商关闭字段；其余档位原样返回，请求体与之前完全一致。 */
-    private fun ChatCompletionRequest.withThinkingDisabled(effort: String?): ChatCompletionRequest {
-        if (effort != "none") return this
-        return when (thinkingOffField()) {
-            ThinkingOffField.THINKING_DISABLED -> copy(thinking = ThinkingConfig("disabled"))
-            ThinkingOffField.ENABLE_THINKING_FALSE -> copy(enable_thinking = false)
-            null -> this
-        }
-    }
-
-    /**
      * Responses 请求体。system prompt 作为首个 message item 进 `input`（与顶层 `instructions` 等价，
      * 服务端同样按首条 system 消息处理），因此不再单独发 `instructions`。
      */
@@ -245,7 +193,6 @@ class OpenAIAdapter @Inject constructor(
         systemPrompt: String,
         messages: List<AgentMessage>,
         tools: List<AgentTool>,
-        reasoningEffort: String?,
         stream: Boolean
     ): Map<String, Any?> {
         // 每次请求换一个 turn id（header 与请求体里的 codex 痕迹要一致）。
@@ -269,24 +216,6 @@ class OpenAIAdapter @Inject constructor(
             request["tool_choice"] = "auto"
         }
         if (stream) request["stream"] = true
-        normalizeReasoningEffort(reasoningEffort)?.let { effort ->
-            if (isDeepSeek) {
-                request["reasoning"] = mapOf("effort" to effort)
-            } else {
-                // OpenAI 官方/通用 Responses 规范：显式开启思考总结（summary: "auto"），
-                // 并索取 encrypted_content 密文，供无状态多轮对话连续推理。
-                request["reasoning"] = mapOf("effort" to effort, "summary" to "auto")
-                request["include"] = listOf("reasoning.encrypted_content")
-            }
-        }
-        // Responses 格式没有 thinking 开关：DeepSeek 在 Responses 端用 reasoning.effort="none" 关闭思考，
-        // 而 Chat 端必须发 thinking 开关（在那边只发 none 会被服务端映射成思考模式）。
-        // 仍然要求域名命中 DeepSeek：走到这里的中转站不一定接受该字段。
-        if (reasoningEffort == "none" && isDeepSeek &&
-            thinkingOffField() == ThinkingOffField.THINKING_DISABLED
-        ) {
-            request["reasoning"] = mapOf("effort" to "none")
-        }
         // OpenAI 官方 Responses 原生支持 prompt_cache_key（同会话路由到同一缓存 shard）；
         // 自动管理缓存的服务（如 DeepSeek）会静默忽略该字段，不会报错。
         logSessionId?.let { request["prompt_cache_key"] = it }
@@ -352,7 +281,7 @@ class OpenAIAdapter @Inject constructor(
         reasoningEffort: String?
     ): AIResponse {
         val url = resolveApiUrl()
-        val request = buildResponsesRequest(systemPrompt, messages, tools, reasoningEffort, stream = false)
+        val request = buildResponsesRequest(systemPrompt, messages, tools, stream = false)
         val seq = AILogger.logRequest(logSessionId, "OpenAI", model, "POST", url, request)
 
         val triedKeys = mutableSetOf(apiKey)
@@ -362,12 +291,10 @@ class OpenAIAdapter @Inject constructor(
                 onKeyFailure = { e, _ -> switchKeyOnFailure(e, triedKeys) != null },
                 retryOptions = autoRetryOptions
             ) {
-                val custom = customRequestBody(request)
-                if (custom == null) {
-                    api.createResponses(url = url, authorization = authorization(), extraHeaders = extraHeaders(), request = request)
-                } else {
-                    api.createResponsesCustom(url = url, authorization = authorization(), extraHeaders = extraHeaders(), request = custom)
-                }
+                api.createResponsesCustom(
+                    url = url, authorization = authorization(), extraHeaders = extraHeaders(),
+                    request = resolvedRequestBody(request, reasoningEffort, ReasoningTransport.OPENAI_RESPONSES)
+                )
             }
         } catch (e: CancellationException) {
             throw e
@@ -433,13 +360,12 @@ class OpenAIAdapter @Inject constructor(
             model = model,
             messages = openAIMessages,
             temperature = temperature,
-            reasoning_effort = normalizeReasoningEffort(reasoningEffort),
             tools = toolDefs,
             tool_choice = if (toolDefs != null) "auto" else null,
             stream = true,
             stream_options = StreamOptions(include_usage = true),
             prompt_cache_key = if (chatCacheKeyEnabled) logSessionId else null
-        ).withThinkingDisabled(reasoningEffort)
+        )
         val seq = AILogger.logRequest(logSessionId, "OpenAI", model, "POST", url, request)
         // 原始 SSE 分批落盘（见 AILogger.beginRawSse），本轮结束在 finally 收尾。
         val sseLog = AILogger.beginRawSse(logSessionId, "OpenAI", seq)
@@ -470,12 +396,10 @@ class OpenAIAdapter @Inject constructor(
             var streamCachedInputTokens = 0
             var streamCacheCreationTokens = 0
 
-            val custom = customRequestBody(request)
-            val call = if (custom == null) {
-                api.streamChatCompletion(url = url, authorization = authorization(), extraHeaders = extraHeaders(), request = request)
-            } else {
-                api.streamChatCompletionCustom(url = url, authorization = authorization(), extraHeaders = extraHeaders(), request = custom)
-            }
+            val call = api.streamChatCompletionCustom(
+                url = url, authorization = authorization(), extraHeaders = extraHeaders(),
+                request = resolvedRequestBody(request, reasoningEffort, ReasoningTransport.OPENAI_CHAT)
+            )
             val body = firstContent.awaitBody(call)
 
             body.use { rb ->
@@ -634,7 +558,7 @@ class OpenAIAdapter @Inject constructor(
         reasoningEffort: String?
     ) {
         val url = resolveApiUrl()
-        val request = buildResponsesRequest(systemPrompt, messages, tools, reasoningEffort, stream = true)
+        val request = buildResponsesRequest(systemPrompt, messages, tools, stream = true)
         val seq = AILogger.logRequest(logSessionId, "OpenAI", model, "POST", url, request)
         // 原始 SSE 分批落盘（见 AILogger.beginRawSse），本轮结束在 finally 收尾。
         val sseLog = AILogger.beginRawSse(logSessionId, "OpenAI", seq)
@@ -653,12 +577,10 @@ class OpenAIAdapter @Inject constructor(
                     withFirstContentTimeout(firstByteTimeoutMs) { firstContent ->
                     val acc = ResponsesStreamAccumulator()
 
-                    val custom = customRequestBody(request)
-                    val call = if (custom == null) {
-                        api.streamResponses(url = url, authorization = authorization(), extraHeaders = extraHeaders(), request = request)
-                    } else {
-                        api.streamResponsesCustom(url = url, authorization = authorization(), extraHeaders = extraHeaders(), request = custom)
-                    }
+                    val call = api.streamResponsesCustom(
+                        url = url, authorization = authorization(), extraHeaders = extraHeaders(),
+                        request = resolvedRequestBody(request, reasoningEffort, ReasoningTransport.OPENAI_RESPONSES)
+                    )
                     val body = firstContent.awaitBody(call)
 
                     body.use { rb ->

@@ -7,6 +7,7 @@ import com.aharou.feature.agent.domain.model.AgentMessage
 import com.aharou.feature.agent.domain.tool.AgentTool
 import com.aharou.feature.agent.domain.tool.ToolCall
 import com.aharou.feature.agent.domain.tool.modelToolResultText
+import com.aharou.feature.settings.domain.model.ReasoningConfig
 import com.google.gson.JsonParser
 import com.google.gson.JsonObject
 import javax.inject.Inject
@@ -41,6 +42,7 @@ class GeminiAdapter @Inject constructor(
     /** 自定义请求头：占位符替换后写出，完全覆盖同名默认头。 */
     override var customHeaders: Map<String, String> = emptyMap()
     override var customBody: JsonObject? = null
+    override var reasoningConfig: ReasoningConfig = ReasoningConfig()
 
     // Gemini 发 generationConfig.maxOutputTokens（模型元数据的输出上限）；为 null 时不发该参数，用服务端默认。
     override var maxOutputTokens: Int? = null
@@ -75,7 +77,7 @@ class GeminiAdapter @Inject constructor(
             return completeViaInteractions(systemPrompt, messages, tools, reasoningEffort)
         }
 
-        val request = buildRequestBody(systemPrompt, messages, tools, reasoningEffort)
+        val request = buildRequestBody(systemPrompt, messages, tools)
 
         val url = if (useFullUrl) {
             baseUrl
@@ -96,12 +98,10 @@ class GeminiAdapter @Inject constructor(
                 onKeyFailure = { e, _ -> switchKeyOnFailure(e, triedKeys) != null },
                 retryOptions = autoRetryOptions
             ) {
-                val custom = customRequestBody(request)
-                if (custom == null) {
-                    api.generateContent(url = url, apiKey = requestKey(), extraHeaders = extraHeaders(), request = request)
-                } else {
-                    api.generateContentCustom(url = url, apiKey = requestKey(), extraHeaders = extraHeaders(), request = custom)
-                }
+                api.generateContentCustom(
+                    url = url, apiKey = requestKey(), extraHeaders = extraHeaders(),
+                    request = resolvedRequestBody(request, reasoningEffort, ReasoningTransport.GEMINI_CONTENT)
+                )
             }
         } catch (e: CancellationException) {
             throw e
@@ -197,7 +197,7 @@ class GeminiAdapter @Inject constructor(
             return@channelFlow
         }
 
-        val request = buildRequestBody(systemPrompt, messages, tools, reasoningEffort)
+        val request = buildRequestBody(systemPrompt, messages, tools)
 
         val url = if (useFullUrl) {
             baseUrl
@@ -237,12 +237,10 @@ class GeminiAdapter @Inject constructor(
                 var streamOutputTokens = 0
                 var streamCachedInputTokens = 0
 
-                val custom = customRequestBody(request)
-                val call = if (custom == null) {
-                    api.streamGenerateContent(url = url, apiKey = requestKey(), extraHeaders = extraHeaders(), request = request)
-                } else {
-                    api.streamGenerateContentCustom(url = url, apiKey = requestKey(), extraHeaders = extraHeaders(), request = custom)
-                }
+                val call = api.streamGenerateContentCustom(
+                    url = url, apiKey = requestKey(), extraHeaders = extraHeaders(),
+                    request = resolvedRequestBody(request, reasoningEffort, ReasoningTransport.GEMINI_CONTENT)
+                )
                 val body = firstContent.awaitBody(call)
 
                 body.use { rb ->
@@ -386,7 +384,6 @@ class GeminiAdapter @Inject constructor(
         systemPrompt: String,
         messages: List<AgentMessage>,
         tools: List<AgentTool>,
-        reasoningEffort: String?,
         stream: Boolean
     ): Map<String, Any?> {
         val request = mutableMapOf<String, Any?>(
@@ -400,21 +397,8 @@ class GeminiAdapter @Inject constructor(
 
         val generationConfig = mutableMapOf<String, Any>()
         maxOutputTokens?.takeIf { it > 0 }?.let { generationConfig["max_output_tokens"] = it }
-        interactionsThinkingLevel(reasoningEffort)?.let {
-            generationConfig["thinking_level"] = it
-            // 不显式要摘要就只能拿到思考签名、拿不到可展示的思考文本，UI 的思考区会一直空着。
-            // 与 thinking_level 绑在一起发：不思考的模型（gemma / 图像 / 音乐）不该收到这两个字段。
-            generationConfig["thinking_summaries"] = "auto"
-        }
         if (generationConfig.isNotEmpty()) request["generation_config"] = generationConfig
         return request
-    }
-
-    /** 思考强度 → `thinking_level`，仅支持 minimal/low/medium/high；none 跳过（不发 thinking），xhigh/max 归一到 high。 */
-    private fun interactionsThinkingLevel(reasoningEffort: String?): String? = when (reasoningEffort) {
-        null, "none" -> null
-        "xhigh", "max" -> "high"
-        else -> reasoningEffort
     }
 
     /**
@@ -429,7 +413,7 @@ class GeminiAdapter @Inject constructor(
         reasoningEffort: String?
     ): AIResponse {
         val url = resolveInteractionsUrl(stream = false)
-        val request = buildInteractionsRequest(systemPrompt, messages, tools, reasoningEffort, stream = false)
+        val request = buildInteractionsRequest(systemPrompt, messages, tools, stream = false)
         val seq = AILogger.logRequest(logSessionId, "Gemini", model, "POST", url, request)
 
         val triedKeys = mutableSetOf(apiKey)
@@ -439,12 +423,10 @@ class GeminiAdapter @Inject constructor(
                 onKeyFailure = { e, _ -> switchKeyOnFailure(e, triedKeys) != null },
                 retryOptions = autoRetryOptions
             ) {
-                val custom = customRequestBody(request)
-                if (custom == null) {
-                    api.createInteraction(url = url, apiKey = requestKey(), extraHeaders = extraHeaders(), request = request)
-                } else {
-                    api.createInteractionCustom(url = url, apiKey = requestKey(), extraHeaders = extraHeaders(), request = custom)
-                }
+                api.createInteractionCustom(
+                    url = url, apiKey = requestKey(), extraHeaders = extraHeaders(),
+                    request = resolvedRequestBody(request, reasoningEffort, ReasoningTransport.GEMINI_INTERACTIONS)
+                )
             }
         } catch (e: CancellationException) {
             throw e
@@ -489,7 +471,7 @@ class GeminiAdapter @Inject constructor(
         reasoningEffort: String?
     ) {
         val url = resolveInteractionsUrl(stream = true)
-        val request = buildInteractionsRequest(systemPrompt, messages, tools, reasoningEffort, stream = true)
+        val request = buildInteractionsRequest(systemPrompt, messages, tools, stream = true)
         val seq = AILogger.logRequest(logSessionId, "Gemini", model, "POST", url, request)
         // 原始 SSE 分批落盘（见 AILogger.beginRawSse），本轮结束在 finally 收尾。
         val sseLog = AILogger.beginRawSse(logSessionId, "Gemini", seq)
@@ -508,12 +490,10 @@ class GeminiAdapter @Inject constructor(
                     withFirstContentTimeout(firstByteTimeoutMs) { firstContent ->
                     val acc = GeminiInteractionsStreamAccumulator()
 
-                    val custom = customRequestBody(request)
-                    val call = if (custom == null) {
-                        api.streamInteraction(url = url, apiKey = requestKey(), extraHeaders = extraHeaders(), request = request)
-                    } else {
-                        api.streamInteractionCustom(url = url, apiKey = requestKey(), extraHeaders = extraHeaders(), request = custom)
-                    }
+                    val call = api.streamInteractionCustom(
+                        url = url, apiKey = requestKey(), extraHeaders = extraHeaders(),
+                        request = resolvedRequestBody(request, reasoningEffort, ReasoningTransport.GEMINI_INTERACTIONS)
+                    )
                     val body = firstContent.awaitBody(call)
 
                     body.use { rb ->
@@ -597,15 +577,10 @@ class GeminiAdapter @Inject constructor(
         }
     }
 
-    /**
-     * generateContent / streamGenerateContent 共用的请求体。
-     * `generationConfig` 里 thinkingConfig 与 maxOutputTokens 必须合并写（分两次赋值会互相覆盖）。
-     */
     private fun buildRequestBody(
         systemPrompt: String,
         messages: List<AgentMessage>,
-        tools: List<AgentTool>,
-        reasoningEffort: String?
+        tools: List<AgentTool>
     ): MutableMap<String, Any> {
         val request = mutableMapOf<String, Any>(
             "contents" to convertToGeminiContents(messages)
@@ -625,7 +600,6 @@ class GeminiAdapter @Inject constructor(
         }?.let { request["tools"] = listOf(mapOf("functionDeclarations" to it)) }
 
         val generationConfig = mutableMapOf<String, Any>()
-        buildThinkingConfig(reasoningEffort)?.let { generationConfig["thinkingConfig"] = it }
         maxOutputTokens?.takeIf { it > 0 }?.let { generationConfig["maxOutputTokens"] = it }
         if (generationConfig.isNotEmpty()) request["generationConfig"] = generationConfig
         return request
@@ -696,28 +670,6 @@ class GeminiAdapter @Inject constructor(
         return runCatching {
             JsonParser.parseString(json).asJsonArray.takeIf { it.size() > 0 }
         }.getOrNull()
-    }
-
-    /** 思考强度 → Gemini thinkingConfig。模型名含 gemini-3 用 thinkingLevel，否则用 thinkingBudget（2.5 系）。显式带上 includeThoughts 以返回思考内容。 */
-    private fun buildThinkingConfig(reasoningEffort: String?): Map<String, Any>? {
-        if (reasoningEffort == null) return null
-        return if (model.contains("gemini-3")) {
-            // thinkingLevel 仅支持 minimal/low/medium/high；none 跳过（不发 thinking），xhigh/max 归一到 high
-            val level = when (reasoningEffort) {
-                "none" -> return null
-                "xhigh", "max" -> "high"
-                else -> reasoningEffort
-            }
-            mapOf("thinkingLevel" to level, "includeThoughts" to true)
-        } else {
-            val budget = when (reasoningEffort) {
-                "low" -> 1024
-                "medium" -> 4096
-                "high", "xhigh", "max" -> 8192
-                else -> return null
-            }
-            mapOf("thinkingBudget" to budget, "includeThoughts" to true)
-        }
     }
 
     private fun convertToGeminiContents(messages: List<AgentMessage>): List<Map<String, Any>> {

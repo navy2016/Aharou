@@ -215,7 +215,8 @@ internal fun rememberModelTester(): suspend (AIProviderConfig, String) -> ModelT
                 provider.useResponseApi,
                 model,
                 provider.customHeaders,
-                provider.id
+                provider.id,
+                provider.requestMiddleware
             )
         }
         tester
@@ -226,6 +227,7 @@ internal fun rememberModelTester(): suspend (AIProviderConfig, String) -> ModelT
 @InstallIn(SingletonComponent::class)
 interface ModelTestEntryPoint {
     fun modelApiService(): ModelApiService
+    fun modelMetadataService(): com.aharou.feature.settings.data.remote.ModelMetadataService
 }
 
 /** 模型行。logo 与「测试」相对名称+标签整块垂直居中，对齐提供商列表。 */

@@ -5,6 +5,13 @@ import com.aharou.R
 import com.aharou.feature.agent.domain.provider.joinUrl
 import com.aharou.feature.settings.domain.model.ProviderType
 import com.aharou.feature.settings.data.local.CustomRequestStore
+import com.aharou.feature.settings.data.local.ReasoningConfigStore
+import com.aharou.feature.settings.data.repository.ModelReasoningEffortRepository
+import com.aharou.feature.settings.domain.model.ReasoningConfig
+import com.aharou.feature.agent.domain.model.ReasoningEffort
+import com.aharou.feature.agent.domain.provider.ReasoningRequestResolver
+import com.aharou.feature.agent.domain.provider.reasoningTransport
+import com.aharou.feature.agent.domain.middleware.RequestMiddleware
 import com.aharou.feature.settings.data.local.mergeCustomRequestBody
 import com.aharou.feature.settings.data.local.mergeCustomRequestOverrides
 import com.aharou.feature.settings.data.local.CustomRequestOverride
@@ -72,6 +79,8 @@ data class ModelTestResult(
 class ModelApiService @Inject constructor(
     private val client: OkHttpClient,
     private val customRequestStore: CustomRequestStore,
+    private val reasoningConfigStore: ReasoningConfigStore,
+    private val reasoningEffortStore: ModelReasoningEffortRepository,
     @param:ApplicationContext private val context: Context
 ) {
     private val json = Json { ignoreUnknownKeys = true }
@@ -213,16 +222,22 @@ class ModelApiService @Inject constructor(
         useResponseApi: Boolean,
         model: String,
         customHeaders: Map<String, String> = emptyMap(),
-        providerId: String = ""
+        providerId: String = "",
+        requestMiddleware: String = "",
     ): ModelTestResult = withContext(Dispatchers.IO) {
         val custom = customRequestStore.resolve(providerId, model, customHeaders)
         val headers = resolveCustomHeaders(custom.headers, null, apiKey)
         val start = System.nanoTime()
-        val first = testModelOnce(start, baseUrl, apiKey, type, useFullUrl, useResponseApi, model, headers, custom.body)
+        val config = reasoningConfigStore.getModel(providerId, model)
+        val effort = reasoningEffortStore.get(providerId, model)
+            ?.let { runCatching { ReasoningEffort.valueOf(it) }.getOrNull() } ?: ReasoningEffort.DEFAULT
+        val middleware = RequestMiddleware.parseConfig(requestMiddleware)?.takeIf { it.enabled }
+        val actualModel = middleware?.modelMap?.get(model)?.takeIf { it.isNotBlank() } ?: model
+        val first = testModelOnce(start, baseUrl, apiKey, type, useFullUrl, useResponseApi, actualModel, headers, custom.body, config, effort)
         if (!first.retryable) return@withContext first.result
         // DNS 解析失败会被 libcore 缓存，紧接着重试必然重复失败；退避 3 秒再试一次（delay 不占线程）。
         delay(NETWORK_RETRY_DELAY_MS)
-        testModelOnce(start, baseUrl, apiKey, type, useFullUrl, useResponseApi, model, headers, custom.body).result
+        testModelOnce(start, baseUrl, apiKey, type, useFullUrl, useResponseApi, actualModel, headers, custom.body, config, effort).result
     }
 
     /** 一次尝试；「是否值得重试」随结果带出，因为网络异常类型只在 catch 里看得到。 */
@@ -235,7 +250,9 @@ class ModelApiService @Inject constructor(
         useResponseApi: Boolean,
         model: String,
         customHeaders: Map<String, String>,
-        customBody: com.google.gson.JsonObject?
+        customBody: com.google.gson.JsonObject?,
+        reasoningConfig: ReasoningConfig,
+        effort: ReasoningEffort,
     ): TestAttempt {
         // 空 Key 也放行（免鉴权供应商）；真正需要 Key 的平台会由上游返回鉴权错误。
         val (url, payload) = when (type) {
@@ -277,9 +294,12 @@ class ModelApiService @Inject constructor(
             }
         }
 
-        val finalPayload = customBody?.let {
-            mergeCustomRequestBody(com.google.gson.JsonParser.parseString(payload).asJsonObject, it).toString()
-        } ?: payload
+        val transport = reasoningTransport(type, useResponseApi || (type == ProviderType.GEMINI && model.endsWith("-image", true)))
+        val generated = ReasoningRequestResolver.apply(
+            com.google.gson.JsonParser.parseString(payload).asJsonObject,
+            ReasoningRequestResolver.resolve(model, baseUrl, transport, effort, reasoningConfig), transport
+        )
+        val finalPayload = (customBody?.let { mergeCustomRequestBody(generated, it) } ?: generated).toString()
         val request = runCatching {
             Request.Builder()
                 .url(url)
@@ -296,7 +316,7 @@ class ModelApiService @Inject constructor(
         // 是地址错、鉴权错还是网络错，故在请求构造完就固定下来。
         val requestUrl = request.url.toString()
         val requestHeaders = maskedHeaders(request, customHeaders.keys)
-        val requestBody = if (customBody == null) finalPayload.take(MAX_REQUEST_BODY_CHARS) else "[custom request body]"
+        val requestBody = if (customBody == null && reasoningConfig.isAutomatic) finalPayload.take(MAX_REQUEST_BODY_CHARS) else "[custom request body]"
 
         return try {
             client.newCall(request).execute().use { response ->

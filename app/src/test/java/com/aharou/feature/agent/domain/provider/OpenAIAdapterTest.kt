@@ -12,8 +12,13 @@ import com.aharou.feature.agent.data.remote.openai.OpenAIToolCall
 import com.aharou.feature.agent.data.remote.openai.PromptTokensDetails
 import com.aharou.feature.agent.data.remote.openai.Usage
 import com.aharou.feature.agent.domain.model.AgentMessage
+import com.aharou.feature.agent.domain.model.ReasoningEffort
 import com.aharou.feature.agent.domain.tool.AgentTool
 import com.aharou.feature.agent.domain.tool.ToolCall
+import com.aharou.feature.settings.domain.model.ReasoningConfig
+import com.aharou.feature.settings.domain.model.ReasoningDialect
+import com.google.gson.Gson
+import com.google.gson.JsonParser
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
@@ -22,9 +27,11 @@ import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import okhttp3.RequestBody
 import okhttp3.ResponseBody
 import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -39,7 +46,26 @@ import retrofit2.Response
  */
 class OpenAIAdapterTest {
 
-    private fun api(): OpenAIApi = mockk()
+    private fun api(): OpenAIApi = mockk<OpenAIApi>().also { api ->
+        coEvery { api.createChatCompletionCustom(any(), any(), any(), any()) } coAnswers {
+            api.createChatCompletion(
+                firstArg(), secondArg(), thirdArg(),
+                Gson().fromJson(arg<RequestBody>(3).decodeJsonObject(), ChatCompletionRequest::class.java)
+            )
+        }
+        every { api.streamChatCompletionCustom(any(), any(), any(), any()) } answers {
+            api.streamChatCompletion(
+                firstArg(), secondArg(), thirdArg(),
+                Gson().fromJson(arg<RequestBody>(3).decodeJsonObject(), ChatCompletionRequest::class.java)
+            )
+        }
+        coEvery { api.createResponsesCustom(any(), any(), any(), any()) } coAnswers {
+            api.createResponses(firstArg(), secondArg(), thirdArg(), arg<RequestBody>(3).decodeJsonMap())
+        }
+        every { api.streamResponsesCustom(any(), any(), any(), any()) } answers {
+            api.streamResponses(firstArg(), secondArg(), thirdArg(), arg<RequestBody>(3).decodeJsonMap())
+        }
+    }
 
     private fun adapter(api: OpenAIApi): OpenAIAdapter =
         OpenAIAdapter(api).apply {
@@ -90,13 +116,110 @@ class OpenAIAdapterTest {
             customBody = com.google.gson.JsonParser.parseString("""{"temperature":0.6,"extra":{"mode":"x"},"nullable":null}""").asJsonObject
         }.complete("sys", listOf(AgentMessage.UserMessage(content = "hi")))
         assertNull(authorization.captured)
-        val buffer = okio.Buffer()
-        request.captured.writeTo(buffer)
-        val body = com.google.gson.JsonParser.parseString(buffer.readUtf8()).asJsonObject
+        val body = request.captured.decodeJsonObject()
         assertEquals(0.6, body.get("temperature").asDouble, 0.0001)
         assertEquals("x", body.getAsJsonObject("extra").get("mode").asString)
         assertEquals(2, body.getAsJsonArray("messages").size())
         assertTrue(body.get("nullable").isJsonNull)
+    }
+
+    @Test
+    fun chat_reasoning_patch_and_custom_body_reach_sync_and_stream_requests() = runTest {
+        for (stream in listOf(false, true)) {
+            val api = api()
+            val request = slot<RequestBody>()
+            coEvery { api.createChatCompletionCustom(any(), any(), any(), capture(request)) } returns response()
+            every { api.streamChatCompletionCustom(any(), any(), any(), capture(request)) } answers {
+                sseCall("""data: {"choices":[{"delta":{"content":"ok"}}]}""", "data: [DONE]")
+            }
+            val adapter = adapter(api).apply {
+                maxNetworkRetries = 0
+                temperature = 0.7f
+                reasoningConfig = ReasoningConfig(
+                    dialect = ReasoningDialect.OPENAI_EFFORT,
+                    effortValues = mapOf(ReasoningEffort.HIGH to "medium"),
+                    patches = mapOf(ReasoningEffort.HIGH to JsonParser.parseString(
+                        """{"reasoning_effort":"low","extra":{"from_patch":true},"nullable":null}"""
+                    ).asJsonObject)
+                )
+            }
+            val messages = listOf(AgentMessage.UserMessage(content = "hi"))
+
+            if (stream) adapter.completeStream("sys", messages, reasoningEffort = "high").toList()
+            else adapter.complete("sys", messages, reasoningEffort = "high")
+            val generated = request.captured.decodeJsonObject()
+            assertEquals("low", generated.get("reasoning_effort").asString)
+            assertEquals(0.7, generated.get("temperature").asDouble, 0.0001)
+            assertTrue(generated.getAsJsonObject("extra").get("from_patch").asBoolean)
+            assertTrue(generated.get("nullable").isJsonNull)
+            assertEquals(stream, generated.get("stream").asBoolean)
+            assertEquals(2, generated.getAsJsonArray("messages").size())
+            assertFalse(generated.has("reasoning"))
+            assertFalse(generated.has("include"))
+
+            adapter.customBody = JsonParser.parseString(
+                """{"reasoning_effort":"max","temperature":null,"extra":{"from_custom":true},"nullable":null}"""
+            ).asJsonObject
+            if (stream) adapter.completeStream("sys", messages, reasoningEffort = "high").toList()
+            else adapter.complete("sys", messages, reasoningEffort = "high")
+            val overridden = request.captured.decodeJsonObject()
+            assertEquals("max", overridden.get("reasoning_effort").asString)
+            assertTrue(overridden.get("temperature").isJsonNull)
+            assertTrue(overridden.get("nullable").isJsonNull)
+            assertTrue(overridden.getAsJsonObject("extra").get("from_patch").asBoolean)
+            assertTrue(overridden.getAsJsonObject("extra").get("from_custom").asBoolean)
+            assertEquals(stream, overridden.get("stream").asBoolean)
+        }
+    }
+
+    @Test
+    fun responses_reasoning_patch_and_custom_body_reach_sync_and_stream_requests() = runTest {
+        for (stream in listOf(false, true)) {
+            val api = api()
+            val request = slot<RequestBody>()
+            coEvery { api.createResponsesCustom(any(), any(), any(), capture(request)) } returns
+                JsonParser.parseString("""{"status":"completed","output":[]}""").asJsonObject
+            every { api.streamResponsesCustom(any(), any(), any(), capture(request)) } answers {
+                sseCall("""data: {"type":"response.completed","response":{"status":"completed","output":[]}}""")
+            }
+            val adapter = adapter(api).apply {
+                useResponseApi = true
+                maxNetworkRetries = 0
+                reasoningConfig = ReasoningConfig(
+                    dialect = ReasoningDialect.OPENAI_EFFORT,
+                    effortValues = mapOf(ReasoningEffort.HIGH to "medium"),
+                    patches = mapOf(ReasoningEffort.HIGH to JsonParser.parseString(
+                        """{"reasoning":{"summary":"detailed"},"nullable":null}"""
+                    ).asJsonObject)
+                )
+            }
+            val messages = listOf(AgentMessage.UserMessage(content = "hi"))
+
+            if (stream) adapter.completeStream("sys", messages, reasoningEffort = "high").toList()
+            else adapter.complete("sys", messages, reasoningEffort = "high")
+            val generated = request.captured.decodeJsonObject()
+            assertFalse(generated.getAsJsonObject("reasoning").has("effort"))
+            assertEquals("detailed", generated.getAsJsonObject("reasoning").get("summary").asString)
+            assertEquals("reasoning.encrypted_content", generated.getAsJsonArray("include").single().asString)
+            assertTrue(generated.get("nullable").isJsonNull)
+            assertFalse(generated.has("reasoning_effort"))
+            assertFalse(generated.get("store").asBoolean)
+            assertEquals(2, generated.getAsJsonArray("input").size())
+            assertEquals(stream, generated.has("stream"))
+            if (stream) assertTrue(generated.get("stream").asBoolean)
+
+            adapter.customBody = JsonParser.parseString(
+                """{"reasoning":{"effort":"max","summary":null},"include":null,"nullable":null}"""
+            ).asJsonObject
+            if (stream) adapter.completeStream("sys", messages, reasoningEffort = "high").toList()
+            else adapter.complete("sys", messages, reasoningEffort = "high")
+            val overridden = request.captured.decodeJsonObject()
+            assertEquals("max", overridden.getAsJsonObject("reasoning").get("effort").asString)
+            assertTrue(overridden.getAsJsonObject("reasoning").get("summary").isJsonNull)
+            assertTrue(overridden.get("include").isJsonNull)
+            assertTrue(overridden.get("nullable").isJsonNull)
+            assertFalse(overridden.has("reasoning_effort"))
+        }
     }
 
     // ── Chat Completions 非流式：请求构造 ──────────────────────────────
@@ -159,7 +282,7 @@ class OpenAIAdapterTest {
     }
 
     @Test
-    fun complete_reasoningEffort_normalizesNoneAndMax() = runTest {
+    fun complete_reasoningEffort_preservesExplicitLevels() = runTest {
         val api = api()
         val reqSlot = slot<ChatCompletionRequest>()
         coEvery { api.createChatCompletion(any(), any(), any(), capture(reqSlot)) } returns response()
@@ -168,7 +291,10 @@ class OpenAIAdapterTest {
         assertNull(reqSlot.captured.reasoning_effort)
 
         adapter(api).complete("", emptyList(), reasoningEffort = "xhigh")
-        assertEquals("high", reqSlot.captured.reasoning_effort)
+        assertEquals("xhigh", reqSlot.captured.reasoning_effort)
+
+        adapter(api).complete("", emptyList(), reasoningEffort = "max")
+        assertEquals("max", reqSlot.captured.reasoning_effort)
 
         adapter(api).complete("", emptyList(), reasoningEffort = "medium")
         assertEquals("medium", reqSlot.captured.reasoning_effort)

@@ -4,8 +4,6 @@ import com.aharou.feature.agent.data.remote.anthropic.AnthropicApi
 import com.aharou.feature.agent.data.remote.anthropic.AnthropicMessageRequest
 import com.aharou.feature.agent.data.remote.anthropic.AnthropicMessage
 import com.aharou.feature.agent.data.remote.anthropic.AnthropicContentBlock
-import com.aharou.feature.agent.data.remote.anthropic.AnthropicThinkingConfig
-import com.aharou.feature.agent.data.remote.anthropic.AnthropicOutputConfig
 import com.aharou.feature.agent.data.remote.anthropic.AnthropicToolDefinition
 import com.aharou.core.util.AILogger
 import com.aharou.feature.agent.domain.model.AgentImage
@@ -14,6 +12,7 @@ import com.aharou.feature.agent.domain.tool.AgentTool
 import com.aharou.feature.agent.domain.tool.ToolCall
 import com.aharou.feature.agent.domain.tool.modelToolResultText
 import com.aharou.feature.settings.domain.model.ProviderType
+import com.aharou.feature.settings.domain.model.ReasoningConfig
 import com.aharou.feature.settings.domain.model.defaultProviderApiPath
 import com.google.gson.JsonParser
 import java.io.IOException
@@ -53,6 +52,7 @@ class AnthropicAdapter @Inject constructor(
     /** 自定义请求头：占位符替换后写出，完全覆盖同名默认头。 */
     override var customHeaders: Map<String, String> = emptyMap()
     override var customBody: com.google.gson.JsonObject? = null
+    override var reasoningConfig: ReasoningConfig = ReasoningConfig()
 
     override var maxOutputTokens: Int? = null
 
@@ -87,15 +87,12 @@ class AnthropicAdapter @Inject constructor(
         }
 
         val url = if (useFullUrl) baseUrl else joinUrl(baseUrl, defaultProviderApiPath(ProviderType.ANTHROPIC))
-        val (thinking, outputConfig) = buildThinkingConfig(reasoningEffort)
         val request = AnthropicMessageRequest(
             model = model,
             messages = anthropicMessages,
             system = buildSystemPayload(systemPrompt),
-            max_tokens = resolveMaxTokens(thinking),
-            temperature = if (thinking != null) null else temperature,
-            thinking = thinking,
-            output_config = outputConfig,
+            max_tokens = maxOutputTokens?.takeIf { it > 0 } ?: DEFAULT_MAX_TOKENS,
+            temperature = temperature,
             tools = toolDefs,
             stream = false
         )
@@ -108,12 +105,10 @@ class AnthropicAdapter @Inject constructor(
                 onKeyFailure = { e, _ -> switchKeyOnFailure(e, triedKeys) != null },
                 retryOptions = autoRetryOptions
             ) {
-                val custom = customRequestBody(request)
-                if (custom == null) {
-                    api.createMessage(url = url, apiKey = requestKey(), version = requestVersion(), extraHeaders = extraHeaders(), request = request)
-                } else {
-                    api.createMessageCustom(url = url, apiKey = requestKey(), version = requestVersion(), extraHeaders = extraHeaders(), request = custom)
-                }
+                api.createMessageCustom(
+                    url = url, apiKey = requestKey(), version = requestVersion(), extraHeaders = extraHeaders(),
+                    request = resolvedRequestBody(request, reasoningEffort, ReasoningTransport.ANTHROPIC)
+                )
             }
         } catch (e: CancellationException) {
             throw e
@@ -176,15 +171,12 @@ class AnthropicAdapter @Inject constructor(
         }
 
         val url = if (useFullUrl) baseUrl else joinUrl(baseUrl, defaultProviderApiPath(ProviderType.ANTHROPIC))
-        val (thinking, outputConfig) = buildThinkingConfig(reasoningEffort)
         val request = AnthropicMessageRequest(
             model = model,
             messages = anthropicMessages,
             system = buildSystemPayload(systemPrompt),
-            max_tokens = resolveMaxTokens(thinking),
-            temperature = if (thinking != null) null else temperature,
-            thinking = thinking,
-            output_config = outputConfig,
+            max_tokens = maxOutputTokens?.takeIf { it > 0 } ?: DEFAULT_MAX_TOKENS,
+            temperature = temperature,
             tools = toolDefs,
             stream = true
         )
@@ -221,12 +213,10 @@ class AnthropicAdapter @Inject constructor(
             // content block index -> thinking / redacted_thinking 累积；按 index 分槽，避免一轮多个思考块被合并。
             val thinkingBlocks = LinkedHashMap<Int, ThinkingBlockAcc>()
 
-            val custom = customRequestBody(request)
-            val call = if (custom == null) {
-                api.streamMessage(url = url, apiKey = requestKey(), version = requestVersion(), extraHeaders = extraHeaders(), request = request)
-            } else {
-                api.streamMessageCustom(url = url, apiKey = requestKey(), version = requestVersion(), extraHeaders = extraHeaders(), request = custom)
-            }
+            val call = api.streamMessageCustom(
+                url = url, apiKey = requestKey(), version = requestVersion(), extraHeaders = extraHeaders(),
+                request = resolvedRequestBody(request, reasoningEffort, ReasoningTransport.ANTHROPIC)
+            )
             val body = firstContent.awaitBody(call)
 
             body.use { rb ->
@@ -435,16 +425,6 @@ class AnthropicAdapter @Inject constructor(
         )
     }
 
-    /**
-     * 最大输出 token：优先用模型元数据的输出上限，缺失时回退 [DEFAULT_MAX_TOKENS]。
-     * 开启 thinking 时思考预算计入 max_tokens，须留出正文空间，故不得低于预算 + [MIN_CONTENT_TOKENS]。
-     */
-    private fun resolveMaxTokens(thinking: AnthropicThinkingConfig?): Int {
-        val limit = maxOutputTokens?.takeIf { it > 0 } ?: DEFAULT_MAX_TOKENS
-        val budget = thinking?.budget_tokens ?: return limit
-        return maxOf(limit, budget + MIN_CONTENT_TOKENS)
-    }
-
     /** thinking / redacted_thinking 块原样序列化为快照；无块时 null。 */
     private fun encodeThinkingBlocks(blocks: List<AnthropicContentBlock>): String? =
         blocks.takeIf { it.isNotEmpty() }?.let { gson.toJson(it) }
@@ -455,38 +435,6 @@ class AnthropicAdapter @Inject constructor(
         return runCatching {
             gson.fromJson(json, Array<AnthropicContentBlock>::class.java)?.toList().orEmpty()
         }.getOrDefault(emptyList())
-    }
-
-    /**
-     * 思考强度 → Anthropic thinking 配置。
-     * - 新模型（4.6+/5 系，支持 adaptive）：effort 档位直传 output_config，thinking 用 adaptive+summarized；
-     *   "none" 关闭思考用 disabled。
-     * - 旧模型（4.5 及更早，仅 budget_tokens）：low/medium/high 映射 1024/4096/8192（须小于 max_tokens），
-     *   xhigh/max 归一到 high。
-     */
-    private fun buildThinkingConfig(reasoningEffort: String?): Pair<AnthropicThinkingConfig?, AnthropicOutputConfig?> {
-        if (reasoningEffort == null) return null to null
-        if (supportsAdaptiveThinking()) {
-            if (reasoningEffort == "none") {
-                return AnthropicThinkingConfig(type = "disabled") to null
-            }
-            return AnthropicThinkingConfig(type = "adaptive", display = "summarized") to AnthropicOutputConfig(effort = reasoningEffort)
-        }
-        val budget = when (reasoningEffort) {
-            "low" -> 1024
-            "medium" -> 4096
-            "high", "xhigh", "max" -> 8192
-            else -> return null to null
-        }
-        return AnthropicThinkingConfig(type = "enabled", budget_tokens = budget) to null
-    }
-
-    /** 是否支持 adaptive thinking：4.6+ 及 5 系（claude-<family>-4-6/4-7/4-8 或主版本 5）。 */
-    private fun supportsAdaptiveThinking(): Boolean {
-        val m = Regex("claude-(?:opus|sonnet|haiku|fable|mythos)-(\\d+)(?:-(\\d+))?").find(model)
-        val major = m?.groupValues?.get(1)?.toIntOrNull() ?: return false
-        val minor = m?.groupValues?.get(2)?.toIntOrNull()
-        return major >= 5 || (major == 4 && (minor ?: 0) >= 6)
     }
 
     private fun convertToAnthropicMessages(messages: List<AgentMessage>, addMessageBreakpoint: Boolean): MutableList<AnthropicMessage> {
@@ -693,9 +641,6 @@ class AnthropicAdapter @Inject constructor(
 
         /** 模型元数据缺输出上限时的兜底最大输出 token。 */
         const val DEFAULT_MAX_TOKENS = 16384
-
-        /** 开启 thinking 时为正文预留的最小 token 数（max_tokens 必须大于思考预算）。 */
-        const val MIN_CONTENT_TOKENS = 4096
 
         val gson = com.google.gson.Gson()
     }

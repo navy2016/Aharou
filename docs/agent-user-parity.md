@@ -67,9 +67,10 @@
 | 选当前会话的模型 | `component/ChatModelSheet.kt:56`（`ModelIconButton`）、`:89`（`onSelect`）→ `ChatInputBar.kt:584` → `AIChatPanel.kt:1505` | 无 | 未找到（`sessions` 只读，`SessionTool.kt:31`；config 无会话级模型字段） | **缺口**：只能改全局默认/角色模型，不能改当前会话 |
 | 设全局角色模型（默认/标题/压缩/视觉/生图） | `component/DefaultModelsSection.kt:93`、挂载 `SettingsScreen.kt:1024` | 有 | `config` `model.roles.default` / `.default_effort` / `.title` / `.compaction` / `.vision` / `.image_gen`（`feature/settings/data/ConfigModelRoleFields.kt:41`、`:51`、`:82`、`:92`、`:102`、`:112`） | 无 |
 | 改采样温度 | `CustomRequestSheet.kt`（请求体 JSON） | 有 | `config` `custom_request.global.body` 或 `providers.<id>.custom_request.body` / `providers.<id>.models.<model>.custom_request.body` | 自定义请求体按供应商协议填写，需确认模型支持 |
-| 改思考强度（reasoning effort） | `ChatModelSheet.kt` 模型标签 → `ModelReasoningEffortSheet` | 部分 | `config` `providers.<id>.models.<model>.reasoning_effort` | 模型默认值可改；当前会话档位没有独立写入接口 |
+| 改思考强度（reasoning effort） | `ChatModelSheet.kt` 模型标签 → `ModelReasoningSheet` | 部分 | `config` `providers.<id>.models.<model>.reasoning_effort` | 模型默认值可改；当前会话档位没有独立写入接口 |
+| 配置模型推理映射 | `ReasoningConfigSheet.kt`（模型编辑／聊天思考标签） | 有 | `config` `providers.<id>.models.<model>.reasoning_config` | 参数表达方式、逐档值／预算／JSON；敏感字段加密审计，固定请求体最后覆盖 |
 | 配置自定义请求头与请求体 | `CustomRequestSheet.kt`（全局、供应商、模型） | 有 | `config` `custom_request.global.headers/body`、`providers.<id>.custom_request.headers/body`、`providers.<id>.models.<model>.custom_request.headers/body` | 敏感字段需确认 |
-| 配置自动重试增强 | `StewardSheet.kt` → `AutoRetrySettingsSheet.kt` | 有 | `config` `steward.retry_*` | 包含开关、延迟、倍率、状态码与关键字 |
+| 配置自动重试增强 | `StewardSheet.kt` → `AutoRetrySettingsSheet.kt` | 有 | `config` `steward.retry_*` | 包含开关、额外重试次数（0–100，默认3）、延迟、倍率、状态码与关键字 |
 | 测试模型/供应商连通性 | `component/ProviderModelComponents.kt:323`（`onClick = onTest`）、`:330`；`DefaultModelsSection.kt:841` | 无 | 未找到专用工具；只能 `Bash` `curl` 或 `webfetch` 自己发请求 | **缺口**：App 内有现成的测试链路（`feature/settings/data/remote/ModelApiService.kt:290`），但没暴露成工具 |
 
 ## 5. 技能

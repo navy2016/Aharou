@@ -17,6 +17,7 @@ import com.aharou.core.config.fields.ClosureField
 import com.aharou.core.config.fields.ReadOnlyField
 import com.aharou.feature.settings.data.local.CustomModelMetadataStore
 import com.aharou.feature.settings.data.local.CustomRequestStore
+import com.aharou.feature.settings.data.local.ReasoningConfigStore
 import com.aharou.feature.settings.data.repository.ModelReasoningEffortRepository
 import com.aharou.feature.agent.domain.model.ReasoningEffort
 import com.aharou.feature.settings.domain.model.AIProviderConfig
@@ -50,6 +51,7 @@ class ConfigProviderFields @Inject constructor(
     @param:ApplicationContext private val context: Context,
     private val modelMetadataStore: CustomModelMetadataStore,
     private val customRequestStore: CustomRequestStore,
+    private val reasoningConfigStore: ReasoningConfigStore,
     private val reasoningStore: ModelReasoningEffortRepository,
     private val providers: AIProviderRepository,
 ) {
@@ -457,6 +459,10 @@ class ConfigProviderFields @Inject constructor(
                     "$basePath.$forId.models.$model.custom_request",
                     { customRequestStore.getModel(forId, model) },
                     { customRequestStore.setModel(forId, model, it) }
+                ) + reasoningConfigField(
+                    "$basePath.$forId.models.$model.reasoning_config",
+                    { reasoningConfigStore.getModel(forId, model) },
+                    { reasoningConfigStore.setModel(forId, model, it) }
                 ) + ClosureField(
                     path = "$basePath.$forId.models.$model.reasoning_effort",
                     displayName = "模型思考强度（$model）",

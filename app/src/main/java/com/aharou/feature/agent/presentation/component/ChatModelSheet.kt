@@ -2,6 +2,13 @@ package com.aharou.feature.agent.presentation.component
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.TextButton
+import androidx.compose.ui.platform.LocalConfiguration
+import com.aharou.feature.agent.domain.provider.ReasoningPreview
+import com.aharou.feature.settings.presentation.component.ReasoningPreviewCard
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -108,6 +115,8 @@ internal fun ModelReasoningEffortSheet(
     onChange: (ReasoningEffort) -> Unit,
     onDismiss: () -> Unit,
     enabled: Boolean = true,
+    preview: ReasoningPreview?,
+    onOpenConfig: () -> Unit,
 ) {
     AdaptiveModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -115,7 +124,8 @@ internal fun ModelReasoningEffortSheet(
         containerColor = MaterialTheme.colorScheme.surface
     ) {
         Column(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = Spacing.lg).padding(bottom = Spacing.xl)
+            modifier = Modifier.fillMaxWidth().heightIn(max = LocalConfiguration.current.screenHeightDp.dp * 0.85f)
+                .verticalScroll(rememberScrollState()).padding(horizontal = Spacing.lg).padding(bottom = Spacing.xl)
         ) {
             Text(
                 text = stringResource(R.string.chat_reasoning_effort),
@@ -128,6 +138,11 @@ internal fun ModelReasoningEffortSheet(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(bottom = Spacing.sm)
             )
+            if (preview != null) ReasoningPreviewCard(preview)
+            else Text(stringResource(R.string.reasoning_preview_loading))
+            TextButton(onClick = onOpenConfig, enabled = enabled && preview != null) {
+                Text(stringResource(R.string.reasoning_config_open))
+            }
             val declaredEfforts = modelMetadata?.reasoningEffortOptions
             if (declaredEfforts.isNullOrEmpty()) {
                 when {
