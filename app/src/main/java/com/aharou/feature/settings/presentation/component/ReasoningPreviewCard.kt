@@ -107,7 +107,7 @@ internal fun ReasoningPreviewCard(preview: ReasoningPreview, modifier: Modifier 
                             Text(
                                 stringResource(when (warning) {
                                     ReasoningWarning.CANNOT_DISABLE -> R.string.reasoning_warning_cannot_disable
-                                    ReasoningWarning.LEVEL_MAPPED -> R.string.reasoning_warning_level_mapped
+                                    ReasoningWarning.LEVEL_UNVERIFIED -> R.string.reasoning_warning_level_unverified
                                     ReasoningWarning.BUDGET_EXCEEDS_OUTPUT -> R.string.reasoning_warning_budget_exceeds_output
                                     ReasoningWarning.INCOMPATIBLE_DIALECT -> R.string.reasoning_warning_incompatible_dialect
                                     ReasoningWarning.CONFLICTING_PARAMETERS -> R.string.reasoning_warning_conflicting_parameters

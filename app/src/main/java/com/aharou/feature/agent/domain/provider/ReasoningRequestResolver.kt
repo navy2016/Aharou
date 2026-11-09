@@ -6,6 +6,7 @@ import com.aharou.feature.settings.domain.model.ReasoningConfig
 import com.aharou.feature.settings.domain.model.ReasoningDialect
 import com.google.gson.JsonObject
 import java.net.URI
+import java.util.Locale
 
 object ReasoningRequestResolver {
     fun resolve(
@@ -22,17 +23,11 @@ object ReasoningRequestResolver {
         if (effort == ReasoningEffort.DEFAULT) return ReasoningResolution(dialect, parameters)
         val off = effort == ReasoningEffort.NONE
         val explicitValue = config.effortValues[effort]
-        var value = explicitValue ?: effort.apiValue!!
+        val value = explicitValue ?: effort.apiValue!!
         val budget = config.budgets[effort] ?: when (effort) {
             ReasoningEffort.LOW -> 1024
             ReasoningEffort.MEDIUM -> 4096
             else -> 8192
-        }
-        if (automatic && explicitValue == null && effort in listOf(ReasoningEffort.XHIGH, ReasoningEffort.MAX) &&
-            dialect in listOf(ReasoningDialect.OPENAI_EFFORT, ReasoningDialect.GEMINI_LEVEL)
-        ) {
-            value = "high"
-            warnings += ReasoningWarning.LEVEL_MAPPED
         }
         val explicitOff = !automatic || explicitValue != null
         when (dialect) {
@@ -92,7 +87,7 @@ object ReasoningRequestResolver {
                     parameters.add("reasoning", JsonObject().apply { addProperty("effort", value) })
                 } else {
                     parameters.add("thinking", type(if (off) "disabled" else "enabled"))
-                    if (!off && explicitValue != null) parameters.addProperty("reasoning_effort", value)
+                    if (!off && (automatic || explicitValue != null)) parameters.addProperty("reasoning_effort", value)
                 }
             }
             ReasoningDialect.ENABLE_THINKING -> {
@@ -163,26 +158,50 @@ object ReasoningRequestResolver {
         val generation = body.get("generationConfig")?.takeIf { it.isJsonObject }?.asJsonObject
         val gemini = generation?.get("thinkingConfig")?.takeIf { it.isJsonObject }?.asJsonObject
         if (gemini?.has("thinkingBudget") == true && gemini.has("thinkingLevel")) warnings += ReasoningWarning.CONFLICTING_PARAMETERS
+        val interactions = body.get("generation_config")?.takeIf { it.isJsonObject }?.asJsonObject
+        listOf(gemini?.get("thinkingLevel"), interactions?.get("thinking_level")).forEach { level ->
+            if (level?.isJsonPrimitive == true && level.asJsonPrimitive.isString &&
+                level.asString.lowercase(Locale.ROOT) !in setOf("minimal", "low", "medium", "high")) {
+                warnings += ReasoningWarning.LEVEL_UNVERIFIED
+            }
+        }
         return warnings
     }
 
-    private fun automaticDialect(model: String, baseUrl: String, transport: ReasoningTransport, effort: ReasoningEffort): ReasoningDialect = when (transport) {
-        ReasoningTransport.ANTHROPIC -> {
-            val match = Regex("claude-(?:opus|sonnet|haiku|fable|mythos)-(\\d+)(?:-(\\d+))?").find(model)
-            val major = match?.groupValues?.get(1)?.toIntOrNull() ?: 0
-            val minor = match?.groupValues?.get(2)?.toIntOrNull() ?: 0
-            if (major >= 5 || (major == 4 && minor >= 6)) ReasoningDialect.ANTHROPIC_ADAPTIVE else ReasoningDialect.ANTHROPIC_BUDGET
-        }
-        ReasoningTransport.GEMINI_CONTENT -> if (model.contains("gemini-3")) ReasoningDialect.GEMINI_LEVEL else ReasoningDialect.GEMINI_BUDGET
-        ReasoningTransport.GEMINI_INTERACTIONS -> ReasoningDialect.GEMINI_LEVEL
-        else -> {
-            val host = runCatching { URI(baseUrl).host?.lowercase() }.getOrNull().orEmpty()
-            val thinkingType = host in setOf("api.deepseek.com", "api.moonshot.cn", "api.moonshot.ai", "open.bigmodel.cn", "api.z.ai", "api.minimax.io", "api.minimaxi.com", "api.minimax.chat")
-            when {
-                effort != ReasoningEffort.NONE -> ReasoningDialect.OPENAI_EFFORT
-                thinkingType && (transport == ReasoningTransport.OPENAI_CHAT || model.contains("deepseek", true)) -> ReasoningDialect.THINKING_TYPE
-                transport == ReasoningTransport.OPENAI_CHAT && host.contains("dashscope") -> ReasoningDialect.ENABLE_THINKING
-                else -> ReasoningDialect.OPENAI_EFFORT
+    private fun automaticDialect(model: String, baseUrl: String, transport: ReasoningTransport, effort: ReasoningEffort): ReasoningDialect {
+        val name = model.trim().lowercase(Locale.ROOT).substringAfterLast('/').replace('_', '-')
+        return when (transport) {
+            ReasoningTransport.ANTHROPIC -> {
+                val match = Regex("""(?:^|[.:])claude-(opus|sonnet|haiku|fable|mythos)-(\d+)(?:[.-](\d{1,2})(?=$|[-.:@]))?(?=$|[-.:@])""").find(name)
+                val family = match?.groupValues?.get(1)
+                val major = match?.groupValues?.get(2)?.toIntOrNull() ?: 0
+                val minor = match?.groupValues?.get(3)?.toIntOrNull() ?: 0
+                if (major >= 5 || (family in setOf("opus", "sonnet") && major == 4 && minor >= 6)) {
+                    ReasoningDialect.ANTHROPIC_ADAPTIVE
+                } else ReasoningDialect.ANTHROPIC_BUDGET
+            }
+            ReasoningTransport.GEMINI_CONTENT -> {
+                if (Regex("""^gemini-[34](?=$|[-.:@])""").containsMatchIn(name)) ReasoningDialect.GEMINI_LEVEL
+                else ReasoningDialect.GEMINI_BUDGET
+            }
+            ReasoningTransport.GEMINI_INTERACTIONS -> ReasoningDialect.GEMINI_LEVEL
+            else -> {
+                val host = runCatching { URI(baseUrl.trim()).host?.lowercase(Locale.ROOT)?.trimEnd('.') }.getOrNull().orEmpty()
+                val thinkingType = host in setOf("api.deepseek.com", "api.moonshot.cn", "api.moonshot.ai", "open.bigmodel.cn", "api.z.ai", "api.minimax.io", "api.minimaxi.com", "api.minimax.chat")
+                val dashscope = host in setOf("dashscope.aliyuncs.com", "dashscope-intl.aliyuncs.com", "dashscope-us.aliyuncs.com")
+                val deepseekEffort = host == "api.deepseek.com" && Regex("""^deepseek-(?:v4(?:[.-]\d+)?|flash)(?=$|[-.:@])""").containsMatchIn(name)
+                val thinkingOnly = name == "qwq" || name.startsWith("qwq-") || name in setOf(
+                    "qwen3-thinking", "qwen3-next-80b-a3b-thinking", "qwen3-235b-a22b-thinking-2507", "qwen3-30b-a3b-thinking-2507",
+                    "qwen3.7-max-preview", "qwen3.7-max-2026-05-17", "qwen3.8-2.4t-a95b"
+                )
+                when {
+                    deepseekEffort -> ReasoningDialect.THINKING_TYPE
+                    effort != ReasoningEffort.NONE -> ReasoningDialect.OPENAI_EFFORT
+                    thinkingType && (transport == ReasoningTransport.OPENAI_CHAT || name.startsWith("deepseek-")) -> ReasoningDialect.THINKING_TYPE
+                    transport == ReasoningTransport.OPENAI_CHAT && dashscope && thinkingOnly -> ReasoningDialect.OPENAI_EFFORT
+                    transport == ReasoningTransport.OPENAI_CHAT && dashscope -> ReasoningDialect.ENABLE_THINKING
+                    else -> ReasoningDialect.OPENAI_EFFORT
+                }
             }
         }
     }

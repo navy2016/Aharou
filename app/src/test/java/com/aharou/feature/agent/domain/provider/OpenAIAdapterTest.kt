@@ -282,7 +282,7 @@ class OpenAIAdapterTest {
     }
 
     @Test
-    fun complete_reasoningEffort_normalizesNoneAndMax() = runTest {
+    fun complete_reasoningEffort_preservesExplicitLevels() = runTest {
         val api = api()
         val reqSlot = slot<ChatCompletionRequest>()
         coEvery { api.createChatCompletion(any(), any(), any(), capture(reqSlot)) } returns response()
@@ -291,7 +291,10 @@ class OpenAIAdapterTest {
         assertNull(reqSlot.captured.reasoning_effort)
 
         adapter(api).complete("", emptyList(), reasoningEffort = "xhigh")
-        assertEquals("high", reqSlot.captured.reasoning_effort)
+        assertEquals("xhigh", reqSlot.captured.reasoning_effort)
+
+        adapter(api).complete("", emptyList(), reasoningEffort = "max")
+        assertEquals("max", reqSlot.captured.reasoning_effort)
 
         adapter(api).complete("", emptyList(), reasoningEffort = "medium")
         assertEquals("medium", reqSlot.captured.reasoning_effort)

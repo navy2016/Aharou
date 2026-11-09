@@ -493,8 +493,7 @@ class GeminiAdapterTest {
         @Suppress("UNCHECKED_CAST")
         val config = api.lastRequest?.get("generation_config") as Map<*, *>
         assertEquals(64000, config["max_output_tokens"])
-        // thinkingBudget 在 Interactions 里不存在；xhigh/max 归一到 high
-        assertEquals("high", config["thinking_level"])
+        assertEquals("max", config["thinking_level"])
         assertFalse(config.containsKey("thinkingConfig"))
         // 不显式要摘要就拿不到可展示的思考文本
         assertEquals("auto", config["thinking_summaries"])

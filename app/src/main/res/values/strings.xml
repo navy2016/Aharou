@@ -17,7 +17,7 @@
     <string name="retry_enhanced_enable">启用自动重试增强</string>
     <string name="retry_enabled">已启用</string>
     <string name="retry_disabled">未启用</string>
-    <string name="retry_max_retries">额外重试次数（0–10）</string>
+    <string name="retry_max_retries">额外重试次数（0–100）</string>
     <string name="retry_initial_delay">首次延迟（毫秒）</string>
     <string name="retry_multiplier">退避倍率</string>
     <string name="retry_max_delay">最大延迟（毫秒）</string>
@@ -3666,7 +3666,7 @@
     <string name="reasoning_preview_source_model">模型固定请求 JSON</string>
     <string name="reasoning_preview_warnings">诊断提示</string>
     <string name="reasoning_warning_cannot_disable">当前规则没有生成明确的关闭参数；选择「不思考」不代表服务端已关闭。可配置关闭参数或自定义 JSON。</string>
-    <string name="reasoning_warning_level_mapped">解析器已映射参数等级，但未更改选择档位；请查看实际发送字段。</string>
+    <string name="reasoning_warning_level_unverified">该等级不在 Gemini 原生协议已声明的等级中，仍按原值发送；服务端可能拒绝。可手动配置或改选等级。</string>
     <string name="reasoning_warning_budget_exceeds_output">思考预算超过可用输出限制，可能被服务端拒绝或调整。</string>
     <string name="reasoning_warning_incompatible_dialect">所选参数表达方式与当前协议不兼容；请查看实际发送字段并调整配置。</string>
     <string name="reasoning_warning_conflicting_parameters">推理字段之间存在冲突，可能导致服务端拒绝或忽略部分参数。</string>

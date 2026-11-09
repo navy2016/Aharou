@@ -29,7 +29,7 @@ data class AutoRetryOptions(
     companion object {
         const val DEFAULT_MAX_RETRIES = 3
         const val MIN_MAX_RETRIES = 0
-        const val MAX_MAX_RETRIES = 10
+        const val MAX_MAX_RETRIES = 100
         const val DEFAULT_INITIAL_DELAY_MS = 1_000L
         const val DEFAULT_MULTIPLIER = 2.0
         const val MAX_MULTIPLIER = 100.0

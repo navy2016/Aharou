@@ -1,6 +1,6 @@
 # CI 签名密钥配置
 
-CI 构建与产物说明见仓库根 [README.md](../../README.md) 的「CI 自动构建」「Known Limitations」。本文件只讲一件主 README 没覆盖的事：**如何把本地 release 签名密钥交给 GitHub Actions**。
+CI 构建与产物说明见仓库根 [README.md](../../README.md) 的「CI 自动构建」「Known Limitations」。本页说明签名配置及手动 ARM64 Release 产物构建。
 
 ## 需要配置的 GitHub Secrets
 
@@ -32,3 +32,11 @@ keytool -genkeypair -v -keystore app\aicode.jks -alias aicode -keyalg RSA -keysi
 ```
 
 > `aicode.jks` 与 `keystore.properties` 都在 `.gitignore` 里，不会入仓库，本地签名不受影响。
+
+## 手动 ARM64 Release 产物
+
+在 Actions 选择 `ARM64 Release APK`，仅从 `master` 手动运行。该工作流不创建 Tag 或 GitHub Release，仅上传 `arm64-release.apk`、版本元数据、SHA256SUMS、公钥证书摘要及 R8 映射，保留 14 天。
+
+此入口从上述四个 Secrets 恢复 PKCS#12 签名库，并在 runner 转为 JKS 供 Gradle 使用。签名材料不进入 artifact，构建禁用配置缓存。工作流会校验证书指纹与固定签名一致、APK 只包含 arm64-v8a、包名为 `com.aharou.agent` 且不可调试；缺失签名时立即失败，不生成临时替代签名。
+
+请长期备份签名库及口令。换用不同签名不能直接覆盖安装旧正式版；不要为了出一次包重新生成签名。签名变更也需显式更新工作流中的公开证书指纹校验。

@@ -17,7 +17,7 @@
     <string name="retry_enhanced_enable">Enable enhanced auto retry</string>
     <string name="retry_enabled">Enabled</string>
     <string name="retry_disabled">Disabled</string>
-    <string name="retry_max_retries">Additional retries (0–10)</string>
+    <string name="retry_max_retries">Additional retries (0–100)</string>
     <string name="retry_initial_delay">Initial delay (ms)</string>
     <string name="retry_multiplier">Backoff multiplier</string>
     <string name="retry_max_delay">Maximum delay (ms)</string>
@@ -3668,7 +3668,7 @@
     <string name="reasoning_preview_source_model">Model fixed request JSON</string>
     <string name="reasoning_preview_warnings">Diagnostics</string>
     <string name="reasoning_warning_cannot_disable">These rules did not generate an explicit off parameter. Selecting None does not mean thinking is disabled on the server. Configure an off parameter or custom JSON.</string>
-    <string name="reasoning_warning_level_mapped">The resolver mapped the parameter level without changing the selected level. Check the actual fields to send.</string>
+    <string name="reasoning_warning_level_unverified">This level is not declared by the native Gemini protocol. It is sent unchanged and may be rejected. Configure a custom mapping or select another level.</string>
     <string name="reasoning_warning_budget_exceeds_output">The thinking budget exceeds the available output limit and may be rejected or adjusted by the server.</string>
     <string name="reasoning_warning_incompatible_dialect">The selected parameter format is incompatible with the current protocol. Check the actual fields to send and adjust the configuration.</string>
     <string name="reasoning_warning_conflicting_parameters">Reasoning fields conflict. The server may reject the request or ignore some parameters.</string>

@@ -28,14 +28,78 @@ class ReasoningRequestResolverTest {
     }
 
     @Test
-    fun automaticOpenAiKeepsExistingMappingAndManualEffortCanExpressMax() {
-        val automatic = ReasoningRequestResolver.resolve("gpt-5", "https://example.com", ReasoningTransport.OPENAI_CHAT, ReasoningEffort.MAX)
-        assertEquals("high", automatic.parameters["reasoning_effort"].asString)
-        assertTrue(ReasoningWarning.LEVEL_MAPPED in automatic.warnings)
+    fun automaticExplicitLevelsArePreservedAcrossTransports() {
+        val models = mapOf(
+            ReasoningTransport.OPENAI_CHAT to "gpt-5",
+            ReasoningTransport.OPENAI_RESPONSES to "gpt-5",
+            ReasoningTransport.ANTHROPIC to "claude-sonnet-4-6",
+            ReasoningTransport.GEMINI_CONTENT to "gemini-3-pro",
+            ReasoningTransport.GEMINI_INTERACTIONS to "gemini-3-pro",
+        )
+        models.forEach { (transport, model) ->
+            listOf(ReasoningEffort.XHIGH, ReasoningEffort.MAX).forEach { effort ->
+                val parameters = ReasoningRequestResolver.resolve(model, "https://example.com", transport, effort).parameters
+                val actual = when (transport) {
+                    ReasoningTransport.OPENAI_CHAT -> parameters["reasoning_effort"]
+                    ReasoningTransport.OPENAI_RESPONSES -> parameters.getAsJsonObject("reasoning")["effort"]
+                    ReasoningTransport.ANTHROPIC -> parameters.getAsJsonObject("output_config")["effort"]
+                    ReasoningTransport.GEMINI_CONTENT -> parameters.getAsJsonObject("generationConfig").getAsJsonObject("thinkingConfig")["thinkingLevel"]
+                    ReasoningTransport.GEMINI_INTERACTIONS -> parameters.getAsJsonObject("generation_config")["thinking_level"]
+                }
+                assertEquals("$transport/$effort", effort.apiValue, actual.asString)
+            }
+        }
         val manual = ReasoningRequestResolver.resolve("gpt-5", "https://example.com", ReasoningTransport.OPENAI_CHAT, ReasoningEffort.MAX,
-            ReasoningConfig(effortValues = mapOf(ReasoningEffort.MAX to "max")))
-        assertEquals("max", manual.parameters["reasoning_effort"].asString)
-        assertFalse(ReasoningWarning.LEVEL_MAPPED in manual.warnings)
+            ReasoningConfig(effortValues = mapOf(ReasoningEffort.MAX to "custom-value")))
+        assertEquals("custom-value", manual.parameters["reasoning_effort"].asString)
+    }
+
+    @Test
+    fun modelIdentificationHandlesPrefixesCaseAndVersionSeparators() {
+        listOf(" CLAUDE-SONNET-4.6 ", "anthropic/claude-opus-4-6", "us.anthropic.claude-sonnet-4-6-v1:0", "Claude_Opus_4_7", "claude-sonnet-5").forEach { model ->
+            val resolved = ReasoningRequestResolver.resolve(model, "", ReasoningTransport.ANTHROPIC, ReasoningEffort.MAX)
+            assertEquals(model, ReasoningDialect.ANTHROPIC_ADAPTIVE, resolved.dialect)
+            assertEquals("max", resolved.parameters.getAsJsonObject("output_config")["effort"].asString)
+        }
+        listOf("claude-sonnet-4-20250514", "claude-sonnet-4-5", "notclaude-sonnet-4-6").forEach { model ->
+            val resolved = ReasoningRequestResolver.resolve(model, "", ReasoningTransport.ANTHROPIC, ReasoningEffort.HIGH)
+            assertEquals(model, ReasoningDialect.ANTHROPIC_BUDGET, resolved.dialect)
+        }
+        listOf(" Google/GEMINI-3.1-Pro-Preview ", "models/gemini-4-argon", "GEMINI_3_FLASH").forEach { model ->
+            val resolved = ReasoningRequestResolver.resolve(model, "", ReasoningTransport.GEMINI_CONTENT, ReasoningEffort.MAX)
+            assertEquals(model, ReasoningDialect.GEMINI_LEVEL, resolved.dialect)
+        }
+        listOf("gemini-2.5-pro", "notgemini-3-pro", "gemini-30-pro").forEach { model ->
+            val resolved = ReasoningRequestResolver.resolve(model, "", ReasoningTransport.GEMINI_CONTENT, ReasoningEffort.HIGH)
+            assertEquals(model, ReasoningDialect.GEMINI_BUDGET, resolved.dialect)
+        }
+    }
+
+    @Test
+    fun providerHostRecognitionUsesExactDomains() {
+        listOf("https://dashscope.aliyuncs.com", "https://DASHSCOPE-INTL.ALIYUNCS.COM./compatible-mode", "https://dashscope-us.aliyuncs.com").forEach { base ->
+            val resolved = ReasoningRequestResolver.resolve("qwen", base, ReasoningTransport.OPENAI_CHAT, ReasoningEffort.NONE)
+            assertEquals(json("""{"enable_thinking":false}"""), resolved.parameters)
+        }
+        listOf("https://dashscope.example.com", "https://dashscope.aliyuncs.com.example.com", "https://example.com/dashscope", "https://dashscope.aliyuncs.com@example.com").forEach { base ->
+            val resolved = ReasoningRequestResolver.resolve("qwen", base, ReasoningTransport.OPENAI_CHAT, ReasoningEffort.NONE)
+            assertEquals(base, 0, resolved.parameters.size())
+            assertTrue(ReasoningWarning.CANNOT_DISABLE in resolved.warnings)
+        }
+    }
+
+    @Test
+    fun geminiUnverifiedLevelsAreDiagnosedWithoutRewriting() {
+        listOf(ReasoningTransport.GEMINI_CONTENT, ReasoningTransport.GEMINI_INTERACTIONS).forEach { transport ->
+            listOf(ReasoningEffort.XHIGH, ReasoningEffort.MAX).forEach { effort ->
+                val body = ReasoningRequestResolver.resolve("gemini-3-pro", "", transport, effort).parameters
+                val before = body.deepCopy()
+                assertTrue(ReasoningWarning.LEVEL_UNVERIFIED in ReasoningRequestResolver.diagnostics(body))
+                assertEquals(before, body)
+            }
+            val high = ReasoningRequestResolver.resolve("gemini-3-pro", "", transport, ReasoningEffort.HIGH).parameters
+            assertFalse(ReasoningWarning.LEVEL_UNVERIFIED in ReasoningRequestResolver.diagnostics(high))
+        }
     }
 
     @Test
@@ -68,6 +132,44 @@ class ReasoningRequestResolverTest {
         assertEquals(json("""{"enable_thinking":false}"""), dashscope.parameters)
         val unrecognized = ReasoningRequestResolver.resolve("deepseek-v4", "https://example.com/api.deepseek.com", ReasoningTransport.OPENAI_CHAT, ReasoningEffort.NONE)
         assertEquals(0, unrecognized.parameters.size())
+    }
+
+    @Test
+    fun dashscopeThinkingOnlyModelsDoNotReceiveAutomaticOffSwitches() {
+        val base = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        listOf("qwq-32b", "qwq-plus", "qwen3-thinking", "Qwen/qwen3-235b-a22b-thinking-2507", "qwen3.7-max-preview", "qwen3.8-2.4t-a95b").forEach { model ->
+            val resolved = ReasoningRequestResolver.resolve(model, base, ReasoningTransport.OPENAI_CHAT, ReasoningEffort.NONE)
+            assertEquals(model, 0, resolved.parameters.size())
+            assertTrue(ReasoningWarning.CANNOT_DISABLE in resolved.warnings)
+        }
+        val manual = ReasoningRequestResolver.resolve("qwq-32b", base, ReasoningTransport.OPENAI_CHAT, ReasoningEffort.NONE,
+            ReasoningConfig(dialect = ReasoningDialect.ENABLE_THINKING))
+        assertEquals(false, manual.parameters["enable_thinking"].asBoolean)
+        val hybrid = ReasoningRequestResolver.resolve("qwen-plus", base, ReasoningTransport.OPENAI_CHAT, ReasoningEffort.NONE)
+        assertEquals(false, hybrid.parameters["enable_thinking"].asBoolean)
+    }
+
+    @Test
+    fun officialDeepSeekEnablesThinkingAndPreservesExplicitEffort() {
+        listOf("deepseek-v4-pro", "deepseek-v4-flash", "deepseek-flash", "DeepSeek/DEEPSEEK-V4.1-FLASH").forEach { model ->
+            listOf(ReasoningEffort.LOW, ReasoningEffort.XHIGH, ReasoningEffort.MAX).forEach { effort ->
+                val chat = ReasoningRequestResolver.resolve(model, "https://api.deepseek.com", ReasoningTransport.OPENAI_CHAT, effort)
+                assertEquals("enabled", chat.parameters.getAsJsonObject("thinking")["type"].asString)
+                assertEquals(effort.apiValue, chat.parameters["reasoning_effort"].asString)
+                val responses = ReasoningRequestResolver.resolve(model, "https://api.deepseek.com", ReasoningTransport.OPENAI_RESPONSES, effort)
+                assertEquals(effort.apiValue, responses.parameters.getAsJsonObject("reasoning")["effort"].asString)
+                assertFalse(responses.parameters.has("thinking"))
+            }
+            val default = ReasoningRequestResolver.resolve(model, "https://api.deepseek.com", ReasoningTransport.OPENAI_CHAT, ReasoningEffort.DEFAULT)
+            assertEquals(0, default.parameters.size())
+        }
+        listOf("https://api.deepseek.com.example.com", "https://example.com").forEach { base ->
+            val gateway = ReasoningRequestResolver.resolve("deepseek-v4-pro", base, ReasoningTransport.OPENAI_CHAT, ReasoningEffort.MAX)
+            assertFalse(gateway.parameters.has("thinking"))
+            assertEquals("max", gateway.parameters["reasoning_effort"].asString)
+        }
+        val older = ReasoningRequestResolver.resolve("deepseek-v3", "https://api.deepseek.com", ReasoningTransport.OPENAI_CHAT, ReasoningEffort.HIGH)
+        assertFalse(older.parameters.has("thinking"))
     }
 
     @Test
