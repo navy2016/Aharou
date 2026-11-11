@@ -68,6 +68,11 @@
 - `providers.<id>.models.<model>.reasoning_config` 设置模型推理映射，敏感 JSON 对象：`dialect`（auto/openai_effort/anthropic_budget/anthropic_adaptive/gemini_budget/gemini_level/thinking_type/enable_thinking/custom）、`effortValues`（档位→字符串）、`budgets`（档位→1..2147479551整数）、`patches`（档位→JSON对象）。不配置 default，none 不能有预算；空对象恢复自动。默认档位存储不变，标题/压缩等原有默认调用不继承聊天高档。
 - 自动识别中的等级型参数保持 `xhigh`/`max` 原值，不自动归一到 `high`；预算型仍按预算映射。Gemini原生等级未声明xhigh/max时只作提示，不改写参数。模型识别忽略大小写和厂商前缀、兼容点号版本、Bedrock区域前缀及Vertex日期后缀，厂商域名按真实host匹配。Mythos Preview按自适应识别；AUTO下已知无法完全关闭的Claude家族/代际不发disabled，并保留提示；between_tools不能当作完全关闭。
 - 请求生成顺序为基础请求→推理映射及逐档 patch→全局/供应商/模型固定请求体。固定 JSON 最后覆盖，不能因用户改档位就自动删除或改写这些字段。界面预览标明最终推理字段与覆盖来源，不保证服务端支持；不得将选择档位或隐藏思考过程描述为服务端已按该档执行或已关闭推理。
+- 完整地址中的已知端点在所选供应商协议内优先决定请求格式，聊天、模型测试和预览共用该判断；未知自定义路径继续使用协议开关。Gemini 的映射后模型以-image结尾时默认使用Interactions，完整地址明确指定generateContent时以地址为准。
+- `providers.<id>.models.<model>.service_tier` 设置模型级服务档位（空/default/fast/ultrafast），与思考强度独立；`model.roles.default_service_tier` 是默认模型的快捷设置。仅OpenAI协议发送service_tier，空值跟随上游不主动发送，固定请求JSON仍最后覆盖。
+
+## 配置验收（config）
+- 测试已配置模型使用 `config action=test_model`，提供 `provider_id`、`model`；会发送极短请求，可能计费，不修改配置、不返回凭据。IM 的 enabled 仅代表设置，实际运行情况用 `get im.<渠道>.state` / `get im.<渠道>.error` 查询。
 
 ## 自动化任务（scheduledTasks）
 - 自动化任务 = 「按时间或事件自动在会话里跑一条指令」，用 `config` 工具在 `scheduledTasks` 集合下 `add` 建任务（`name` 与 `prompt` 必填），字段一律按 `scheduledTasks.<任务 id>.<字段>` 读写。

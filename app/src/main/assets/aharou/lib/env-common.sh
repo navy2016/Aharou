@@ -85,7 +85,7 @@ detect_pmgr() {
 pkg_add() {
     case "$PMGR" in
         apk)
-            apk_update
+            # --no-cache 的 add 自行获取索引，不在此重复执行一次 update。
             timeout "$APK_TIMEOUT" apk add --no-cache "$@"
             ;;
         apt)
@@ -103,7 +103,7 @@ pkg_add() {
                     echo 'Acquire::https::Timeout "60";'
                 } > "$apt_conf" 2>/dev/null || true
             fi
-            apt-get update -y
+            apt_update || return 1
             apt-get install -y "$@"
             ;;
         dnf) dnf install -y "$@" ;;
@@ -262,11 +262,61 @@ apk_update() {
     return 1
 }
 
+# ── apt 锁：安装被中断会留下 /var/lib/apt/lists/lock 与 dpkg 锁，之后 apt 一律
+# "Could not get lock ... is held by process N"。N 可能早已退出（陈旧锁），也可能真的还在跑。
+# 和 apk 一样：只清没有活进程持有的锁，且只认同一 rootfs 的进程。
+apt_process_running() {
+    _self_root=$(readlink /proc/$$/root 2>/dev/null)
+    for p in /proc/[0-9]*; do
+        [ -r "$p/comm" ] || continue
+        case "$(cat "$p/comm" 2>/dev/null)" in
+            apt|apt-get|dpkg) ;;
+            *) continue ;;
+        esac
+        if [ -n "$_self_root" ]; then
+            [ "$(readlink "$p/root" 2>/dev/null)" = "$_self_root" ] && return 0
+        else
+            return 0
+        fi
+    done
+    return 1
+}
+
+apt_clear_stale_lock() {
+    _locks="/var/lib/apt/lists/lock /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend"
+    _found=0
+    for f in $_locks; do [ -e "$f" ] && _found=1; done
+    [ "$_found" = 1 ] || return 1
+    apt_process_running && return 1
+    for f in $_locks; do rm -f "$f" 2>/dev/null; done
+    echo "  ${C_YELLOW}检测到陈旧的 apt 锁（上次安装被中断留下），已清理。${C_RESET}"
+    return 0
+}
+
+# apt update 的封装：先清陈旧锁；失败时若发现锁可由自己清理就重试一次。
+# 有 apt 真在跑时明确提示，不要把它误报成网络问题——用户等它结束再装即可。
+APT_TIMEOUT="${APT_TIMEOUT:-900}"
+apt_update() {
+    apt_clear_stale_lock
+    if apt_process_running; then
+        echo "  ${C_YELLOW}另一个 apt 正在这个容器里运行，请等它结束后重试。${C_RESET}"
+        return 1
+    fi
+    if timeout "$APT_TIMEOUT" apt-get update -y; then
+        return 0
+    fi
+    if apt_clear_stale_lock; then
+        timeout "$APT_TIMEOUT" apt-get update -y
+        return $?
+    fi
+    return 1
+}
+
 # ── 更新软件包索引（版本探测与安装的前置步骤）──
 pkg_update() {
     case "$PMGR" in
         apk) apk_update ;;
-        apt) apt-get update -y ;;
+        apt) apt_update ;;
         dnf) dnf makecache -y ;;
         yum) yum makecache -y ;;
         pacman) pacman -Sy --noconfirm ;;
@@ -341,7 +391,20 @@ ensure_runtime() {
     command -v "$er_bin" >/dev/null 2>&1 && return 0
     [ -z "$PMGR" ] && return 1
     echo "  · 未检测到 $er_bin，正在补装（$(runtime_install "$er_runtime")）..."
-    pkg_add "$(runtime_install "$er_runtime")" >/dev/null 2>&1
+    # 内部生成的是多个包名，必须分词；加引号会把 python3 py3-pip 当成一个包。
+    pkg_add $(runtime_install "$er_runtime") >/dev/null 2>&1
+}
+
+preinstalled_general_ready() {
+    [ -f /etc/aharou/preinstalled.json ] || return 1
+    for tool in bash curl wget jq rsync git rg file less netstat nc nslookup node npm python3; do
+        command -v "$tool" >/dev/null 2>&1 || return 1
+    done
+    jq -e '.schemaVersion == 1 and .profile == "general" and .recipeRevision == "1"' \
+        /etc/aharou/preinstalled.json >/dev/null 2>&1 || return 1
+    timeout 10 node --version >/dev/null 2>&1 || return 1
+    timeout 10 npm --version >/dev/null 2>&1 || return 1
+    timeout 10 python3 -c 'import ssl, venv, pip' >/dev/null 2>&1 || return 1
 }
 
 # ── 安装清单一行：名称 → 包列表（v版本，探测得到时；显示去掉 apk 的 -rN 后缀）──
@@ -562,7 +625,46 @@ install_lua_ls_release() {
     fi
 }
 
-# ── 探测单个 URL 的 http 状态码（curl 优先，wget 兑底，无法探测返回 000）──
+# ── 按容器自身发行版和架构生成真实索引地址；不能用固定 x86_64 ──
+mirror_probe_url() {
+    _mp_host=$1
+    _mp_ver=$VERSION_ID _mp_codename=$VERSION_CODENAME _mp_id=$ID
+    [ -r /etc/os-release ] && . /etc/os-release && _mp_ver=$VERSION_ID _mp_codename=$VERSION_CODENAME _mp_id=$ID
+    case "$PMGR" in
+        apk)
+            _mp_ver=$VERSION_ID
+            [ -n "$_mp_ver" ] && echo "http://$_mp_host/alpine/v$_mp_ver/main/$(uname -m)/APKINDEX.tar.gz"
+            ;;
+        apt)
+            case "$_mp_id" in
+                ubuntu) [ -n "$_mp_codename" ] && echo "http://$_mp_host/ubuntu-ports/dists/$_mp_codename/Release" ;;
+                debian) [ -n "$_mp_codename" ] && echo "http://$_mp_host/debian/dists/$_mp_codename/Release" ;;
+            esac
+            ;;
+        dnf|yum|pacman) echo "http://$_mp_host/archlinux/core/os/$(uname -m)/core.db" ;;
+    esac
+}
+
+# ── 实测镜像自己索引的响应耗时（秒），不装包、最多取 16KiB ──
+mirror_probe_seconds() {
+    _ms_url=$(mirror_probe_url "$1")
+    [ -n "$_ms_url" ] || return 1
+    if command -v curl >/dev/null 2>&1; then
+        _ms=$(curl -s -o /dev/null --max-time 4 --range 0-16383 -w '%{http_code}:%{time_total}' "$_ms_url" 2>/dev/null)
+        _ms_code=${_ms%%:*}; _ms_time=${_ms#*:}
+        case "$_ms_code" in
+            2[0-9][0-9]|3[0-9][0-9]) [ -n "$_ms_time" ] && [ "$_ms_time" != "$_ms_code" ] && \
+                awk -v t="$_ms_time" 'BEGIN { printf "%d\n", t * 1000 }' ;;
+        esac
+    elif command -v wget >/dev/null 2>&1; then
+        _ms_start=$(date +%s%N 2>/dev/null) || return 1
+        wget -q -T 4 -O /dev/null "$_ms_url" 2>/dev/null || return 1
+        _ms_end=$(date +%s%N 2>/dev/null) || return 1
+        echo "$(( (_ms_end - _ms_start) / 1000000 ))"
+    fi
+}
+
+# ── 从候选里选当前可用镜像（全部不可用则兑底第一个）──
 http_code() {
     if command -v curl >/dev/null 2>&1; then
         curl -s -o /dev/null --max-time 8 -w '%{http_code}' "$1" 2>/dev/null || echo "000"
@@ -602,13 +704,18 @@ probe_mirror() {
 
 # ── 从候选里选当前可用镜像（全部不可用则兑底第一个）──
 pick_mirror() {
+    _pm_best= _pm_best_ms=
     for m in $MIRRORS; do
-        if probe_mirror "$m"; then
-            MIRROR="$m"
-            return 0
+        _pm_ms=$(mirror_probe_seconds "$m") || continue
+        echo "  · $m ${_pm_ms}ms" >&2
+        if [ -z "$_pm_best_ms" ] || [ "$_pm_ms" -lt "$_pm_best_ms" ]; then
+            _pm_best=$m; _pm_best_ms=$_pm_ms
         fi
     done
+    if [ -n "$_pm_best" ]; then MIRROR=$_pm_best; return 0; fi
+    echo "  ${C_YELLOW}所有国内镜像均探测失败，暂时保留第一个候选；可重试或检查网络${C_RESET}" >&2
     MIRROR=$(echo "$MIRRORS" | awk '{print $1}')
+    return 1
 }
 
 # ── 镜像源：按包管理器换国内镜像源（多候选自动探测），失败自动恢复原配置（不阻塞后续安装）──
@@ -706,7 +813,13 @@ setup_apt_mirror() {
         } > /etc/apt/sources.list.d/aicode-mirror-security.sources
     fi
     # 验证：update 失败输出原因并恢复原配置
-    if ! apt-get update -y; then
+    if ! apt_update; then
+        # 锁被别的 apt 占着时验证不了，但这不是新源的问题，不能因此回滚。
+        if apt_process_running; then
+            echo "另一个 apt 正在运行，暂未能验证新源，已保留新源配置，稍后可重试" >&2
+            rm -rf "$backup_dir"
+            return 0
+        fi
         echo "换源后 apt update 失败，已恢复原源配置" >&2
         rm -rf /etc/apt/sources.list.d
         [ -f "$backup_dir/sources.list" ] && cp "$backup_dir/sources.list" /etc/apt/sources.list

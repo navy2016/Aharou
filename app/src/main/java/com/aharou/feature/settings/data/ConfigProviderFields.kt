@@ -53,6 +53,7 @@ class ConfigProviderFields @Inject constructor(
     private val customRequestStore: CustomRequestStore,
     private val reasoningConfigStore: ReasoningConfigStore,
     private val reasoningStore: ModelReasoningEffortRepository,
+    private val serviceTierStore: com.aharou.feature.settings.data.repository.ModelServiceTierRepository,
     private val providers: AIProviderRepository,
 ) {
 
@@ -472,6 +473,19 @@ class ConfigProviderFields @Inject constructor(
                     writer = { v ->
                         val effort = (v as? ConfigValue.Str)?.value ?: throw ConfigError.TypeMismatch("string")
                         reasoningStore.set(forId, model, effort.uppercase())
+                    },
+                ) + ClosureField(
+                    path = "$basePath.$forId.models.$model.service_tier",
+                    displayName = "模型服务档位（$model）",
+                    description = "跟随上游为空，标准为default，加速为fast或ultrafast；仅OpenAI协议发送，可能影响费用。",
+                    valueSchema = ConfigSchema.StrEnum(listOf("", "default", "fast", "ultrafast")),
+                    reader = { ConfigValue.Str(serviceTierStore.apiValueFor(forId, model).orEmpty()) },
+                    writer = { v ->
+                        val value = (v as? ConfigValue.Str)?.value ?: throw ConfigError.TypeMismatch("string")
+                        val tier = com.aharou.feature.settings.domain.model.ServiceTier.entries.firstOrNull {
+                            it.apiValue.orEmpty() == value
+                        } ?: throw ConfigError.InvalidValue("无效的服务档位：$value")
+                        serviceTierStore.set(forId, model, tier.name)
                     },
                 )
             }

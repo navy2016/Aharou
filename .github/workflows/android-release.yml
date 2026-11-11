@@ -148,6 +148,9 @@ jobs:
       - name: Check architecture rules
         run: python3 scripts/check_architecture.py
 
+      - name: Stage published preinstalled Alpine assets
+        run: python3 scripts/stage_preinstalled_assets.py --apply
+
       # 发版质量门禁：跑单元测试，失败即中止，避免发出回归包。
       # 只跑 universal debug 变体：单测逻辑与 flavor 无关，跑全 flavor 6 变体是重复编译。
       - name: Run unit tests
@@ -297,4 +300,6 @@ jobs:
           # 只同步当次发版的 tag：脚本默认的「最新 3 个正式版」策略不适合发版流水线——
           # 已发布但用户不想放上 cnb 的版本（如待重发的），下次发版会被这个策略又搬过去。
           RELEASE_FILTER: ^${{ github.ref_name }}$
+          # 包是上一步刚构建的，直接用本地文件传到 cnb，不再绕反代回 GitHub 下载。
+          LOCAL_ASSETS_DIR: dist
         run: python3 scripts/sync-cnb-releases.py

@@ -74,6 +74,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalView
@@ -105,6 +106,9 @@ import com.aharou.feature.agent.domain.workflow.ContextBreakdown
 import com.aharou.feature.onboarding.domain.OnboardingStep
 import com.aharou.feature.onboarding.presentation.onboardingTarget
 import com.aharou.feature.voice.call.VoiceCallService
+import com.aharou.feature.voice.input.VoiceInputPanel
+import com.aharou.feature.voice.input.VoiceInputState
+import com.aharou.feature.voice.input.rememberVoiceInputHost
 import com.aharou.feature.voice.presentation.VoiceMicButton
 import com.aharou.feature.agent.domain.command.SlashCommand
 import com.aharou.feature.agent.domain.command.SlashCommandKind
@@ -216,16 +220,20 @@ internal fun ChatInputBar(
     onModelSheetDismiss: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
+    val voiceInput = rememberVoiceInputHost(value, onValueChange, sessionId)
     val hasContent = value.isNotBlank() || pendingAttachments.isNotEmpty()
     val canSend = hasContent
     var showAttachmentSheet by remember { mutableStateOf(false) }
     var showFullScreenInput by remember { mutableStateOf(false) }
     // TextField 的 String 重载在整串替换时会保留旧 selection 下标（点快捷命令补全时光标会停在中间），
     // 这里自持 TextFieldValue：外部改值时把光标移到末尾。
-    var inputFieldValue by remember { mutableStateOf(TextFieldValue(value, TextRange(value.length))) }
+    var inputFieldValue by remember(sessionId) { mutableStateOf(TextFieldValue(value, TextRange(value.length))) }
+    // 记录输入框自己推给外部的文本：它回流时不能再回写，否则打字快的时候旧值会把刚敲的字盖掉。
+    var lastPushedText by remember(sessionId) { mutableStateOf(value) }
     LaunchedEffect(value) {
-        if (inputFieldValue.text != value) {
+        if (value != lastPushedText && inputFieldValue.text != value) {
             inputFieldValue = TextFieldValue(value, TextRange(value.length))
+            lastPushedText = value
         }
     }
     val showSlashMenu = !isBusy && slashCommands.isNotEmpty() &&
@@ -421,6 +429,11 @@ internal fun ChatInputBar(
                 )
             }
 
+            VoiceInputPanel(
+                state = voiceInput.state,
+                modifier = Modifier.padding(bottom = Spacing.xs)
+            )
+
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -461,6 +474,7 @@ internal fun ChatInputBar(
                                                 current.substring(at + marker.length)
                                             inputFieldValue =
                                                 TextFieldValue(stripped, TextRange(at))
+                                            lastPushedText = stripped
                                             onValueChange(stripped)
                                         }
                                         onRemovePaste(pasted.id)
@@ -481,6 +495,7 @@ internal fun ChatInputBar(
                             // 大段粘贴折成 [Pasted#N] 标记，普通输入原样通过。
                             val folded = foldLongPasteIfNeeded(inputFieldValue, new, onStashPaste)
                             inputFieldValue = folded
+                            lastPushedText = folded.text
                             onValueChange(folded.text)
                             // 用户可能直接删掉 [Pasted#N] 字面量，对应的缓冲块要跟着回收，
                             // 否则 chip 会赖在输入框上方，点开还是一段早已不在文本里的内容。
@@ -591,7 +606,7 @@ internal fun ChatInputBar(
                             onSelectModel = onSelectModel,
                             reasoningEffort = reasoningEffort,
                             onReasoningEffortChange = onModelReasoningEffortChange,
-                            currentReasoningEffortEnabled = !isBusy,
+                            currentReasoningEffortEnabled = !isBusy && !canForceStop,
                             forceOpenSheet = forceOpenModelSheet,
                             onSelectSuccessInOnboarding = onSelectModelInOnboarding,
                             onSheetDismiss = onModelSheetDismiss,
@@ -620,10 +635,18 @@ internal fun ChatInputBar(
                     val callContext = LocalContext.current
                     val callRunning by VoiceCallService.running.collectAsState()
                     val wakeRunning by VoiceCallService.wakeModeRunning.collectAsState()
+                    val keyboardController = LocalSoftwareKeyboardController.current
                     VoiceMicButton(
                         enabled = !isBusy,
                         callRunning = callRunning,
                         wakeRunning = wakeRunning,
+                        voiceInputActive = voiceInput.state !is VoiceInputState.Idle,
+                        onVoiceInputStart = {
+                            // 长按录音时留着键盘只会把输入框顶高，先收掉再说。
+                            keyboardController?.hide()
+                            voiceInput.start()
+                        },
+                        onVoiceInputEnd = voiceInput::finish,
                         onToggleCall = {
                             when {
                                 !VoiceCallService.isRunning() -> VoiceCallService.start(callContext)

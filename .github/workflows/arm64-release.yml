@@ -43,6 +43,9 @@ jobs:
           chmod +x ./gradlew
           git config core.fileMode false
 
+      - name: Stage published preinstalled Alpine assets
+        run: python3 scripts/stage_preinstalled_assets.py --apply
+
       - name: Restore fixed signing key
         env:
           KEYSTORE_BASE64: ${{ secrets.AICODE_KEYSTORE_BASE64 }}

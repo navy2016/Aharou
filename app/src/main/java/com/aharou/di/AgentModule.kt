@@ -63,6 +63,7 @@ import com.aharou.feature.agent.domain.workflow.AgentWorkflow
 import com.aharou.feature.agent.domain.tool.ToolPermissionManager
 import com.aharou.feature.agent.domain.permission.ToolPermissionPolicyEngine
 import com.aharou.feature.agent.domain.tool.ToolCallGuard
+import com.aharou.feature.agent.domain.tool.ToolCallIdempotencyStore
 import com.aharou.feature.agent.domain.tool.ToolRegistry
 import com.aharou.feature.agent.domain.tool.ToolSearchTool
 import com.aharou.feature.agent.domain.tool.ToolOutputStore
@@ -116,6 +117,7 @@ import com.aharou.feature.agent.domain.tool.search.WebFetchTool
 import com.aharou.feature.agent.domain.tool.search.WebSearchTool
 import com.aharou.feature.agent.domain.tool.session.SessionTool
 import com.aharou.feature.browser.BrowserTool
+import com.aharou.feature.im.NapCatTool
 import com.aharou.feature.agent.domain.workflow.ContextCompactor
 import com.aharou.feature.agent.domain.workflow.GeneratedImagePersister
 import com.aharou.feature.agent.domain.ocr.TesseractOcrEngine
@@ -134,6 +136,11 @@ import com.aharou.feature.vault.VaultRepository
 @Module
 @InstallIn(SingletonComponent::class)
 object AgentModule {
+
+    @Provides
+    fun provideSubAgentRunLifecycle(
+        tracker: com.aharou.feature.agent.data.local.task.SubAgentTaskTracker,
+    ): com.aharou.feature.agent.domain.subagent.SubAgentRunLifecycle = tracker
 
     @Provides
     @Singleton
@@ -436,6 +443,7 @@ object AgentModule {
         taskTool: TaskTool,
         messageParentTool: MessageParentTool,
         browserTool: BrowserTool,
+        napCatTool: NapCatTool,
         configTool: ConfigTool,
         vdTool: VdTool,
         a11yTool: A11yTool,
@@ -476,6 +484,7 @@ object AgentModule {
             register("task", taskTool)
             register("messageParent", messageParentTool)
             register("browser", browserTool)
+            register("napcat", napCatTool)
             register("config", configTool)
             register("vscreen", vdTool)
             register("a11y", a11yTool)
@@ -530,7 +539,8 @@ object AgentModule {
         receiptRepository: ToolCallReceiptRepository,
         ocrEngine: TesseractOcrEngine,
         vault: VaultRepository,
-        reminderEngine: com.aharou.feature.agent.domain.reminder.ReminderEngine
+        reminderEngine: com.aharou.feature.agent.domain.reminder.ReminderEngine,
+        idempotencyStore: ToolCallIdempotencyStore
     ): AgentWorkflow {
         return StatefulAgentWorkflow(
             toolRegistry,
@@ -566,7 +576,8 @@ object AgentModule {
             ocrEngine,
             vault,
             reminderEngine,
-            memoryCompactor
+            memoryCompactor,
+            idempotencyStore
         )
     }
 }

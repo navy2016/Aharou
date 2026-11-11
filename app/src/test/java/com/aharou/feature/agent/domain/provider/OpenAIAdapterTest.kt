@@ -27,6 +27,7 @@ import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import java.io.IOException
 import okhttp3.RequestBody
 import okhttp3.ResponseBody
 import okhttp3.ResponseBody.Companion.toResponseBody
@@ -222,6 +223,85 @@ class OpenAIAdapterTest {
         }
     }
 
+    @Test
+    fun serviceTier_defaults_and_explicit_values_reach_sync_and_stream_for_both_protocols() = runTest {
+        for (responses in listOf(false, true)) for (stream in listOf(false, true)) {
+            val api = mockk<OpenAIApi>()
+            val request = slot<RequestBody>()
+            coEvery { api.createChatCompletionCustom(any(), any(), any(), capture(request)) } returns response()
+            coEvery { api.createResponsesCustom(any(), any(), any(), capture(request)) } returns
+                JsonParser.parseString("""{"status":"completed","output":[]}""").asJsonObject
+            every { api.streamChatCompletionCustom(any(), any(), any(), capture(request)) } answers {
+                sseCall("data: [DONE]")
+            }
+            every { api.streamResponsesCustom(any(), any(), any(), capture(request)) } answers {
+                sseCall("""data: {"type":"response.completed","response":{"status":"completed","output":[]}}""")
+            }
+            val adapter = adapter(api).apply { useResponseApi = responses; maxNetworkRetries = 0 }
+            for (tier in listOf(null, "default", "fast", "ultrafast")) {
+                adapter.serviceTier = tier
+                if (stream) adapter.completeStream("", emptyList()).toList() else adapter.complete("", emptyList())
+                val body = request.captured.decodeJsonObject()
+                if (tier == null) assertFalse(body.has("service_tier"))
+                else assertEquals(tier, body.get("service_tier").asString)
+                assertTrue(body.has(if (responses) "input" else "messages"))
+            }
+        }
+    }
+
+    @Test
+    fun serviceTier_fixed_json_overrides_base_and_reasoning_patch_for_both_protocols() = runTest {
+        for (responses in listOf(false, true)) for (stream in listOf(false, true)) {
+            val api = mockk<OpenAIApi>()
+            val request = slot<RequestBody>()
+            coEvery { api.createChatCompletionCustom(any(), any(), any(), capture(request)) } returns response()
+            coEvery { api.createResponsesCustom(any(), any(), any(), capture(request)) } returns
+                JsonParser.parseString("""{"status":"completed","output":[]}""").asJsonObject
+            every { api.streamChatCompletionCustom(any(), any(), any(), capture(request)) } answers { sseCall("data: [DONE]") }
+            every { api.streamResponsesCustom(any(), any(), any(), capture(request)) } answers {
+                sseCall("""data: {"type":"response.completed","response":{"status":"completed","output":[]}}""")
+            }
+            val adapter = adapter(api).apply {
+                useResponseApi = responses
+                maxNetworkRetries = 0
+                serviceTier = "fast"
+                reasoningConfig = ReasoningConfig(patches = mapOf(ReasoningEffort.HIGH to
+                    JsonParser.parseString("""{"service_tier":"default"}""").asJsonObject))
+            }
+            for (fixedJson in listOf(null, """{"service_tier":"ultrafast"}""", """{"service_tier":null}""")) {
+                adapter.customBody = fixedJson?.let { JsonParser.parseString(it).asJsonObject }
+                if (stream) adapter.completeStream("", emptyList(), reasoningEffort = "high").toList()
+                else adapter.complete("", emptyList(), reasoningEffort = "high")
+                val actual = request.captured.decodeJsonObject().get("service_tier")
+                if (fixedJson == null) assertEquals("default", actual.asString)
+                else assertEquals(JsonParser.parseString(fixedJson).asJsonObject.get("service_tier"), actual)
+            }
+        }
+    }
+
+    @Test
+    fun explicit_xhigh_and_max_reach_custom_requests_for_both_protocols() = runTest {
+        for (responses in listOf(false, true)) for (stream in listOf(false, true)) {
+            val api = mockk<OpenAIApi>()
+            val request = slot<RequestBody>()
+            coEvery { api.createChatCompletionCustom(any(), any(), any(), capture(request)) } returns response()
+            coEvery { api.createResponsesCustom(any(), any(), any(), capture(request)) } returns
+                JsonParser.parseString("""{"status":"completed","output":[]}""").asJsonObject
+            every { api.streamChatCompletionCustom(any(), any(), any(), capture(request)) } answers { sseCall("data: [DONE]") }
+            every { api.streamResponsesCustom(any(), any(), any(), capture(request)) } answers {
+                sseCall("""data: {"type":"response.completed","response":{"status":"completed","output":[]}}""")
+            }
+            val adapter = adapter(api).apply { useResponseApi = responses; maxNetworkRetries = 0 }
+            for (effort in listOf("xhigh", "max")) {
+                if (stream) adapter.completeStream("", emptyList(), reasoningEffort = effort).toList()
+                else adapter.complete("", emptyList(), reasoningEffort = effort)
+                val body = request.captured.decodeJsonObject()
+                val actual = if (responses) body.getAsJsonObject("reasoning").get("effort") else body.get("reasoning_effort")
+                assertEquals(effort, actual.asString)
+            }
+        }
+    }
+
     // ── Chat Completions 非流式：请求构造 ──────────────────────────────
 
     @Test
@@ -340,6 +420,42 @@ class OpenAIAdapterTest {
             useFullUrl = true
         }.complete("", emptyList())
         assertEquals("https://custom.example/v1/chat/completions", urlSlot.captured)
+    }
+
+    @Test
+    fun fullEndpointSelectsProtocolForSyncAndStreamDespiteOppositeFlag() = runTest {
+        for (responses in listOf(false, true)) for (stream in listOf(false, true)) {
+            val api = mockk<OpenAIApi>()
+            val request = slot<RequestBody>()
+            val endpoint = "https://example.invalid/v1/" + if (responses) "responses" else "chat/completions"
+            if (responses) {
+                coEvery { api.createResponsesCustom(endpoint, any(), any(), capture(request)) } returns
+                    JsonParser.parseString("""{"status":"completed","output":[]}""").asJsonObject
+                every { api.streamResponsesCustom(endpoint, any(), any(), capture(request)) } answers {
+                    sseCall("""data: {"type":"response.completed","response":{"status":"completed","output":[]}}""")
+                }
+            } else {
+                coEvery { api.createChatCompletionCustom(endpoint, any(), any(), capture(request)) } returns response()
+                every { api.streamChatCompletionCustom(endpoint, any(), any(), capture(request)) } answers {
+                    sseCall("data: [DONE]")
+                }
+            }
+            val adapter = adapter(api).apply {
+                baseUrl = endpoint
+                useFullUrl = true
+                useResponseApi = !responses
+                maxNetworkRetries = 0
+                serviceTier = "fast"
+            }
+            if (stream) adapter.completeStream("", emptyList(), reasoningEffort = "max").toList()
+            else adapter.complete("", emptyList(), reasoningEffort = "max")
+            val body = request.captured.decodeJsonObject()
+            assertEquals("fast", body["service_tier"].asString)
+            assertTrue(body.has(if (responses) "input" else "messages"))
+            assertFalse(body.has(if (responses) "messages" else "input"))
+            val actual = if (responses) body.getAsJsonObject("reasoning")["effort"] else body["reasoning_effort"]
+            assertEquals("max", actual.asString)
+        }
     }
 
     // ── Chat Completions：响应映射 ─────────────────────────────────────
@@ -615,6 +731,88 @@ class OpenAIAdapterTest {
     }
 
     @Test
+    fun streamChat_finishReasonWithoutDone_completesWithoutError() = runTest {
+        val api = mockk<OpenAIApi>()
+        every { api.streamChatCompletionCustom(any(), any(), any(), any()) } returns sseCall(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"你\"},\"finish_reason\":null}]}",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}"
+        )
+
+        // 部分兼容服务（第三方中转最常见）生成完直接关流、不发 [DONE]；
+        // finish_reason 已到即内容完整，不许判成断流再整轮重试。
+        val chunks = adapter(api).apply { maxNetworkRetries = 0 }
+            .completeStream("", emptyList()).toList()
+
+        val final = chunks.filterIsInstance<AIStreamChunk.Final>().single()
+        assertEquals("你", final.response.content)
+        assertEquals("stop", final.response.stopReason)
+    }
+
+    @Test
+    fun streamChat_finishReasonWithoutDeltaField_stillCompletes() = runTest {
+        val api = mockk<OpenAIApi>()
+        every { api.streamChatCompletionCustom(any(), any(), any(), any()) } returns sseCall(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"好\"},\"finish_reason\":null}]}",
+            "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":6,\"prompt_tokens_details\":{\"cached_tokens\":4,\"cache_write_tokens\":2}}}"
+        )
+
+        // 末帧可能只带 finish_reason、没有 delta 字段：结束标记不能被 delta 缺失挡掉。
+        val chunks = adapter(api).apply { maxNetworkRetries = 0 }
+            .completeStream("", emptyList()).toList()
+
+        val final = chunks.filterIsInstance<AIStreamChunk.Final>().single()
+        assertEquals("好", final.response.content)
+        assertEquals("stop", final.response.stopReason)
+        assertEquals(12, final.response.inputTokens)
+        assertEquals(6, final.response.outputTokens)
+        assertEquals(4, final.response.cachedInputTokens)
+        assertEquals(2, final.response.cacheCreationTokens)
+        assertTrue(chunks.none { it is AIStreamChunk.Retrying })
+    }
+
+    @Test
+    fun streamChat_truncatedWithoutAnyTerminalSignal_isReportedAsInterrupted() = runTest {
+        val api = mockk<OpenAIApi>()
+        every { api.streamChatCompletionCustom(any(), any(), any(), any()) } returns sseCall(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"半截\"},\"finish_reason\":null}]}"
+        )
+
+        val chunks = mutableListOf<AIStreamChunk>()
+        val error = runCatching {
+            adapter(api).apply { maxNetworkRetries = 0 }
+                .completeStream("", emptyList()).toList(chunks)
+        }.exceptionOrNull()
+
+        assertTrue("既无 [DONE] 也无 finish_reason 必须仍判断流，实际：$error", error is IOException)
+        assertTrue(
+            "断流文案应由 adapter 统一给出，实际：${error?.message}",
+            error!!.message.orEmpty().startsWith(FakeSseStream.INTERRUPTED_PREFIX)
+        )
+        assertTrue(chunks.none { it is AIStreamChunk.Final })
+    }
+
+    @Test
+    fun streamChat_ioFailureAfterFinishReason_isNotNormalEof() = runTest {
+        val api = mockk<OpenAIApi>()
+        every { api.streamChatCompletionCustom(any(), any(), any(), any()) } answers {
+            FakeStreamCall {
+                FakeSseStream.interruptingBody(listOf(
+                    """{"choices":[{"delta":{"content":"好"}}]}""",
+                    """{"choices":[{"finish_reason":"stop"}]}"""
+                ))
+            }
+        }
+        val chunks = mutableListOf<AIStreamChunk>()
+        val error = runCatching {
+            adapter(api).apply { maxNetworkRetries = 0 }.completeStream("", emptyList()).toList(chunks)
+        }.exceptionOrNull()
+        assertTrue(error is IOException)
+        assertEquals("模拟连接被重置", error?.message)
+        assertTrue(chunks.none { it is AIStreamChunk.Final })
+    }
+
+    @Test
     fun streamChat_assemblesStreamedToolCallFragments() = runTest {
         val api = api()
         every { api.streamChatCompletion(any(), any(), any(), any()) } returns sseCall(
@@ -634,6 +832,58 @@ class OpenAIAdapterTest {
         assertTrue(args.containsKey("path"))
         assertEquals(JsonPrimitive("/a"), args["path"])
         assertEquals("tool_calls", final.response.stopReason)
+    }
+
+    @Test
+    fun streamChat_reports_argument_progress_and_keeps_tool_identity_at_eof() = runTest {
+        val api = mockk<OpenAIApi>()
+        val content = "line\n".repeat(240)
+        val args = Gson().toJson(mapOf("path" to "a.txt", "content" to content))
+        val splitAt = args.indexOf("\\n", args.length / 2) + 2
+        every { api.streamChatCompletionCustom(any(), any(), any(), any()) } returns sseCall(
+            """data: {"choices":[{"delta":{"tool_calls":[{"index":1,"id":"call_1","function":{"name":"writeFile","arguments":${Gson().toJson(args.take(splitAt))}}}]}}]}""",
+            """data: {"choices":[{"delta":{"tool_calls":[{"index":1,"id":"","function":{"name":"","arguments":${Gson().toJson(args.drop(splitAt))}}}]}}]}""",
+            """data: {"choices":[{"finish_reason":"tool_calls"}]}"""
+        )
+        val chunks = adapter(api).apply { maxNetworkRetries = 0 }.completeStream("", emptyList()).toList()
+        assertEquals(listOf("writeFile"), chunks.filterIsInstance<AIStreamChunk.ToolCallDeclared>().map { it.name })
+        val progress = chunks.filterIsInstance<AIStreamChunk.ToolCallArgumentProgress>()
+        assertEquals(listOf(splitAt, args.length), progress.map { it.argsSoFarChars })
+        assertTrue(progress.all { it.name == "writeFile" })
+        assertEquals(240, progress.last().argsSoFarLines)
+        val final = chunks.filterIsInstance<AIStreamChunk.Final>().single().response
+        assertEquals("tool_calls", final.stopReason)
+        assertEquals("call_1", final.toolCalls.single().id)
+        assertEquals("writeFile", final.toolCalls.single().name)
+        assertEquals(JsonPrimitive(content), final.toolCalls.single().arguments["content"])
+        assertTrue(chunks.indexOf(progress.last()) < chunks.indexOfLast { it is AIStreamChunk.Final })
+    }
+
+    @Test
+    fun streamResponses_reports_argument_progress_and_skips_malformed_progress_event() = runTest {
+        val api = mockk<OpenAIApi>()
+        val content = "line\n".repeat(240)
+        val args = Gson().toJson(mapOf("path" to "a.txt", "content" to content))
+        val splitAt = args.indexOf("\\n", args.length / 2) + 2
+        every { api.streamResponsesCustom(any(), any(), any(), any()) } returns sseCall(
+            """data: {"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","call_id":"call_1","name":"writeFile"}}""",
+            """data: {"type":"response.function_call_arguments.delta","output_index":1,"delta":{}}""",
+            """data: {"type":"response.function_call_arguments.delta","output_index":1,"delta":${Gson().toJson(args.take(splitAt))}}""",
+            """data: {"type":"response.function_call_arguments.delta","output_index":1,"delta":${Gson().toJson(args.drop(splitAt))}}""",
+            """data: {"type":"response.completed","response":{"status":"completed","output":[]}}"""
+        )
+        val chunks = adapter(api).apply { useResponseApi = true; maxNetworkRetries = 0 }
+            .completeStream("", emptyList()).toList()
+        assertEquals(listOf("writeFile"), chunks.filterIsInstance<AIStreamChunk.ToolCallDeclared>().map { it.name })
+        val progress = chunks.filterIsInstance<AIStreamChunk.ToolCallArgumentProgress>()
+        assertEquals(listOf(splitAt, args.length), progress.map { it.argsSoFarChars })
+        assertTrue(progress.all { it.name == "writeFile" })
+        assertEquals(240, progress.last().argsSoFarLines)
+        val final = chunks.filterIsInstance<AIStreamChunk.Final>().single().response
+        assertEquals("call_1", final.toolCalls.single().id)
+        assertEquals("writeFile", final.toolCalls.single().name)
+        assertEquals(JsonPrimitive(content), final.toolCalls.single().arguments["content"])
+        assertTrue(chunks.indexOf(progress.last()) < chunks.indexOfLast { it is AIStreamChunk.Final })
     }
 
     @Test

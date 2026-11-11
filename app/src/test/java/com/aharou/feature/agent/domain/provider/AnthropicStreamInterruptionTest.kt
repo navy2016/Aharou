@@ -1,10 +1,9 @@
 package com.aharou.feature.agent.domain.provider
 
 import com.aharou.feature.agent.data.remote.anthropic.AnthropicApi
-import com.aharou.feature.agent.data.remote.anthropic.AnthropicMessageRequest
-import com.aharou.feature.agent.data.remote.anthropic.AnthropicMessageResponse
 import com.aharou.feature.agent.domain.model.AgentMessage
-import com.google.gson.Gson
+import io.mockk.every
+import io.mockk.mockk
 import java.io.IOException
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.test.runTest
@@ -13,63 +12,23 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import retrofit2.Call
 
 /**
- * Anthropic 流式断流：`message_stop` 是唯一的正常收尾标记。
+ * Anthropic 流式断流：`message_stop` 或已有 `stop_reason` 的 EOF 均正常收尾。
  *
  * 只验证 adapter 的解析与异常语义。「断流后已累积文本是否作为快照落库」在
  * `StatefulAgentWorkflow` 的 finally 里，不属于本通道的职责，故这里不覆盖。
  */
 class AnthropicStreamInterruptionTest {
 
-    /** 只提供流式响应；非流式入口一旦被调到就立刻失败，避免测试走错路径还显示通过。 */
-    private class FakeApi(private val stream: () -> Call<ResponseBody>) : AnthropicApi {
-
-        override suspend fun createMessage(
-            url: String,
-            apiKey: String?,
-            version: String?,
-            extraHeaders: Map<String, String>,
-            request: AnthropicMessageRequest
-        ): AnthropicMessageResponse = unsupportedNonStreaming()
-
-        override suspend fun createMessageCustom(
-            url: String,
-            apiKey: String?,
-            version: String?,
-            extraHeaders: Map<String, String>,
-            request: okhttp3.RequestBody
-        ): AnthropicMessageResponse = createMessage(
-            url, apiKey, version, extraHeaders, Gson().fromJson(request.decodeJsonObject(), AnthropicMessageRequest::class.java)
-        )
-
-        override fun streamMessageCustom(
-            url: String,
-            apiKey: String?,
-            version: String?,
-            extraHeaders: Map<String, String>,
-            request: okhttp3.RequestBody
-        ): Call<ResponseBody> = streamMessage(
-            url, apiKey, version, extraHeaders, Gson().fromJson(request.decodeJsonObject(), AnthropicMessageRequest::class.java)
-        )
-
-        override fun streamMessage(
-            url: String,
-            apiKey: String?,
-            version: String?,
-            extraHeaders: Map<String, String>,
-            request: AnthropicMessageRequest
-        ): Call<ResponseBody> = stream()
-    }
-
-    private fun adapterFor(body: () -> ResponseBody): AnthropicAdapter =
-        AnthropicAdapter(FakeApi { FakeStreamCall(body) }).apply {
+    private fun adapterFor(body: () -> ResponseBody): AnthropicAdapter {
+        val api = mockk<AnthropicApi>()
+        every { api.streamMessageCustom(any(), any(), any(), any(), any()) } answers { FakeStreamCall(body) }
+        return AnthropicAdapter(api).apply {
             apiKey = "k"
-            // 断流是「可重试的网络错误」，默认 6 次重试会先指数退避再抛；
-            // 这里要验的是单次流被截断时的行为，故关掉重试让异常立刻冒出来。
             maxNetworkRetries = 0
         }
+    }
 
     private val messages = listOf(AgentMessage.UserMessage(content = "hi"))
 
@@ -121,9 +80,10 @@ class AnthropicStreamInterruptionTest {
     @Test
     fun missing_message_stop_is_reported_as_interrupted() = runTest {
         val chunks = mutableListOf<AIStreamChunk>()
-        // 故意去掉 message_stop：连接正常关闭但终止事件没到，等价于线上「AI 说到一半突然没了」。
+        // 故意去掉 message_stop 与 message_delta：连接正常关闭但没有任何终止信号，
+        // 等价于线上「AI 说到一半突然没了」。
         val error = collectInto(chunks) {
-            sse(messageStart, blockStart, textDelta("你"), textDelta("好"), blockStop, messageDelta)
+            sse(messageStart, blockStart, textDelta("你"), textDelta("好"), blockStop)
         }
 
         assertTrue("缺终止事件必须抛 IOException，实际：$error", error is IOException)
@@ -149,6 +109,57 @@ class AnthropicStreamInterruptionTest {
         assertTrue(error is StreamApiException)
         assertEquals("overloaded_error", (error as StreamApiException).code)
         assertEquals("overloaded", error.message)
+        assertTrue(chunks.none { it is AIStreamChunk.Final })
+    }
+
+    @Test
+    fun stop_reason_without_message_stop_completes() = runTest {
+        val chunks = mutableListOf<AIStreamChunk>()
+        // 个别中转在 message_delta 给出 stop_reason 后直接关流。此时本轮生成已完整，
+        // 按正常结束收尾，不能判成断流去整轮重试。
+        val error = collectInto(chunks) {
+            sse(messageStart, blockStart, textDelta("你"), textDelta("好"), blockStop, messageDelta)
+        }
+
+        assertNull("stop_reason 已到的流不该报错，实际：$error", error)
+        assertEquals("你好", textOf(chunks))
+        val response = chunks.singleFinal().response
+        assertEquals("你好", response.content)
+        assertEquals("end_turn", response.stopReason)
+        assertEquals(10, response.inputTokens)
+        assertEquals(2, response.outputTokens)
+        assertTrue(chunks.none { it is AIStreamChunk.Retrying })
+    }
+
+    @Test
+    fun message_delta_without_delta_preserves_stop_reason_and_final_usage() = runTest {
+        val chunks = mutableListOf<AIStreamChunk>()
+        val error = collectInto(chunks) {
+            sse(
+                messageStart, blockStart, textDelta("好"), blockStop, messageDelta,
+                """{"type":"message_delta","usage":{"input_tokens":12,"output_tokens":7,"cache_read_input_tokens":3,"cache_creation_input_tokens":2}}"""
+            )
+        }
+
+        assertNull(error)
+        val response = chunks.singleFinal().response
+        assertEquals("好", response.content)
+        assertEquals("end_turn", response.stopReason)
+        assertEquals(17, response.inputTokens)
+        assertEquals(7, response.outputTokens)
+        assertEquals(3, response.cachedInputTokens)
+        assertEquals(2, response.cacheCreationTokens)
+    }
+
+    @Test
+    fun io_failure_after_stop_reason_is_not_treated_as_normal_eof() = runTest {
+        val chunks = mutableListOf<AIStreamChunk>()
+        val error = collectInto(chunks) {
+            FakeSseStream.interruptingBody(listOf(messageStart, blockStart, textDelta("好"), messageDelta))
+        }
+
+        assertTrue(error is IOException)
+        assertEquals("模拟连接被重置", error?.message)
         assertTrue(chunks.none { it is AIStreamChunk.Final })
     }
 

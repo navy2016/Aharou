@@ -14,9 +14,14 @@ import com.aharou.feature.settings.domain.model.ReasoningConfig
 import com.aharou.feature.settings.domain.model.ReasoningDialect
 import com.google.gson.Gson
 import com.google.gson.JsonParser
+import io.mockk.coEvery
+import io.mockk.every
+import io.mockk.mockk
+import io.mockk.slot
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.JsonObject
+import okhttp3.RequestBody
 import okhttp3.ResponseBody
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -116,6 +121,56 @@ class AnthropicAdapterTest {
         Gson().fromJson(Gson().toJsonTree(content), Array<AnthropicContentBlock>::class.java).toList()
 
     private fun toolCall(id: String) = ToolCall(id = id, name = "readFile", arguments = JsonObject(emptyMap()))
+
+    @Test
+    fun serviceTier_is_not_generated_but_fixed_json_is_preserved() = runTest {
+        for (stream in listOf(false, true)) {
+            val api = mockk<AnthropicApi>()
+            val request = slot<RequestBody>()
+            coEvery { api.createMessageCustom(any(), any(), any(), any(), capture(request)) } returns response()
+            every { api.streamMessageCustom(any(), any(), any(), any(), capture(request)) } answers {
+                FakeStreamCall { FakeSseStream.body("""{"type":"message_stop"}""") }
+            }
+            val adapter = AnthropicAdapter(api).apply { serviceTier = "fast"; maxNetworkRetries = 0 }
+            for (fixedJson in listOf(null, """{"service_tier":"custom"}""")) {
+                adapter.customBody = fixedJson?.let { JsonParser.parseString(it).asJsonObject }
+                if (stream) adapter.completeStream("", emptyList()).toList() else adapter.complete("", emptyList())
+                val body = request.captured.decodeJsonObject()
+                if (fixedJson == null) assertFalse(body.has("service_tier"))
+                else assertEquals("custom", body.get("service_tier").asString)
+            }
+        }
+    }
+
+    @Test
+    fun stream_reports_argument_progress_and_preserves_tool_at_normal_eof() = runTest {
+        val api = mockk<AnthropicApi>()
+        val content = "line\n".repeat(240)
+        val args = Gson().toJson(mapOf("path" to "a.txt", "content" to content))
+        val splitAt = args.indexOf("\\n", args.length / 2) + 2
+        every { api.streamMessageCustom(any(), any(), any(), any(), any()) } answers {
+            FakeStreamCall { FakeSseStream.body(
+                """{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call_1","name":"writeFile","input":{}}}""",
+                """{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":${Gson().toJson(args.take(splitAt))}}}""",
+                """{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":${Gson().toJson(args.drop(splitAt))}}}""",
+                """{"type":"content_block_stop","index":1}""",
+                """{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":42}}"""
+            ) }
+        }
+        val chunks = AnthropicAdapter(api).apply { maxNetworkRetries = 0 }.completeStream("", emptyList()).toList()
+        assertEquals(listOf("writeFile"), chunks.filterIsInstance<AIStreamChunk.ToolCallDeclared>().map { it.name })
+        val progress = chunks.filterIsInstance<AIStreamChunk.ToolCallArgumentProgress>()
+        assertEquals(listOf(splitAt, args.length), progress.map { it.argsSoFarChars })
+        assertTrue(progress.all { it.name == "writeFile" })
+        assertEquals(240, progress.last().argsSoFarLines)
+        val final = chunks.filterIsInstance<AIStreamChunk.Final>().single().response
+        assertEquals("tool_use", final.stopReason)
+        assertEquals(42, final.outputTokens)
+        assertEquals("call_1", final.toolCalls.single().id)
+        assertEquals("writeFile", final.toolCalls.single().name)
+        assertEquals(kotlinx.serialization.json.JsonPrimitive(content), final.toolCalls.single().arguments["content"])
+        assertTrue(chunks.indexOf(progress.last()) < chunks.indexOfLast { it is AIStreamChunk.Final })
+    }
 
     @Test
     fun max_tokens_uses_model_metadata_output_limit() = runTest {

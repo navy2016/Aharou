@@ -58,6 +58,7 @@ import android.net.Uri
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import com.aharou.core.util.FileLogger
+import com.aharou.core.util.openDocumentOutput
 import com.aharou.core.util.PanelScriptImporter
 import com.aharou.feature.agent.presentation.SharedIntakeHolder
 import com.aharou.feature.agent.presentation.SharedIntakeEntryPoint
@@ -93,6 +94,7 @@ import com.aharou.feature.agent.presentation.component.DrawerSearchOpenRequest
 import com.aharou.feature.agent.presentation.component.chatImageLoader
 import com.aharou.feature.agent.presentation.component.openSentAttachment
 import com.aharou.feature.editor.presentation.CodeEditorScreen
+import com.aharou.feature.editor.presentation.rememberEditorWorkspaceIdentity
 import com.aharou.feature.editor.presentation.EditorLeaveGuard
 import com.aharou.feature.browser.presentation.BrowserScreen
 import com.aharou.feature.git.presentation.GitViewModel
@@ -184,8 +186,8 @@ class MainActivity : ComponentActivity() {
     @Inject
     lateinit var fileAccessProvider: FileAccessProvider
 
-    @Inject
-    lateinit var executionModeHolder: com.aharou.feature.settings.data.repository.ExecutionModeHolder
+    @Inject lateinit var executionModeHolder: com.aharou.feature.settings.data.repository.ExecutionModeHolder
+    @Inject lateinit var imServiceRestore: com.aharou.feature.im.ImServiceRestore
 
     /** 三端（UI/AI Bash/交互终端）git 缺凭据统一弹窗桥：在 AIEditorApp 启动后监听 helper 的文件 IPC 请求。 */
     @Inject
@@ -436,6 +438,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        imServiceRestore.restoreNapCatIfEnabled(this, lifecycleScope)
         // 远程模式回到前台时，若 SSH 断了立即触发重连，不等 supervisor 轮询
         if (executionModeHolder.currentMode() == com.aharou.feature.settings.data.repository.ExecutionMode.REMOTE_SSH) {
             lifecycleScope.launch {
@@ -460,9 +463,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
-    }
+    override fun onDestroy() { super.onDestroy() }
 
 }
 
@@ -633,9 +634,10 @@ fun AppNavigation(
         ActivityResultContracts.CreateDocument("application/octet-stream")
     ) { uri ->
         val sessionId = pendingExportSessionId
+        pendingExportSessionId = null
         if (uri != null && sessionId != null) {
             scope.launch {
-                val os = withContext(Dispatchers.IO) { context.contentResolver.openOutputStream(uri) }
+                val os = context.contentResolver.openDocumentOutput(uri)
                 if (os != null) {
                     agentViewModel.exportSession(sessionId, os) { success ->
                         Toast.makeText(
@@ -647,10 +649,7 @@ fun AppNavigation(
                 } else {
                     Toast.makeText(context, context.getString(R.string.chat_export_session_failed), Toast.LENGTH_LONG).show()
                 }
-                pendingExportSessionId = null
             }
-        } else {
-            pendingExportSessionId = null
         }
     }
 
@@ -672,6 +671,10 @@ fun AppNavigation(
     // 右栏工作台：大屏下编辑器 / 终端 / Git 与聊天并排，窄窗仍走全屏路由。
     var paneKind by rememberSaveable { mutableStateOf(WorkbenchPaneKind.NONE) }
     var paneEditorPath by rememberSaveable { mutableStateOf("") }
+    var paneEditorRoot by rememberSaveable { mutableStateOf("") }
+    var paneEditorIdentity by rememberSaveable { mutableStateOf("") }
+    val currentEditorIdentity by androidx.compose.runtime.rememberUpdatedState(rememberEditorWorkspaceIdentity(currentWorkspace?.path.orEmpty()))
+    LaunchedEffect(currentEditorIdentity) { if (paneEditorIdentity != currentEditorIdentity && paneKind == WorkbenchPaneKind.EDITOR) paneKind = WorkbenchPaneKind.NONE }
     var paneEditorLine by rememberSaveable { mutableIntStateOf(0) }
     var paneSplit by rememberSaveable { mutableFloatStateOf(DEFAULT_PANE_SPLIT) }
     // 右栏编辑器有未保存修改时，换文件前先弹保存提示（窄窗全屏编辑器由返回键拦截，不经过这里）。
@@ -690,28 +693,29 @@ fun AppNavigation(
         paneKind = WorkbenchPaneKind.NONE
     }
 
-    // 打开文件：大屏进右栏，窄窗跳全屏编辑器页。
-    val openFile: (String, Int, Boolean) -> Unit = { filePath, line, fromDrawer ->
+    val openFile: (String, Int, Boolean) -> Unit = openFile@{ filePath, line, fromDrawer ->
+        val root = currentWorkspace?.path?.takeIf { it.isNotBlank() } ?: return@openFile
+        val identity = currentEditorIdentity
         if (expanded) {
             val apply = {
-                paneEditorPath = filePath
-                paneEditorLine = line
-                paneKind = WorkbenchPaneKind.EDITOR
+                if (currentEditorIdentity == identity) {
+                    paneEditorRoot = root
+                    paneEditorIdentity = identity
+                    paneEditorPath = filePath
+                    paneEditorLine = line
+                    paneKind = WorkbenchPaneKind.EDITOR
+                }
             }
-            // 重复点同一个文件：内容不换，只是重新走到目标行（交给编辑器的行定位 effect），
-            // 不必问「要不要保存」——保存与否都不影响结果。
-            if (paneKind == WorkbenchPaneKind.EDITOR && paneEditorPath == filePath) {
+            if (paneKind == WorkbenchPaneKind.EDITOR && paneEditorPath == filePath && paneEditorIdentity == identity) {
                 apply()
             } else {
-                // 编辑器里有未保存修改时，由编辑器先弹保存提示，确认后再换。
                 editorLeaveGuard.requestLeave(apply)
             }
-            // 常驻侧栏不需要关；平板竖屏等仍用 modal 抽屉的情况下选完文件要收起。
             if (!permanentDrawer) scope.launch { drawerState.close() }
         } else {
             scope.launch { drawerState.close() }
             navController.navigate(
-                "editor?path=${android.net.Uri.encode(filePath)}&line=$line&drawer=$fromDrawer"
+                "editor?path=${android.net.Uri.encode(filePath)}&root=${android.net.Uri.encode(root)}&identity=${android.net.Uri.encode(identity)}&line=$line&drawer=$fromDrawer"
             )
         }
     }
@@ -915,6 +919,7 @@ fun AppNavigation(
                             kind = paneKind,
                             editorPath = paneEditorPath,
                             editorLine = paneEditorLine,
+                            editorRoot = paneEditorRoot, editorIdentity = paneEditorIdentity, currentEditorIdentity = currentEditorIdentity,
                             onClose = { paneKind = WorkbenchPaneKind.NONE },
                             onOpenFile = { path -> openFile(path, 0, false) },
                             editorLeaveGuard = editorLeaveGuard,
@@ -1115,8 +1120,9 @@ fun AppNavigation(
                 )
             }
             composable(
-                route = "editor?path={path}&line={line}&drawer={drawer}",
+                route = "editor?path={path}&root={root}&identity={identity}&line={line}&drawer={drawer}",
                 arguments = listOf(
+                    navArgument("root") { defaultValue = "" }, navArgument("identity") { defaultValue = "" },
                     navArgument("path") {
                         type = NavType.StringType
                         defaultValue = ""
@@ -1131,11 +1137,12 @@ fun AppNavigation(
                     }
                 )
             ) { entry ->
-                // 从侧边栏文件页进入时返回要重新弹出抽屉（否则看完一个文件就得重新拉开抽屉进目录）；
-                // 从聊天区链接进入时返回应回到聊天，不弹抽屉。
                 val openDrawerOnBack = entry.arguments?.getBoolean("drawer") ?: false
-                CodeEditorScreen(
+                val root = entry.arguments?.getString("root").orEmpty()
+                val identity = entry.arguments?.getString("identity").orEmpty()
+                if (root.isBlank() || identity != currentEditorIdentity) { LaunchedEffect(entry) { navController.popBackStack() } } else CodeEditorScreen(
                     path = entry.arguments?.getString("path").orEmpty(),
+                    workspaceRoot = root, workspaceIdentity = identity,
                     initialLine = entry.arguments?.getInt("line") ?: 0,
                     onBack = {
                         navController.popBackStack()
@@ -1233,7 +1240,7 @@ fun AppNavigation(
             onDismiss = { settingsViewModel.dismissUpdateCheck() },
             onDownload = { settingsViewModel.downloadUpdate() },
             onCancelDownload = { settingsViewModel.cancelDownload() },
-            onInstall = { apkPath -> installDownloadedApk(context, apkPath) },
+            onInstall = com.aharou.feature.settings.presentation.component.rememberUpdateInstaller(settingsViewModel),
             onOpenRelease = { tag ->
                 openUrl(context, githubReleaseUrl(tag))
                 settingsViewModel.dismissUpdateCheck()

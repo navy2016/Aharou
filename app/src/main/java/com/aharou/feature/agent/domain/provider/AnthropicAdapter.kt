@@ -58,6 +58,7 @@ class AnthropicAdapter @Inject constructor(
 
     // null 时请求体不带 temperature（Gson 跳过 null 字段），交由服务端默认；开启 thinking 时官方要求必须不带。
     override var temperature: Float? = null
+    override var serviceTier: String? = null
 
     private fun extraHeaders(): Map<String, String> =
         resolveCustomHeaders(customHeaders, logSessionId, apiKey)
@@ -227,14 +228,15 @@ class AnthropicAdapter @Inject constructor(
                 }
                 try {
                     val reader = rb.charStream().buffered()
-                    // 收到服务端 message_stop 事件即 break 正常结束；readLine() 返回 null 则视为
-                    // 流被异常截断（网络中断/TCP 重置/readTimeout），必须抛异常让重试/日志接管——
-                    // 否则原本会用截断数据「正常完成」，表现为 AI 突然中断且无任何错误日志。
-                    // （收到 message_stop 即 break，故走到 readLine()==null 时必然未收到过结束标记。）
+                    // 收到 message_stop 即 break；个别中转发完 stop_reason 后直接关流，内容已完整，
+                    // 按正常结束收尾。两者都没有才算真断流，抛异常交给重试与日志。
                     while (true) {
                         coroutineContext.ensureActive()
                         val line = reader.readLine()
-                            ?: throw IOException("SSE 流被中断：未收到 message_stop 结束标记（疑似网络断开）")
+                        if (line == null) {
+                            if (stopReason != null) break
+                            throw IOException("SSE 流被中断：未收到 message_stop 结束标记（疑似网络断开）")
+                        }
                         idleWatchdog.touch()
                         if (!line.startsWith("data:")) continue
                         val data = line.removePrefix("data:").trim()
@@ -337,7 +339,13 @@ class AnthropicAdapter @Inject constructor(
                                             val index = obj.get("index")?.asInt
                                             val partial = delta.get("partial_json")?.asString ?: ""
                                             budget.add(partial)
-                                            if (index != null) toolBlocks[index]?.args?.append(partial)
+                                            // 参数增量：按块累积的同时抽样进度，门限见 ToolArgProgressThrottle。
+                                            index?.let { idx ->
+                                                toolBlocks[idx]?.let { block ->
+                                                    block.args.append(partial)
+                                                    block.progress.sample(block.name, block.args)?.let { send(it) }
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -409,6 +417,7 @@ class AnthropicAdapter @Inject constructor(
     /** 流式过程中按 content block index 累积的 tool_use 状态。 */
     private class ToolBlockAcc(val id: String, val name: String) {
         val args = StringBuilder()
+        val progress = ToolArgProgressThrottle()
     }
 
     /** 流式过程中按 content block index 累积的 thinking / redacted_thinking 状态。 */

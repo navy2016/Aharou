@@ -71,7 +71,8 @@
 | 配置模型推理映射 | `ReasoningConfigSheet.kt`（模型编辑／聊天思考标签） | 有 | `config` `providers.<id>.models.<model>.reasoning_config` | 参数表达方式、逐档值／预算／JSON；敏感字段加密审计，固定请求体最后覆盖 |
 | 配置自定义请求头与请求体 | `CustomRequestSheet.kt`（全局、供应商、模型） | 有 | `config` `custom_request.global.headers/body`、`providers.<id>.custom_request.headers/body`、`providers.<id>.models.<model>.custom_request.headers/body` | 敏感字段需确认 |
 | 配置自动重试增强 | `StewardSheet.kt` → `AutoRetrySettingsSheet.kt` | 有 | `config` `steward.retry_*` | 包含开关、额外重试次数（0–100，默认3）、延迟、倍率、状态码与关键字 |
-| 测试模型/供应商连通性 | `component/ProviderModelComponents.kt:323`（`onClick = onTest`）、`:330`；`DefaultModelsSection.kt:841` | 无 | 未找到专用工具；只能 `Bash` `curl` 或 `webfetch` 自己发请求 | **缺口**：App 内有现成的测试链路（`feature/settings/data/remote/ModelApiService.kt:290`），但没暴露成工具 |
+| 配置模型服务档位 | `ModelReasoningSheet.kt` → `ModelReasoningEffortSheet` 服务档位页签 | 有 | `config` `providers.<id>.models.<model>.service_tier`；默认模型快捷字段 `model.roles.default_service_tier` | 与推理强度独立，仅OpenAI协议发送，固定请求体最后覆盖 |
+| 测试模型/供应商连通性 | `component/ProviderModelComponents.kt`、`DefaultModelsSection.kt` | 有 | `config action=test_model provider_id=<id> model=<model>`，复用 `ModelApiService` | 极短真实请求，可能计费；不改配置、不返回凭据 |
 
 ## 5. 技能
 
@@ -123,8 +124,16 @@
 |---|---|---|---|---|
 | 启用/停用渠道（微信/飞书/QQ/Telegram） | 挂载 `SettingsScreen.kt:1266-1269`；`component/TelegramBotSection.kt:86`（以 Telegram 为例） | 有 | `config` `im.telegram.enabled` / `im.weixin.enabled` / `im.feishu.enabled` / `im.qq.enabled`（`feature/im/data/ConfigImFields.kt:35`、`:84`、`:134`、`:184`） | 无 |
 | 填 token / app_id / app_secret / base_url / 代理 | `TelegramBotSection.kt:121-140`（token 输入） | 有 | `config` `im.<渠道>.bot_token` / `.app_id` / `.app_secret` / `.base_url` / `.proxy`（`ConfigImFields.kt:45-221`） | 凭证是 SENSITIVE，写入需弹确认 |
-| 看连接状态 | `TelegramBotSection.kt:100`（状态行） | 无 | 未找到（`ConfigImFields` 无状态字段） | **缺口**：通道到底连上没有，agent 看不到 |
-| 向当前 IM 会话发文件/图片 | 用户在 IM 客户端聊天（无 App 内入口） | 有 | `sendToChat`（`AgentModule.kt:451`；`SendImFileTool.kt:32`） | 无（仅 IM 会话内可用） |
+| 看连接状态 | 各平台机器人设置页状态行 | 有 | `config get im.<渠道>.state` / `.error`，`ConfigImFields` 读取四个桥接实例的运行状态 | 只读，错误脱敏，不返回身份或凭据 |
+| 向当前 IM 会话发文件/图片 | 用户在 IM 客户端聊天（无 App 内入口） | 有 | `sendToChat`（`SendImFileTool.kt`） | 按调用会话映射到来源聊天，不回退到最近活跃聊天；支持个人 QQ |
+| 安装、更新和取消个人 QQ 运行环境安装 | `NapCatBotSection.kt` 安装、更新与取消 | 有 | `napcat action=install/update/cancel_install`（`feature/im/NapCatTool.kt`） | 独立安装前台服务与单一安装任务；页面退出不取消，不更改默认开发容器 |
+| 启动、停止个人 QQ | `NapCatBotSection.kt` 运行管理 | 有 | `napcat action=start/stop`；`config im.qq_napcat.enabled` | UI 与配置调用同一前台服务 |
+| 个人 QQ 登录、账号状态与退出 | `NapCatBotSection.kt` 登录区域、`NapCatWebUiSheet.kt` | 有 | `napcat action=login/refresh_qr/logout/status` | 扫码、账密与验证码需用户在登录界面完成；工具不返回密码和登录二维码 |
+| 个人 QQ 私聊、群聊响应与允许列表 | `NapCatBotSection.kt` 消息响应 | 有 | `config im.qq_napcat.respond_private/respond_groups/require_mention/respond_self`；`allowed_users/allowed_groups` 集合 add/remove | 自消息过滤保留防循环；绑定记录按登录账号隔离 |
+| 个人 QQ 新会话工作区与模型 | `NapCatBotSection.kt` 工作区、模型选择 | 有 | `config im.qq_napcat.session_defaults` 对象 | 使用已有会话字段；未指定且没有当前工作区时自动创建机器人工作区，不切换当前项目 |
+| 个人 QQ 日志与高级管理 | `NapCatBotSection.kt` 日志和 WebUI | 有 | `napcat action=logs/webui/status`；`config im.qq_napcat.runtime/login/state/version/error` | 安装阶段由 status.stage 与 runtime.stage 提供；实时脱敏命令日志可查，完整交互在内嵌 WebUI |
+| 查看个人 QQ 的群、群成员与好友 | NapCat WebUI 内自行查看 | 有 | `napcat action=groups/group_members/friends`（`NapCatTool.kt`） | 只返回群号群名人数、成员昵称群名片角色、好友昵称备注；手机号与邮箱等联系方式不提供给模型 |
+| 修改个人 QQ 环境的配置与插件 | 无独立界面，仅高级 WebUI | 有 | `napcat action=exec`（带 `command`） | 专用 Debian 已就绪即可执行，包括后续安装失败时的诊断；不自动安装或回退开发容器，输出脱敏并限 12k 字符；需 EXECUTE_COMMANDS 和 MODIFY_CONTAINER_ENV 能力，PLAN 模式不可用 |
 
 ## 10. 会话
 
@@ -160,13 +169,23 @@
 | 改标签空闲回收时长 | `BrowserSettingsSheet.kt:323` | 有 | `config` `browser.idle_timeout_minutes`（`ConfigBrowserFields.kt:108`） | 无 |
 | 页内开发者工具开关 | `presentation/BrowserMenuSheet.kt:58-67`（Eruda） | 有 | `config` `browser.devtools_enabled`（`ConfigBrowserFields.kt:134`） | 无 |
 
+## 12b. 插件
+
+| 用户能做什么 | 界面入口（file:line） | Agent 有对应工具吗 | 工具名与入口（file:line） | 差距说明 |
+|---|---|---|---|---|
+| 用插件提供的 AI 工具 | 安装成功且声明入口后可用 | 有 | `mcp__plugin-<id>__<工具名>`（`feature/agent/domain/mcp/McpPluginServers.kt` 按成功安装记录读取清单 `mcpEntry`，并入 `McpConfigRepository.getEffectiveServersFor`） | 常驻服务启停与MCP连接独立；未安装成功或缺入口的插件不派生工具 |
+| 打开插件管理页 | 插件卡片「打开管理页」（`PluginSettingsSection.kt`） | 部分 | `browser` 工具可直接访问 `http://127.0.0.1:<端口><路径>` | 能达成同样效果，但不是专用工具；端口与路径要先从插件清单里读到 |
+| 导入本地 `.txplugin` 包 | `PluginSettingsSection.kt:59`（`OpenDocument` 启动器） | 无 | — | 需要系统文件选择器，agent 无法替用户挑本地文件；能先把包写进工作区，但仍需用户点一下导入 |
+| 启动 / 停止 / 卸载插件 | 插件卡片操作行（`PluginSettingsSection.kt:250` 附近） | 无 | — | 真实缺口：`PluginManager` 的方法没有包成工具，也没接入 config 通道 |
+| 看插件运行状态 / 失败原因 | 卡片右上状态词与副标题 | 无 | — | 同上；agent 只能靠 `browser` 探端口间接判断 |
+
 ## 13. 缺口汇总
 
-统计（88 条能力）：**有对应工具 52 条 / 部分支持 9 条 / agent 完全没有 25 条 / 双方都没有 2 条**；另有 1 条反向缺口（远程设备端口，属有意不做界面）。
+配置能力与对应工具以上表为准；下列列出主要界面操作缺口，部分能力可以通过文件或通用工具间接完成。另有反向缺口（远程设备端口，属有意不做界面）。
 
-### A. 用户能做、agent 完全没有工具（25 条）
+### A. 主要界面操作缺口
 
-1. 手动跑一次自动化任务 —— 双方都无（不计入 26，列在此处便于对照）
+1. 手动跑一次自动化任务 —— 双方都无，列在此处便于对照
 2. 记忆：合并压缩（`MemorySection.kt:282`）
 3. 记忆：蒸馏（`MemorySection.kt:311`）
 4. 记忆：召回测试（`MemorySection.kt:318`）
@@ -176,12 +195,13 @@
 8. 工作区：删除（`WorkspacePicker.kt:184`）
 9. 工作区：添加外部目录（`WorkspacePicker.kt:151`）
 10. 模型：选当前会话的模型（`ChatModelSheet.kt:89`）
-12. 供应商：测试连通性（`ProviderModelComponents.kt:323`）
+11. 模型：改当前会话思考强度（模型默认值已有config字段）
+12. 供应商：测试连通性已由 `config action=test_model` 补齐
 13. 技能：从市场搜索/安装（`SettingsScreen.kt:1121`）
 14. 技能：导出（`SkillDetailSection.kt:121`）
 15. MCP：重连接/刷新（`SettingsScreen.kt:755`）
 16. 远程设备：接受协助（`RemoteDeviceSection.kt:139`）
-17. IM：看连接状态（`TelegramBotSection.kt:100`）
+17. IM：运行状态查询已由 `config im.<渠道>.state/error` 补齐
 18. 会话：新建（`ChatHeaderComponents.kt:115`）
 19. 会话：切换（`MainActivity.kt:838`）
 20. 会话：重命名（`ChatDrawer.kt:508`）
@@ -193,7 +213,7 @@
 26. 备份：网络目标增删改/测试（`BackupViewModel.kt:345`、`:359`）
 27. 备份：上传/从网络恢复（`BackupViewModel.kt:374`、`:446`）
 
-（第 1 条属于“双方都没有”，不计入 25；思考强度的模型默认值已有配置通道，但当前会话仍无独立写接口。）
+（第 1 条属于“双方都没有”；模型默认思考强度、模型连通性测试和 IM 运行状态已有配置通道，当前会话思考强度仍无独立写接口。）
 
 按域看，缺口最集中的是**会话（6 条）**、**工作区（5 条）**、**备份（4 条）**：这三块都是“App 自身状态管理”，工具范围里只有文件、配置、只读会话浏览三类接口，没有“改 App 内数据”的写通道。
 
