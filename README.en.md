@@ -40,14 +40,14 @@ This repository follows upstream Aharou while strengthening reasoning configurat
 - **Retries and streaming reliability** — 0–100 additional retries, backoff, status codes, and stop keywords; streams are not replayed after output starts, and gateways that report completion without `[DONE]` are supported
 - **Built-in Linux and remote SSH** — Alpine (PRoot) with a multi-tab terminal; preinstalled images include basic tools, Node.js, and Python, with custom images, host mounts, and mirror speed tests. App upgrades do not replace existing containers
 - **Browser and file previews** — agent-driven browser plus image / text / Markdown / audio / video / PDF / APK / archive and self-contained HTML previews
-- **Live tool visualization** — argument progress, tool-group activity summaries, terminal output, page snapshots, and shadow-screen streams; side-effecting tool calls have in-process duplicate-call protection
+- **Live tool visualization** — argument progress, tool-group activity summaries, grouped sub-agent cards, terminal output, page snapshots, and shadow-screen streams; side-effecting tool calls have in-process duplicate-call protection
 - **Shadow screen** — a headless virtual display where the agent can run, capture, and control apps without occupying the current foreground interface
-- **Speech input and playback** — hold the microphone to transcribe into a draft, release to finish without sending, or tap for voice calls; reply read-aloud and local voice cloning are supported. Explicit cloud voice sync uploads reference audio and text using a SiliconFlow-style API
-- **Messaging bots** — WeChat / Feishu / QQ / Telegram; personal QQ runs NapCat and Linux QQ in a separate Debian environment, preserving the development container and supporting login recovery and private / group chat policies
+- **Speech input and playback** — hold the microphone to transcribe into a draft and release without sending; voice bubbles, separate voices, full-screen calls, mute, and independent backgrounds are supported. Configured cloud transcription uploads recorded utterances and falls back locally on failure; explicit cloud voice sync uploads reference audio and text
+- **Messaging bots** — WeChat / Feishu / QQ / Telegram / DingTalk / WeCom, with proactive delivery, three-state send results, and session commands; personal QQ runs NapCat and Linux QQ in a separate Debian environment, preserving the development container and supporting login recovery and private / group chat policies
 - **Plugins and extensions** — MCP, skills, knowledge bases, connectors, and sub-agents; successfully installed plugins with an MCP entry can expose tools to the agent, with service and MCP connection lifecycles managed separately
 - **File saving and backups** — editor save-conflict detection, remote write-error reporting, safe SFTP replacement, and compensating recovery for backup restores
 - **Config channel** — agent-accessible settings with write confirmation and auditing; revertible settings can restore earlier values
-- **Personality (SOUL.md)** — name / icon / language / persona text, effective immediately in chat
+- **Personality and memory** — SOUL.md name / icon / language / persona text applies immediately; memories support topic-avoidance hints, fact dates, and maintenance reminders
 - **Shizuku support** — system commands with adb shell privileges without root; access to other apps' private directories still requires root
 - **Environment variables and storage** — encrypted custom variables injected into container commands and terminals; usage and cleanup by category, plus themes and backgrounds
 

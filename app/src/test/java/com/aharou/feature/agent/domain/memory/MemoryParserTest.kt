@@ -69,6 +69,20 @@ class MemoryParserTest {
     }
 
     @Test
+    fun format_then_parse_keeps_avoid_flag() {
+        val file = tempFolder.newFile("avoid.md")
+        file.writeText(MemoryParser.format("avoid", "摘要", "正文", avoid = true))
+        assertTrue(MemoryParser.parse(file, MemoryScope.GLOBAL)!!.avoid)
+    }
+
+    @Test
+    fun parse_defaults_avoid_to_false_when_absent() {
+        val file = tempFolder.newFile("ordinary.md")
+        file.writeText(MemoryParser.format("ordinary", "摘要", "正文"))
+        assertFalse(MemoryParser.parse(file, MemoryScope.GLOBAL)!!.avoid)
+    }
+
+    @Test
     fun parse_defaults_pending_to_false_when_absent() {
         val file = tempFolder.newFile("plain.md")
         file.writeText(MemoryParser.format("plain", "摘要", "正文"))

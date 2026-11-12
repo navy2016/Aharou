@@ -78,7 +78,10 @@ internal val ToolGroupMemberPadding = PaddingValues(start = 16.dp)
  */
 internal fun AgentUIMessage.isGroupableTool(): Boolean =
     role == MessageRole.TOOL && !isCompactionFailure && !isContextSummary &&
-        !isCompactionMarker && !isBackgroundNotification && !isSamplingLoopStop && attachments.isEmpty()
+        !isCompactionMarker && !isBackgroundNotification && !isSamplingLoopStop &&
+        attachments.isEmpty() &&
+        // 子代理派发卡有自己的分组渲染（组头 + 编号），折进「N 次工具调用」就只剩一排 task 行了
+        !isSubAgentDispatchCard()
 
 /** 分组标识：取组内首条消息 id，保证一批工具调用在追加过程中 item key 稳定（不会重建导致视口跳动）。 */
 internal fun toolGroupKey(first: AgentUIMessage): String = "toolgroup:${first.id}"
@@ -158,6 +161,25 @@ internal fun AgentUIMessage.isResultCandidate(): Boolean =
     role == MessageRole.ASSISTANT && !isSystemCardInTurn() && content.hasVisibleContent()
 
 /**
+ * LazyColumn 要求 item key 全局唯一，重复 key 会直接抛 IllegalArgumentException 把整页聊天崩掉。
+ *
+ * 同一条消息在分页补载 / 重试 / 过程项平铺的交界处可能被产出两次，这里做最后一道保险：
+ * 保持原顺序，只在重复的后一条上加后缀。
+ */
+internal fun dedupeChatItemKeys(items: List<ChatRenderItem>): List<ChatRenderItem> {
+    val seen = HashSet<String>(items.size)
+    var suffix = 0
+    return items.map { item ->
+        if (seen.add(item.key)) {
+            item
+        } else {
+            suffix++
+            item.copy(key = "${item.key}#dup$suffix")
+        }
+    }
+}
+
+/**
  * 长消息拆块渲染：
  *
  * 超长助手正文（长文档复述）如果塞成单条 LazyColumn item，撑到几屏深时手势命中区
@@ -198,6 +220,11 @@ internal data class ChatRenderItem(
     val groupMember: Boolean = false,
     /** 整轮收尾态（仅轮头 item 有意义）：决定折叠头显示「已完成 / 处理失败 / 已取消」。 */
     val turnOutcome: TurnOutcome = TurnOutcome.DONE,
+    /**
+     * 非空表示这是一条「同轮并行派发的子代理」分组 item：下面是按顺序排好的 task 消息。
+     * 只有连续且不少于两条时才合并，单条仍走原来的扁平行渲染。
+     */
+    val subAgentGroup: List<AgentUIMessage>? = null,
 )
 
 /**
@@ -639,16 +666,26 @@ internal fun rememberChatRenderItems(
     val key = remember(
         messages, groupOverrides, turnOverrides, activeTurnKey, cancelledTurnKey, sessionId, turnKeys
     ) { Any() }
+    // 同一个 id 出现两条（重试、占位与最终行合并的交界处）会让下面的渲染项 key 重复，
+    // LazyColumn 直接抛异常整页崩掉。保留靠后的那条：它才是结果行。
+    val uniqueMessages = remember(messages) {
+        val seen = HashSet<String>(messages.size)
+        val out = ArrayList<AgentUIMessage>(messages.size)
+        for (message in messages.asReversed()) {
+            if (seen.add(message.id)) out += message
+        }
+        out.asReversed()
+    }
     val build = {
-        keepSubAgentCardsVisible(flattenTurnProcesses(buildChatItems(
-            messages = messages,
+        dedupeChatItemKeys(groupSubAgentCards(keepSubAgentCardsVisible(flattenTurnProcesses(buildChatItems(
+            messages = uniqueMessages,
             groupOverrides = groupOverrides,
             turnOverrides = turnOverrides,
             activeTurnKey = activeTurnKey,
             sessionId = sessionId,
             turnKeys = turnKeys,
             cancelledTurnKey = cancelledTurnKey,
-        )), messages)
+        )), messages)))
     }
     val useAsync = messages.size > ASYNC_CHAT_ITEMS_THRESHOLD
     var asyncItems by remember { mutableStateOf<AsyncChatItems?>(null) }

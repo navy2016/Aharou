@@ -270,6 +270,60 @@ class MemoryStorageReliabilityTest {
     }
 
     @Test
+    fun saveAndCheckedWriteKeepAvoid() {
+        val file = tempFolder.newFile("avoid.md")
+        file.writeText(MemoryParser.format("avoid", "摘要", "original", MemoryType.FACT, avoid = true))
+        val source = TempDirSource(tempFolder.root)
+        assertTrue(source.saveMemory("avoid", "新摘要", "saved"))
+        assertTrue(source.listMemories().single().avoid)
+        val result = MemoryFileStorage.saveChecked(
+            tempFolder.root, MemoryScope.GLOBAL, "avoid", "新摘要", "checked",
+            null, null, null, null, MemoryFileStorage.versionOf(file.readText())
+        )
+        assertEquals(MemoryWriteResult.Success, result)
+        assertTrue(source.listMemories().single().avoid)
+    }
+
+    @Test
+    fun editingAndRestoringKeepAvoid() {
+        val file = tempFolder.newFile("avoid.md")
+        file.writeText(MemoryParser.format("avoid", "摘要", "original", MemoryType.FACT, avoid = true))
+        val source = TempDirSource(tempFolder.root)
+        assertEquals(
+            MemoryEditResult.Success,
+            source.editMemory("avoid", listOf(MemoryEdit("original", "edited", false)))
+        )
+        assertTrue(source.listMemories().single().avoid)
+        assertTrue(source.restoreArchive(source.listArchive().single().fileName))
+        assertTrue(source.listMemories().single().avoid)
+        assertEquals("original", source.loadContent("avoid"))
+    }
+
+    @Test
+    fun archivingReplacementContentKeepsAvoid() {
+        val file = tempFolder.newFile("avoid.md")
+        file.writeText(MemoryParser.format("avoid", "摘要", "original", MemoryType.FACT, avoid = true))
+        val source = TempDirSource(tempFolder.root)
+        assertTrue(source.archiveContent("avoid", "摘要", "archived", MemoryType.FACT))
+        assertTrue(source.restoreArchive(source.listArchive().single().fileName))
+        assertTrue(source.listMemories().single().avoid)
+        assertEquals("archived", source.loadContent("avoid"))
+    }
+
+    @Test
+    fun mergingKeepsAvoidFromAnyMember() {
+        val source = TempDirSource(tempFolder.root)
+        assertTrue(source.saveMemory("ordinary", "摘要", "ordinary", MemoryType.FACT))
+        tempFolder.newFile("avoid.md").writeText(
+            MemoryParser.format("avoid", "摘要", "avoid", MemoryType.FACT, avoid = true)
+        )
+        assertTrue(MemoryFileStorage.merge(source.listMemories(), "merged", "摘要", "combined"))
+        val merged = source.listMemories().single()
+        assertEquals("merged", merged.name)
+        assertTrue(merged.avoid)
+    }
+
+    @Test
     fun saveMemory_reportsFalse_whenDiskWriteFails() {
         val blocker = tempFolder.newFile("blocker")
         val source = TempDirSource(File(blocker, "subdir"))

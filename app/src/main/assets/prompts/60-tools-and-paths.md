@@ -74,6 +74,11 @@
 ## 配置验收（config）
 - 测试已配置模型使用 `config action=test_model`，提供 `provider_id`、`model`；会发送极短请求，可能计费，不修改配置、不返回凭据。IM 的 enabled 仅代表设置，实际运行情况用 `get im.<渠道>.state` / `get im.<渠道>.error` 查询。
 
+## IM、语音与记忆
+- `send_im_message(target=别名或渠道:chatId,text,filePath?)` 是外发写操作，先确认目标/内容；PLAN 禁止，unknown 不重发。文件须在调用会话本地工作区或应用私有目录，远程先取回本机；回当前聊天文件用 sendToChat。
+- `voice.stt_provider/stt_model` 配齐后上传整句录音，失败回本机。语音条、双方音色与通话背景用 config 查询 voice 字段；背景图片仅本机 URI，替换/清除不可回滚。
+- 禁谈用记忆头 `avoid: true`；仅用户先问时使用。设置/取消直接改文件头，memory edit 只改正文。
+
 ## 自动化任务（scheduledTasks）
 - 自动化任务 = 「按时间或事件自动在会话里跑一条指令」，用 `config` 工具在 `scheduledTasks` 集合下 `add` 建任务（`name` 与 `prompt` 必填），字段一律按 `scheduledTasks.<任务 id>.<字段>` 读写。
 - 触发方式看 `trigger_type`：`time` 到点、`notification` 收到通知、`battery` 电量变化、`network` WiFi 连上 / 断开 / 换网、`boot` 开机、`app_start` 应用启动。配套字段：`trigger_package`（只认某个应用的通知，如 `com.tencent.mm`）、`trigger_battery_below`、`trigger_on_charging`、`trigger_ssid`（填了只在连上或离开该 WiFi 时触发）。

@@ -122,10 +122,12 @@
 
 | 用户能做什么 | 界面入口（file:line） | Agent 有对应工具吗 | 工具名与入口（file:line） | 差距说明 |
 |---|---|---|---|---|
-| 启用/停用渠道（微信/飞书/QQ/Telegram） | 挂载 `SettingsScreen.kt:1266-1269`；`component/TelegramBotSection.kt:86`（以 Telegram 为例） | 有 | `config` `im.telegram.enabled` / `im.weixin.enabled` / `im.feishu.enabled` / `im.qq.enabled`（`feature/im/data/ConfigImFields.kt:35`、`:84`、`:134`、`:184`） | 无 |
+| 启用/停用渠道（微信/飞书/QQ/Telegram/钉钉/企业微信） | 挂载 `SettingsScreen.kt:1266-1269`；`component/TelegramBotSection.kt:86`（以 Telegram 为例） | 有 | `config` `im.telegram.enabled` / `im.weixin.enabled` / `im.feishu.enabled` / `im.qq.enabled`（`feature/im/data/ConfigImFields.kt:35`、`:84`、`:134`、`:184`） | 无 |
 | 填 token / app_id / app_secret / base_url / 代理 | `TelegramBotSection.kt:121-140`（token 输入） | 有 | `config` `im.<渠道>.bot_token` / `.app_id` / `.app_secret` / `.base_url` / `.proxy`（`ConfigImFields.kt:45-221`） | 凭证是 SENSITIVE，写入需弹确认 |
-| 看连接状态 | 各平台机器人设置页状态行 | 有 | `config get im.<渠道>.state` / `.error`，`ConfigImFields` 读取四个桥接实例的运行状态 | 只读，错误脱敏，不返回身份或凭据 |
+| 看连接状态 | 各平台机器人设置页状态行 | 有 | `config get im.<渠道>.state` / `.error`，`ConfigImFields` 读取已注册渠道的桥接运行状态 | 只读，错误脱敏，不返回身份或凭据 |
 | 向当前 IM 会话发文件/图片 | 用户在 IM 客户端聊天（无 App 内入口） | 有 | `sendToChat`（`SendImFileTool.kt`） | 按调用会话映射到来源聊天，不回退到最近活跃聊天；支持个人 QQ |
+| 配置钉钉与企业微信 | `DingTalkBotSection.kt`、`WeComBotSection.kt` | 有 | `config im.dingtalk.enabled/client_id/client_secret/robot_code/proxy`、`im.wecom.enabled/bot_id/secret/proxy`（`ConfigImFields.kt`） | 长连接凭据按敏感配置处理；前台服务与恢复链已接入，当前仅文字能力 |
+| 主动投递至指定 IM 聊天 | 无独立界面，可由用户指令或定时任务发起 | 有 | `send_im_message`（`ImSendMessageTool.kt`） | 目的聊天显式指定；外发写能力与幂等保护，PLAN 禁止，文件须在调用会话本地工作区或应用私有目录，未知回执不自动重发 |
 | 安装、更新和取消个人 QQ 运行环境安装 | `NapCatBotSection.kt` 安装、更新与取消 | 有 | `napcat action=install/update/cancel_install`（`feature/im/NapCatTool.kt`） | 独立安装前台服务与单一安装任务；页面退出不取消，不更改默认开发容器 |
 | 启动、停止个人 QQ | `NapCatBotSection.kt` 运行管理 | 有 | `napcat action=start/stop`；`config im.qq_napcat.enabled` | UI 与配置调用同一前台服务 |
 | 个人 QQ 登录、账号状态与退出 | `NapCatBotSection.kt` 登录区域、`NapCatWebUiSheet.kt` | 有 | `napcat action=login/refresh_qr/logout/status` | 扫码、账密与验证码需用户在登录界面完成；工具不返回密码和登录二维码 |
@@ -134,6 +136,22 @@
 | 个人 QQ 日志与高级管理 | `NapCatBotSection.kt` 日志和 WebUI | 有 | `napcat action=logs/webui/status`；`config im.qq_napcat.runtime/login/state/version/error` | 安装阶段由 status.stage 与 runtime.stage 提供；实时脱敏命令日志可查，完整交互在内嵌 WebUI |
 | 查看个人 QQ 的群、群成员与好友 | NapCat WebUI 内自行查看 | 有 | `napcat action=groups/group_members/friends`（`NapCatTool.kt`） | 只返回群号群名人数、成员昵称群名片角色、好友昵称备注；手机号与邮箱等联系方式不提供给模型 |
 | 修改个人 QQ 环境的配置与插件 | 无独立界面，仅高级 WebUI | 有 | `napcat action=exec`（带 `command`） | 专用 Debian 已就绪即可执行，包括后续安装失败时的诊断；不自动安装或回退开发容器，输出脱敏并限 12k 字符；需 EXECUTE_COMMANDS 和 MODIFY_CONTAINER_ENV 能力，PLAN 模式不可用 |
+| 看状态行里的失败环节、处理建议与参考号 | 五个渠道状态行统一追加：`component/TelegramBotSection.kt:208`、`WeixinBotSection.kt:217`、`FeishuBotSection.kt:144`、`QqBotSection.kt:169`、`NapCatBotSection.kt:120`；拼装逻辑 `component/ImDiagnosticText.kt:16` | 部分 | `config get im.<渠道>.state` / `.error`（`ConfigImFields.kt:45-56`）只给状态词与脱敏错误文本 | 诊断由界面按状态对象拼出（阶段 + 建议 + `IM-xxx-nnnn` 参考号），**agent 读不到环节与参考号**，排障时无法与日志锚点对账；目前只有连接、收消息两处会产生诊断 |
+| 在 IM 里发 `/new` 开新会话、`/status` 看当前会话状态 | 无 App 内入口，在聊天客户端直接发（`ImBotBridge.kt:480` 拦截、`:515` 处理、`:541` 拼状态行） | 无 | `sessions` 只有 list/search/read（`feature/agent/domain/tool/session/SessionTool.kt:31`），没有新建会话 | **缺口**：agent 不能替用户在 IM 侧开会话或看 IM 轮次状态；`/stop` 也只回一句「这个渠道还停不了正在跑的任务」（`ImBotBridge.kt:524`），软打断未接通（记入第 13 节 D 类） |
+| 引用某条消息回复，让模型看到被引用原文 | 无 App 内入口，用聊天客户端的「回复」（`ImMessageContext.kt:9-19`；仅 `TelegramBotClient.kt:378` 与 `NapCatChannelClient.kt:189` 填充） | 无 | 行为在 IM 编排层，没有对应工具 | 差异：agent 不能主动「引用某条历史消息」进 prompt；飞书、微信、官方 QQ 不提供引用原文（入站结构里没有） |
+| 每个聊天独立的文件目录 | 无界面，自动生效（`ImBotBridge.kt:729` 建会话时 `:804` 分配目录） | 有 | 会话工作区就是该目录，`Bash` / `writeFile` / `readFile` 直接可用 | 无差异；目录名由渠道与聊天标识生成（`im/<渠道>-<净化id>-<8 位短码>`），agent 不能改归属或重命名，且只对新建会话生效 |
+
+> 无界面但属于本轮行为变化的三项，补在本节而不占表格行：发送结果分「已送达 / 明确失败 / 结果未知」三态，结果未知不再自动补发（`ImChannel.kt` 的 `ImSendResult`，`ImBotBridge.kt:570-585`、`:888-895`）；处理失败重试 3 次后发提示并推进游标（`:366-400`）；各渠道集中声明能力（编辑消息 / 内联按钮 / 发媒体 / 收附件）由编排层统一降级（`ImChannel.kt` 的 `ImChannelCapabilities`，`ImBotBridge.kt:621`、`:854`、`:883`）。三者都只影响行为，用户没有单独开关，agent 也没有对应工具。
+
+## 9a. 语音与通话
+
+| 用户能做什么 | 界面入口 | Agent 有对应工具吗 | 工具与入口 | 差距说明 |
+|---|---|---|---|---|
+| 全局工作/对话语音条切换 | `ChatHeaderComponents.kt` | 有 | `config voice.chat_mode`（`ConfigVoiceFields.kt`） | 全局展示偏好，不改运行模式 |
+| 分别设置 AI/用户音色 | `VoiceProfileSection.kt` | 有 | `config voice.tts_voice/tts_voice_user` | 用户侧留空跟随 AI，云端音色同步仍会上传参考音频和文本 |
+| 配置云端语音识别 | 默认模型页 | 有 | `config voice.stt_provider/stt_model` | 配齐后上传长按收尾与通话整句录音，失败回退本机 |
+| 选择通话背景、模糊与压暗 | `ThemeSettingsSection.kt`、`CallBackgroundSheet.kt` | 有 | `config voice.call_background_image/call_background_blur_dp/call_background_dim` | 图片 URI 导入与 UI 使用同一仓库，图片替换/清除不可回滚；不影响聊天背景 |
+| 通话中静音、打断与挂断 | `VoiceCallScreen.kt` | 无 | — | 用户实时操作；静音真正停止收音，沉默计时在普通通话生效 |
 
 ## 10. 会话
 
@@ -212,14 +230,18 @@
 25. 备份：导入/恢复（`BackupSection.kt:380`）
 26. 备份：网络目标增删改/测试（`BackupViewModel.kt:345`、`:359`）
 27. 备份：上传/从网络恢复（`BackupViewModel.kt:374`、`:446`）
+28. IM：斜杠命令 `/new`（开新会话）与 `/status`（看当前会话状态）——`ImBotBridge.kt:515`；`sessions` 只能看不能建
+29. IM：引用某条消息回复，带被引用原文进模型——`ImMessageContext.kt:9-19`；agent 没有「引用某条历史消息」的工具
 
 （第 1 条属于“双方都没有”；模型默认思考强度、模型连通性测试和 IM 运行状态已有配置通道，当前会话思考强度仍无独立写接口。）
 
-按域看，缺口最集中的是**会话（6 条）**、**工作区（5 条）**、**备份（4 条）**：这三块都是“App 自身状态管理”，工具范围里只有文件、配置、只读会话浏览三类接口，没有“改 App 内数据”的写通道。
+按域看，缺口最集中的是**会话（6 条）**、**工作区（5 条）**、**备份（4 条）**，以及本轮新增的 **IM（2 条）**：前三块都是“App 自身状态管理”，工具范围里只有文件、配置、只读会话浏览三类接口，没有“改 App 内数据”的写通道；IM 则是因为编排层的行为（开会话、引用、停止）没包成工具。
 
-### B. 部分支持（9 条）
+### B. 部分支持
 
 文件重命名、文件删除、复制/剪切/粘贴、`rules.d` 片段新建与编辑、规则片段/主规则删除、技能导入安装、技能删除、文件夹新建，以及模型思考强度（仅可设置模型默认值）。
+
+IM 侧本轮新增一条：状态行诊断可以用 `config get im.<渠道>.state/error` 拿到状态与脱敏错误，但读不到「处在哪个环节」与 `IM-xxx-nnnn` 参考号——这部分是界面按状态对象现拼的。
 
 共同问题：这些动作**没有专用工具，所以不在工具名层面可发现**——agent 得先知道“可以用 shell 凑”，才做得出来；也没有 UI 那层的合法性校验（片段命名、技能目录必须含 SKILL.md）。
 
@@ -228,9 +250,9 @@
 - 远程设备端口：`ConfigRemoteDeviceFields.kt:53` 可写；设置页没有端口输入——**有意不做界面**（只有端口撞车才需要改，不做入口），不算缺口。
 - （已消）已配对设备列表与撤销设备授权均已接入设置页：`RemoteDeviceSection.kt:135` 列表、`:144` 撤销按钮（提交 `201e3c60`）。
 
-### D. 双方都没有（2 条）
+### D. 双方都没有
 
-会话归档与自动化任务「手动跑一次」。写在这里是为了说明：它们不是 agent 工具缺口，不要照着补工具。
+会话归档、自动化任务「手动跑一次」与 IM 里的 `/stop`。`/stop` 目前只提示该渠道无法停止正在运行的任务，需到 App 内对应会话点停止；IM 侧尚未接通软打断。写在这里是为了说明：它们不是 agent 工具缺口，不要照着补工具。
 
 ## 14. 方法说明
 
@@ -238,6 +260,7 @@
 - **`config` 通道算不算“有工具”**：算。它同样是 agent 可调用的工具，只是能力面由字段注册决定；因此“有 config 字段”一律记为“有”，并在差距说明里注明“无独立工具、要靠 `config list` 才能在索引里发现”。
 - **界面入口的判据**：从 `component/SettingsScreen.kt:123-178`（`SettingsSection` 枚举）与 `:963-1331`（分区到组件的映射）找到分区文件，再在该文件里定位真正触发调用的 `onClick`/`viewModel.*` 行；不按文件名猜。
 - **没读到就不写“有”**：所有“无 / 未找到”都做了全仓 `rg`（关键词含 `rename`、`revoke`、`setPort`、`runNow`、`temperature`、`archived`、`reasoning_effort`、`testConnection` 等），并检查了 `Config*Fields` 的注册清单（`AIEditorApp.kt:409-434`）。
+- **2026-11-09 复核范围**：IM 这一轮逐个读了 `feature/im/domain/ImChannel.kt`（能力声明与 `ImSendResult` 三态）、`ImChannelDiagnostic.kt`、`ImBotBridge.kt`（斜杠命令、会话目录、重试与收尾）、`ImMessageContext.kt`、`TelegramBotClient.kt`、`NapCatChannelClient.kt`、`WeixinIlinkClient.kt`，以及五个 `*BotSection.kt` 与 `settings/presentation/component/ImDiagnosticText.kt`；钉钉与企业微信当时只有零散的渠道/配置文件，没接入设置页与 `config` 通道（见不确定项 9）。
 
 不确定项（列出来，不猜）：
 
@@ -246,3 +269,7 @@
 3. **记忆 compact / distill**：确认没有工具与 config 字段，但后台 `MemoryMaintenanceWorker` 的触发条件未逐行读，因此“agent 完全无法触发”是按工具范围下的结论，不等于“这两件事永远不会发生”。
 4. **会话导出**（`MainActivity.kt:842-845`）的具体产物格式未核实，只确认入口存在且无对应工具。
 5. `docs/` 下此前没有本文件；本表未接入任何索引（`docs/FILE_INDEX.md` 未改，任务只允许写一份文档）。
+6. **IM 诊断的环节覆盖**：`ImChannelDiagnostic` 有登录/凭证/连接/收消息/发送/附件六个阶段，但全仓只有 `ImBotBridge.kt:145`（连接）与 `:340`（收消息）两处会生成诊断；扫码与登录错误、发送失败目前不带环节与参考号（NapCat 登录错误走单独的 `state.error`/`login.error` 文本）。未核实后续是否补齐。
+7. **IM 斜杠命令的文案**：`ImBotBridge.kt` 通过 `imText("im_cmd_*")` / `imText("im_message_dropped")` 取字符串，读取时 `values/strings.xml` 已有这批键（`im_cmd_new_session` / `im_cmd_status` / `im_cmd_stop_unavailable` / `im_message_dropped`）；本轮复核期间它们曾缺失（`imText` 会退回键名），现按已落地记。
+8. **微信发媒体**：`WeixinIlinkClient.kt:70` 的能力声明写 `sendMedia = true`，但 `sendMedia` 实现仍返回 `null`（`:439-445`），实际发不出去；未核实是否有人正在补实现，表与用户文档暂按“微信不支持发送”记。
+9. **钉钉 / 企业微信**：设置页、DI、前台服务、恢复与 `ConfigImFields` 注册已接入，两渠道目前未声明附件或内联按钮能力；尚未作真机平台连接验收。
