@@ -140,7 +140,8 @@ class MemoryTopicOrganizer @Inject constructor(
             val current = MemoryParser.parse(file, scope) ?: continue
             if (current.version != memory.version) continue
             val payload = MemoryParser.format(
-                current.name, desc, current.content, current.type, current.keywords, current.expiresAt, current.pending
+                current.name, desc, current.content, current.type, current.keywords, current.expiresAt, current.pending,
+                current.avoid
             )
             if (!MemoryFileStorage.write(file, payload, expectedVersion = current.version)) continue
             done++

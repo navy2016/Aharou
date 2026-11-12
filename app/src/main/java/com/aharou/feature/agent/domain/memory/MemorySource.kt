@@ -168,7 +168,7 @@ interface MemorySource {
             }
             val payload = MemoryParser.format(
                 memory.name, memory.description, content, memory.type, memory.keywords,
-                memory.expiresAt, memory.pending
+                memory.expiresAt, memory.pending, memory.avoid
             )
             if (MemoryFileStorage.write(file, payload)) MemoryEditResult.Success
             else MemoryEditResult.Error("EDIT_WRITE_FAILED", "写入记忆文件失败，原文未修改")
@@ -343,7 +343,16 @@ interface MemorySource {
         ): File? = synchronized(MemoryFileStorage.lock) {
             val target = uniqueArchiveFile(root, name) ?: return null
             return try {
-                val payload = MemoryParser.format(sanitizeName(name), description, content, type, keywords, expiresAt, pending)
+                val existing = resolveMemoryFile(root, name)
+                val avoid = if (existing.isFile) {
+                    Frontmatter.splitAndParse(existing.readText(), tag, "解析记忆失败").first["avoid"]
+                        ?.toString()?.equals("true", ignoreCase = true) == true
+                } else {
+                    false
+                }
+                val payload = MemoryParser.format(
+                    sanitizeName(name), description, content, type, keywords, expiresAt, pending, avoid
+                )
                 if (MemoryFileStorage.write(target, payload)) target else null
             } catch (e: Exception) {
                 FileLogger.w(tag, "写入归档记忆失败: $name", e)

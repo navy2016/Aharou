@@ -1,12 +1,15 @@
 package com.aharou.feature.settings.data
 
 import android.content.Context
+import android.net.Uri
 import com.aharou.core.config.ConfigError
 import com.aharou.core.config.ConfigRegistry
 import com.aharou.core.config.ConfigSchema
 import com.aharou.core.config.ConfigValue
 import com.aharou.core.config.fields.ClosureField
 import com.aharou.core.config.fields.DataStoreBoolField
+import com.aharou.core.config.fields.DataStoreDoubleField
+import com.aharou.core.config.fields.DataStoreIntField
 import com.aharou.core.config.fields.DataStoreStrField
 import com.aharou.feature.settings.data.repository.AssistantOverlaySettingsRepository
 import com.aharou.feature.settings.data.repository.VoiceSttSettingsRepository
@@ -14,10 +17,12 @@ import com.aharou.feature.settings.data.repository.VoiceTtsSettingsRepository
 import com.aharou.feature.settings.data.repository.VoiceWakeSettingsRepository
 import com.aharou.feature.voice.assistant.PowerKeyWatcherService
 import com.aharou.feature.voice.call.VoiceCallService
+import com.aharou.feature.voice.data.CallBackgroundRepository
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.runBlocking
 
 /**
@@ -40,6 +45,7 @@ class ConfigVoiceFields @Inject constructor(
     private val sttSettings: VoiceSttSettingsRepository,
     private val wakeSettings: VoiceWakeSettingsRepository,
     private val overlaySettings: AssistantOverlaySettingsRepository,
+    private val callBackground: CallBackgroundRepository,
     @param:ApplicationContext private val context: Context,
 ) {
 
@@ -72,9 +78,29 @@ class ConfigVoiceFields @Inject constructor(
             DataStoreStrField(
                 path = "voice.tts_voice",
                 displayName = "语音合成音色",
-                description = "音色名，留空用服务端默认音色；填 local:<id> 则用本机克隆的音色（id 见设置里「我的音色」）。",
+                description = "AI 音色，留空用服务端默认音色；填 local:<id> 则用本机克隆的音色（id 见设置里的音色弹层）。",
                 flow = ttsSettings.voiceFlow,
                 setter = { ttsSettings.setVoice(it) },
+            ),
+        )
+
+        registry.register(
+            DataStoreStrField(
+                path = "voice.tts_voice_user",
+                displayName = "用户音色",
+                description = "对话模式下用户自己那条语音条用的音色；留空则与 voice.tts_voice 共用，格式同它（留空用服务端默认、local:<id> 用本机克隆音色）。",
+                flow = ttsSettings.userVoiceFlow,
+                setter = { ttsSettings.setUserVoice(it) },
+            ),
+        )
+
+        registry.register(
+            DataStoreBoolField(
+                path = "voice.chat_mode",
+                displayName = "对话模式",
+                description = "开启后聊天页双方消息都以语音条呈现，点条展开看文字；关闭则是普通文字气泡。",
+                flow = ttsSettings.chatVoiceModeFlow,
+                setter = { ttsSettings.setChatVoiceMode(it) },
             ),
         )
 
@@ -92,7 +118,7 @@ class ConfigVoiceFields @Inject constructor(
             DataStoreStrField(
                 path = "voice.stt_provider",
                 displayName = "语音识别供应商",
-                description = "语音输入使用的识别供应商 id（取值见 providers 集合）。留空则回退到 APK 内置的离线模型。",
+                description = "云端识别供应商 id（取值见 providers 集合）。与 voice.stt_model 配齐后，长按收尾和通话整句会上传录音；留空或请求失败则使用另行下载的本机离线模型。",
                 flow = sttSettings.providerIdFlow,
                 setter = { id -> sttSettings.setSttModel(id, sttSettings.getSttModel()) },
             ),
@@ -102,9 +128,61 @@ class ConfigVoiceFields @Inject constructor(
             DataStoreStrField(
                 path = "voice.stt_model",
                 displayName = "语音识别模型",
-                description = "识别模型名。需与 voice.stt_provider 配套设置，只设其一不会生效；两者都空时用内置离线模型。",
+                description = "OpenAI 兼容音频转写模型名。与 voice.stt_provider 配套后会上传整句录音；配置不完整、缺少密钥或请求失败时回退本机识别。离线模型需另行下载。",
                 flow = sttSettings.modelFlow,
                 setter = { model -> sttSettings.setSttModel(sttSettings.getSttProviderId(), model) },
+            ),
+        )
+
+        registry.register(
+            ClosureField(
+                path = "voice.call_background_image",
+                displayName = "通话背景图",
+                description = "导入通话页专用背景图片的 content:// 或 file:// URI；留空清除背景。读回已保存的图片 URI，替换或清除图片不可回滚。",
+                valueSchema = ConfigSchema.Str(),
+                revertable = false,
+                reader = {
+                    val name = runBlocking { callBackground.config.first() }.imagePath
+                    ConfigValue.Str(name?.let { Uri.fromFile(java.io.File(callBackground.dir(), it)).toString() }.orEmpty())
+                },
+                writer = { value ->
+                    val uri = (value as ConfigValue.Str).value.trim()
+                    runBlocking {
+                        if (uri.isBlank()) {
+                            callBackground.clearImage()
+                        } else {
+                            val source = Uri.parse(uri)
+                            if (source.scheme !in setOf("content", "file")) {
+                                throw ConfigError.InvalidValue("通话背景需为 content:// 或 file:// URI")
+                            }
+                            val name = callBackground.saveImage(source)
+                                ?: throw ConfigError.InvalidValue("无法导入通话背景图片")
+                            callBackground.update(callBackground.config.first().copy(imagePath = name))
+                        }
+                    }
+                },
+            ),
+        )
+        registry.register(
+            DataStoreIntField(
+                path = "voice.call_background_blur_dp",
+                displayName = "通话背景模糊",
+                description = "通话背景模糊半径，0~40 dp，不影响聊天背景。",
+                flow = callBackground.config.map { it.blurDp },
+                setter = { callBackground.update(callBackground.config.first().copy(blurDp = it)) },
+                minValue = 0,
+                maxValue = 40,
+            ),
+        )
+        registry.register(
+            DataStoreDoubleField(
+                path = "voice.call_background_dim",
+                displayName = "通话背景压暗",
+                description = "通话背景压暗程度，0.0~0.9，不影响聊天背景。",
+                flow = callBackground.config.map { it.dim },
+                setter = { callBackground.update(callBackground.config.first().copy(dim = it)) },
+                minValue = 0.0,
+                maxValue = 0.9,
             ),
         )
 

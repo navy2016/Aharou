@@ -380,7 +380,8 @@ class MemoryCompactor @Inject constructor(
         val target = MemorySource.resolveMemoryFile(root, name)
         val parsed = MemoryParser.parse(target, group.first().scope) ?: return false
         val payload = MemoryParser.format(
-            parsed.name, parsed.description, parsed.content, effective, parsed.keywords, parsed.expiresAt, parsed.pending
+            parsed.name, parsed.description, parsed.content, effective, parsed.keywords, parsed.expiresAt, parsed.pending,
+            parsed.avoid
         )
         // 刚合并完又改分类：中间若是被人插了一笔（主对话刚好在写这条），
         // 就用版本号拦下，不去把他刚写的内容盖回合并稿。

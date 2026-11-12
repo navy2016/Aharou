@@ -121,7 +121,8 @@ internal object MemoryFileStorage {
             if (MemorySource.archiveExistingFile(root, file.nameWithoutExtension) == null) return@synchronized false
         }
         val payload = MemoryParser.format(
-            name, description, content, first.type, group.flatMap { it.keywords }.distinct(), first.expiresAt
+            name, description, content, first.type, group.flatMap { it.keywords }.distinct(), first.expiresAt,
+            avoid = group.any { it.avoid }
         )
         if (!write(target, payload)) return@synchronized false
         var deleted = true
@@ -191,7 +192,8 @@ internal object MemoryFileStorage {
                 type ?: existing?.type,
                 keywords ?: existing?.keywords,
                 expiresAt ?: existing?.expiresAt,
-                pending ?: existing?.pending ?: false
+                pending ?: existing?.pending ?: false,
+                avoid = existing?.avoid ?: false
             )
             if (currentText == payload) return@synchronized MemoryWriteResult.Success
             if (currentText != null && MemorySource.archiveExistingFile(root, name) == null) {
