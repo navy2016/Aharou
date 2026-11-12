@@ -189,23 +189,13 @@ class RemoteSftpFileAccess private constructor(
     override fun lastModified(path: String): Long =
         withSftp { (it.statExistence(toRemotePath(path))?.mtime ?: 0L) * 1000L }
 
-    /**
-     * 远端内容指纹。**必须按内容哈希而非 mtime**：SFTP 的 mtime 只到秒（[lastModified] 就是把秒乘
-     * 1000），同一秒内的两次写入无法区分，会让并发校验漏判。
-     * 复用 [readAll]，因此受同一 8MB 上限约束——超限时抛 [RemoteOutputTooLargeException]，由调用方
-     * 决定是放行还是报错。
-     */
+    /** 内容哈希流式计算，避免 SFTP 秒级 mtime 漏掉同秒内的并发修改。 */
     override fun fingerprint(path: String): String? {
         val remote = toRemotePath(path)
         return withSftp { sftp ->
             val attrs = sftp.statExistence(remote) ?: return@withSftp null
             if (attrs.type != FileMode.Type.REGULAR) return@withSftp null
-            if (attrs.size > MAX_REMOTE_READ_BYTES) {
-                throw RemoteOutputTooLargeException(
-                    "远程文件超过 ${MAX_REMOTE_READ_BYTES / 1024 / 1024}MB，无法计算内容指纹"
-                )
-            }
-            sftp.open(remote).use { rf -> sha256Fingerprint(readFully(rf)) }
+            RemoteFileInputStream(sftp.open(remote)).buffered().use { sha256Fingerprint(it) }
         }
     }
 
@@ -224,7 +214,8 @@ class RemoteSftpFileAccess private constructor(
                     size = info.attributes.size,
                     lastModified = info.attributes.mtime * 1000L,
                     localFile = null,
-                    permissions = formatPermissions(info.attributes.permissions)
+                    permissions = formatPermissions(info.attributes.permissions),
+                    isSymbolicLink = info.attributes.type == FileMode.Type.SYMLINK,
                 )
             }
         }
@@ -339,6 +330,25 @@ class RemoteSftpFileAccess private constructor(
             if (e is NoSuchFileException) throw e
             FileLogger.e(TAG, "copyToLocal 失败: $remote", e)
             throw NoSuchFileException(remote)
+        }
+    }
+
+    override fun copyToLocal(path: String, maxBytes: Long): File {
+        val remote = toRemotePath(path)
+        val tempFile = File.createTempFile("aicode_remote_", ".copy").apply { deleteOnExit() }
+        return try {
+            withSftp { sftp ->
+                val attrs = sftp.statExistence(remote) ?: throw NoSuchFileException(remote)
+                if (attrs.type != FileMode.Type.REGULAR) throw IOException("Not a regular file: $remote")
+                if (attrs.size > maxBytes) throw FileSizeLimitExceededException(maxBytes, attrs.size)
+                SizeLimitedInputStream(RemoteFileInputStream(sftp.open(remote)), maxBytes).buffered().use { input ->
+                    tempFile.outputStream().buffered().use { output -> input.copyTo(output) }
+                }
+            }
+            tempFile
+        } catch (e: Exception) {
+            tempFile.delete()
+            throw e
         }
     }
 

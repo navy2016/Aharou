@@ -36,16 +36,10 @@ class StewardPanelViewModel @Inject constructor(
     private val _unlimited = MutableStateFlow(settings.unlimited)
     val unlimited: StateFlow<Boolean> = _unlimited.asStateFlow()
 
-    private val _autoRetryOptions = MutableStateFlow(settings.autoRetryOptions)
-    val autoRetryOptions: StateFlow<AutoRetryOptions> = _autoRetryOptions.asStateFlow()
-
-    fun refreshAutoRetryOptions() {
-        _autoRetryOptions.value = settings.autoRetryOptions
-    }
+    val autoRetryOptions: StateFlow<AutoRetryOptions> = settings.autoRetryOptionsFlow
 
     fun setAutoRetryOptions(options: AutoRetryOptions) {
         settings.autoRetryOptions = options
-        _autoRetryOptions.value = settings.autoRetryOptions
     }
 
     /**

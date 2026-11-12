@@ -1788,7 +1788,7 @@ fun AIChatPanel(
                     message = message,
                     onDismiss = { messageForMenu = null },
                     onEditClick = { editingMessage = message },
-                    onRegenerateClick = { viewModel.regenerateMessage(message.id) },
+                    onRegenerateClick = if (messagesReady && canRegenerateMessage(message, messages)) ({ viewModel.regenerateMessage(message.id) }) else null,
                     onForkClick = { viewModel.forkSessionFromMessage(message.id) },
                     onCopyClick = {
                         copyScope.launch { clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("message", message.content))) }

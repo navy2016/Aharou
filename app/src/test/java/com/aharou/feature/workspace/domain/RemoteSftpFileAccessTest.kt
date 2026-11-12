@@ -27,11 +27,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
+import net.schmizz.sshj.sftp.FileAttributes
+import net.schmizz.sshj.sftp.FileMode
 import net.schmizz.sshj.sftp.OpenMode
 import net.schmizz.sshj.sftp.RemoteFile
 import net.schmizz.sshj.sftp.SFTPClient
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -172,6 +175,81 @@ class RemoteSftpFileAccessTest {
             releaseFirst.countDown()
             pool.shutdownNow()
         }
+    }
+
+    @Test fun fingerprintsStreamFilesLargerThanRemoteTextReadLimit() {
+        val a = access().forWorkspace("/remote/a")
+        val size = 9L * 1024 * 1024
+        val attributes = mockk<FileAttributes>()
+        every { attributes.type } returns FileMode.Type.REGULAR
+        every { attributes.size } returns size
+        every { sftp.statExistence("/remote/a/large.txt") } returns attributes
+        val file = mockk<RemoteFile>(relaxed = true)
+        every { sftp.open("/remote/a/large.txt") } returns file
+        every { file.read(any(), any(), any(), any()) } answers {
+            val offset = firstArg<Long>()
+            val buffer = secondArg<ByteArray>()
+            val start = thirdArg<Int>()
+            val count = minOf(arg<Int>(3).toLong(), size - offset).toInt()
+            if (count <= 0) -1 else {
+                buffer.fill(65.toByte(), start, start + count)
+                count
+            }
+        }
+        assertEquals(sha256Fingerprint(ByteArray(size.toInt()) { 65 }), a.fingerprint("~/workspace/large.txt"))
+        verify(exactly = 1) { file.close() }
+    }
+
+    @Test fun boundedDownloadRejectsOversizeBeforeOpeningRemoteFile() {
+        val a = access().forWorkspace("/remote/a")
+        val attributes = mockk<FileAttributes>()
+        every { attributes.type } returns FileMode.Type.REGULAR
+        every { attributes.size } returns 5L
+        every { sftp.statExistence("/remote/a/file") } returns attributes
+        val error = assertThrows(FileSizeLimitExceededException::class.java) { a.copyToLocal("~/workspace/file", 4) }
+        assertEquals(5L, error.sizeBytes)
+        verify(exactly = 0) { sftp.open(any<String>()) }
+        verify(exactly = 0) { sftp.get(any<String>(), any<String>()) }
+    }
+
+    @Test fun boundedDownloadReturnsCompleteFileAtExactLimit() {
+        val a = access().forWorkspace("/remote/a")
+        val attributes = mockk<FileAttributes>()
+        every { attributes.type } returns FileMode.Type.REGULAR
+        every { attributes.size } returns 4L
+        every { sftp.statExistence("/remote/a/file") } returns attributes
+        val file = mockk<RemoteFile>(relaxed = true)
+        every { sftp.open("/remote/a/file") } returns file
+        every { file.read(any(), any(), any(), any()) } answers {
+            val position = firstArg<Long>().toInt()
+            val count = minOf(arg<Int>(3), 4 - position)
+            if (count <= 0) -1 else {
+                secondArg<ByteArray>().fill(65.toByte(), thirdArg<Int>(), thirdArg<Int>() + count)
+                count
+            }
+        }
+        val local = a.copyToLocal("~/workspace/file", 4)
+        try {
+            assertEquals("AAAA", local.readText())
+            assertEquals(4L, local.length())
+            verify(exactly = 1) { file.close() }
+        } finally { local.delete() }
+    }
+
+    @Test fun boundedDownloadRejectsGrowthInsteadOfReturningPartialFile() {
+        val a = access().forWorkspace("/remote/a")
+        val attributes = mockk<FileAttributes>()
+        every { attributes.type } returns FileMode.Type.REGULAR
+        every { attributes.size } returns 4L
+        every { sftp.statExistence("/remote/a/file") } returns attributes
+        val file = mockk<RemoteFile>(relaxed = true)
+        every { sftp.open("/remote/a/file") } returns file
+        every { file.read(any(), any(), any(), any()) } answers {
+            secondArg<ByteArray>().fill(65.toByte(), thirdArg<Int>(), thirdArg<Int>() + 5)
+            5
+        }
+        assertThrows(FileSizeLimitExceededException::class.java) { a.copyToLocal("~/workspace/file", 4) }
+        verify(exactly = 1) { file.close() }
     }
 
     @Test fun writesUseDistinctExclusiveTemporaryFiles() {

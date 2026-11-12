@@ -46,7 +46,7 @@ internal fun MessageActionsBottomSheet(
     onDeleteClick: () -> Unit,
     /** 引用本条：传 null 隐藏该项（实验开关关闭时）。 */
     onQuoteClick: (() -> Unit)? = null,
-    /** 重新生成：仅助手回答（有正文）提供，生成新版本而不覆盖当前回答。 */
+    /** 重新生成：最后一轮的用户消息或助手回答提供，生成新版本。 */
     onRegenerateClick: (() -> Unit)? = null,
     /** 从此处新建分支：以该消息（含）之前的历史另起会话。隐身会话不提供，传 null 即隐藏该项。 */
     onForkClick: (() -> Unit)? = null,
@@ -122,9 +122,7 @@ internal fun MessageActionsBottomSheet(
             }
 
             // 重新生成：旧回答保留成变体，气泡下方用 ‹ n/N › 切换
-            if (onRegenerateClick != null && message.role == MessageRole.ASSISTANT &&
-                message.content.hasVisibleContent()
-            ) {
+            if (onRegenerateClick != null) {
                 MessageActionItem(
                     icon = FeatherIcons.RefreshCw,
                     title = stringResource(R.string.chat_action_regenerate),

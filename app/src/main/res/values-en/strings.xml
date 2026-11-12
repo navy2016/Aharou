@@ -892,7 +892,12 @@
     <string name="editor_extension_unknown">Unknown</string>
     <string name="editor_extension_install">Install</string>
     <string name="editor_font_size_value">%1$d sp</string>
-    <string name="editor_file_too_large">File too large (%1$d MB) to open</string>
+    <string name="editor_memory_insufficient">Not enough memory to load the entire file. Free some memory and try again.</string>
+    <string name="editor_large_file_title">Open large file</string>
+    <string name="editor_large_file_warning">This file is %1$s. Loading and editing may take longer and use significant memory. Continue opening the entire file?</string>
+    <string name="editor_continue_open">Continue opening</string>
+    <string name="editor_file_limit_title">File exceeds opening limit</string>
+    <string name="editor_file_too_large">This file is %1$s, exceeding the %2$d MiB opening limit. It cannot be loaded into the editor. The file has not been modified or truncated.</string>
     <string name="editor_load_failed">Failed to open file</string>
     <string name="editor_binary_unsupported">Binary file, opening not supported</string>
 
@@ -3788,6 +3793,7 @@
 
     <!-- Steward mode -->
     <string name="steward_entry_title">Steward</string>
+    <string name="steward_entry_status">Steward: %1$s; automatic retry: %2$s</string>
     <string name="steward_sheet_intro">After each reply, a supervisor model checks whether your original task is done; if not, it sends the next step into the same conversation.</string>
     <string name="steward_enable">Enable steward</string>
     <string name="steward_unlimited">Unlimited loops</string>

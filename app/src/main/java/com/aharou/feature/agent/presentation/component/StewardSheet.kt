@@ -1,6 +1,8 @@
 package com.aharou.feature.agent.presentation.component
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -24,6 +26,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -31,6 +36,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.aharou.R
 import com.aharou.core.theme.Spacing
+import com.aharou.core.theme.semanticColors
 import com.aharou.core.ui.AdaptiveModalBottomSheet
 import com.aharou.core.ui.AppSwitch
 import com.aharou.feature.agent.domain.steward.StewardController
@@ -52,19 +58,34 @@ internal fun StewardEntryButton(
     panelViewModel: StewardPanelViewModel = hiltViewModel(),
 ) {
     val state by panelViewModel.state.collectAsStateWithLifecycle()
+    val retryOptions by panelViewModel.autoRetryOptions.collectAsStateWithLifecycle()
     var showSheet by remember { mutableStateOf(false) }
+    val faceColor = MaterialTheme.semanticColors.success
+    val robot = Icons.Default.SmartToy
 
-    IconButton(onClick = { panelViewModel.refreshAutoRetryOptions(); showSheet = true }, modifier = modifier.size(36.dp)) {
-        Icon(
-            imageVector = Icons.Default.SmartToy,
-            contentDescription = stringResource(R.string.steward_entry_title),
-            tint = if (state.enabled) {
-                MaterialTheme.colorScheme.primary
-            } else {
-                MaterialTheme.colorScheme.onSurfaceVariant
-            },
-            modifier = Modifier.size(20.dp)
-        )
+    IconButton(onClick = { showSheet = true }, modifier = modifier.size(36.dp)) {
+        Box(Modifier.size(20.dp)) {
+            Icon(
+                imageVector = robot,
+                contentDescription = stringResource(
+                    R.string.steward_entry_status,
+                    stringResource(if (state.enabled) R.string.common_enabled else R.string.common_disabled),
+                    stringResource(if (retryOptions.enabled) R.string.retry_enabled else R.string.retry_disabled),
+                ),
+                tint = if (state.enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.matchParentSize(),
+            )
+            if (retryOptions.enabled) {
+                Canvas(Modifier.matchParentSize()) {
+                    // 坐标对应 SmartToy 的 24×24 视口中留空的眼睛与嘴巴。
+                    withTransform({ scale(size.width / robot.viewportWidth, size.height / robot.viewportHeight, Offset.Zero) }) {
+                        drawCircle(faceColor, radius = 1.5f, center = Offset(7.5f, 12.5f))
+                        drawCircle(faceColor, radius = 1.5f, center = Offset(16.5f, 12.5f))
+                        drawRect(faceColor, topLeft = Offset(8f, 15f), size = Size(8f, 1f))
+                    }
+                }
+            }
+        }
     }
 
     if (showSheet) {

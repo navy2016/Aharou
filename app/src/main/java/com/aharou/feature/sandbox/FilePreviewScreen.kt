@@ -1351,7 +1351,7 @@ private suspend fun saveImageToGallery(context: Context, src: File): Boolean =
  * can't be listed.
  */
 private val IMAGE_GALLERY_EXTENSIONS =
-    setOf("png", "jpg", "jpeg", "gif", "bmp", "webp", "ico")
+    setOf("png", "jpg", "jpeg", "gif", "bmp", "webp", "ico", "svg")
 
 private fun collectImageGallery(
     file: java.io.File,

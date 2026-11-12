@@ -1,6 +1,8 @@
 package com.aharou.feature.workspace.domain
 
 import java.io.File
+import java.io.FilterInputStream
+import java.io.IOException
 import java.io.InputStream
 import java.nio.charset.Charset
 
@@ -15,7 +17,8 @@ data class FileEntry(
     /** 本地模式下可提供宿主 [File]，供需要本地路径的调用方（如 [BitmapFactory]）使用；远程模式为 null。 */
     val localFile: File? = null,
     /** 可读/可写/可执行权限位（rwx 字符串，如 "rwx"）；远程按 SFTP 权限解析，无法获取时给合理默认。 */
-    val permissions: String = "---"
+    val permissions: String = "---",
+    val isSymbolicLink: Boolean = false,
 )
 
 /**
@@ -128,6 +131,15 @@ interface FileAccessProvider {
      */
     fun copyToLocal(path: String): File
 
+    /** 超限时失败，不返回可被误当成完整文件的截断副本。 */
+    fun copyToLocal(path: String, maxBytes: Long): File {
+        val size = fileSize(path)
+        if (size > maxBytes) throw FileSizeLimitExceededException(maxBytes, size)
+        return copyToLocal(path).also { file ->
+            if (file.length() > maxBytes) throw FileSizeLimitExceededException(maxBytes, file.length())
+        }
+    }
+
     /** 删除文件或空目录。 */
     fun delete(path: String)
 
@@ -169,6 +181,26 @@ interface FileAccessProvider {
      * 而不是全局「当前工作区」。空串表示不绑定（跟随全局），默认实现即如此。
      */
     fun forWorkspace(workspacePath: String): FileAccessProvider = this
+
+    /** 显式文件读取需要报告失败，不能把不可读的目录或文件当成空内容。 */
+    fun forStrictRead(): FileAccessProvider = this
+}
+
+class FileSizeLimitExceededException(val maxBytes: Long, val sizeBytes: Long) :
+    IOException("File size $sizeBytes bytes exceeds the $maxBytes byte limit")
+
+internal class SizeLimitedInputStream(input: InputStream, private val maxBytes: Long) : FilterInputStream(input) {
+    private var consumed = 0L
+
+    override fun read(): Int = super.read().also { if (it >= 0) count(1) }
+
+    override fun read(bytes: ByteArray, offset: Int, length: Int): Int =
+        super.read(bytes, offset, length).also { if (it > 0) count(it) }
+
+    private fun count(bytes: Int) {
+        consumed += bytes
+        if (consumed > maxBytes) throw FileSizeLimitExceededException(maxBytes, consumed)
+    }
 }
 
 /**
@@ -178,9 +210,21 @@ interface FileAccessProvider {
  * 前缀写进指纹本身（而不是只存裸 hex），将来若换算法（如 blake3），旧记录与新记录天然不可比，
  * 会退化成「未知版本」而不是**错误地判定为相等**——这是并发校验里更安全的失败方向。
  */
-internal fun sha256Fingerprint(bytes: ByteArray): String {
-    val digest = java.security.MessageDigest.getInstance("SHA-256").digest(bytes)
-    return buildString(digest.size * 2 + 7) {
+internal fun sha256Fingerprint(bytes: ByteArray): String = sha256Fingerprint(bytes.inputStream())
+
+internal fun sha256Fingerprint(input: InputStream): String {
+    val hasher = java.security.MessageDigest.getInstance("SHA-256")
+    val buffer = ByteArray(32 * 1024)
+    while (true) {
+        val count = input.read(buffer)
+        if (count < 0) break
+        if (count > 0) hasher.update(buffer, 0, count)
+    }
+    return formatSha256(hasher.digest())
+}
+
+internal fun formatSha256(digest: ByteArray): String =
+    buildString(digest.size * 2 + 7) {
         append("sha256:")
         for (b in digest) {
             val v = b.toInt() and 0xFF
@@ -188,7 +232,6 @@ internal fun sha256Fingerprint(bytes: ByteArray): String {
             append(HEX_CHARS[v and 0x0F])
         }
     }
-}
 
 private const val HEX_CHARS = "0123456789abcdef"
 

@@ -348,6 +348,21 @@ class LocalFileAccessTest {
         assertEquals(File(tmp.root, "f.txt"), access.copyToLocal("f.txt"))
     }
 
+    @Test fun boundedCopyAcceptsExactLimitAndRejectsLargerFile() {
+        val access = newAccess()
+        access.writeFile("f.txt", "abcd")
+        assertEquals(File(tmp.root, "f.txt"), access.copyToLocal("f.txt", 4))
+        assertThrows(FileSizeLimitExceededException::class.java) { access.copyToLocal("f.txt", 3) }
+        assertEquals("abcd", File(tmp.root, "f.txt").readText())
+    }
+
+    @Test fun ordinaryCopyKeepsExistingBehaviorRegardlessOfEditingLimit() {
+        val access = newAccess()
+        access.writeFile("f.txt", "abcd")
+        assertThrows(FileSizeLimitExceededException::class.java) { access.copyToLocal("f.txt", 3) }
+        assertEquals("abcd", access.copyToLocal("f.txt").readText())
+    }
+
     // ---------- forWorkspace：会话绑定工作区 ----------
 
     /**

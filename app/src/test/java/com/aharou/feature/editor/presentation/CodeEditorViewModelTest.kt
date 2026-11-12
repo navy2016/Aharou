@@ -5,10 +5,13 @@ import android.content.Context
 import com.aharou.feature.agent.domain.tool.FileVersionRegistry
 import com.aharou.feature.editor.data.EditorSettings
 import com.aharou.feature.editor.data.EditorSettingsRepository
+import com.aharou.feature.editor.domain.TextMateSetup
 import com.aharou.feature.editor.lsp.EditorLspManager
 import com.aharou.feature.workspace.domain.FileAccessProvider
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.mockkObject
+import io.mockk.unmockkObject
 import io.mockk.verify
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -27,6 +30,8 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import org.junit.Rule
+import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
@@ -37,6 +42,7 @@ import java.util.concurrent.TimeUnit
 @Config(application = Application::class, sdk = [28])
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class CodeEditorViewModelTest {
+    @get:Rule val temporary = TemporaryFolder()
     private val dispatcher = StandardTestDispatcher()
     private val files = mockk<FileAccessProvider>(relaxed = true)
     private val first = mockk<FileAccessProvider>(relaxed = true)
@@ -50,16 +56,104 @@ class CodeEditorViewModelTest {
         Dispatchers.setMain(dispatcher)
         every { files.forWorkspace("/one") } returns first
         every { files.forWorkspace("/two") } returns second
+        every { first.forStrictRead() } returns first
+        every { second.forStrictRead() } returns second
         every { first.fingerprint(any()) } returns "first"
         every { second.fingerprint(any()) } returns "second"
         every { identity.matches(any(), any()) } returns true
         every { settings.settingsFlow } returns MutableStateFlow(EditorSettings())
+        mockkObject(TextMateSetup)
+        every { TextMateSetup.ensureInitialized(any()) } returns Unit
+        every { TextMateSetup.scopeNameFor(any()) } returns null
         model = CodeEditorViewModel(mockk<Context>(relaxed = true), files, settings,
             mockk<EditorLspManager>(relaxed = true), mockk<FileVersionRegistry>(relaxed = true), identity)
     }
 
     @After
-    fun tearDown() { Dispatchers.resetMain() }
+    fun tearDown() { unmockkObject(TextMateSetup); Dispatchers.resetMain() }
+
+    private fun readableFile(size: Long) {
+        val file = temporary.newFile().apply { writeText("full content") }
+        every { first.exists(any()) } returns true
+        every { first.isFile(any()) } returns true
+        every { first.fileSize(any()) } returns size
+        every { first.copyToLocal(any(), any()) } returns file
+    }
+
+    @Test fun twentyMiBOpensWithoutConfirmation() = runTest(dispatcher) {
+        readableFile(EDITOR_LARGE_FILE_WARNING_BYTES)
+        model.bindWorkspace("/one", "limit20")
+        model.load("~/workspace/a.txt")
+        val state = model.uiState.first { it is EditorUiState.Success }
+        assertEquals("full content", (state as EditorUiState.Success).content)
+        verify(exactly = 1) { first.copyToLocal("~/workspace/a.txt", EDITOR_LARGE_FILE_WARNING_BYTES) }
+    }
+
+    @Test fun twentyMiBPlusOneWaitsForConfirmationWithoutDownloading() = runTest(dispatcher) {
+        readableFile(EDITOR_LARGE_FILE_WARNING_BYTES + 1)
+        model.bindWorkspace("/one", "limit20plus")
+        model.load("~/workspace/a.txt")
+        val warning = model.uiState.first { it is EditorUiState.LargeFileWarning } as EditorUiState.LargeFileWarning
+        verify(exactly = 0) { first.copyToLocal(any(), any()) }
+        model.confirmLargeFile(warning.loadId)
+        assertEquals("full content", (model.uiState.first { it is EditorUiState.Success } as EditorUiState.Success).content)
+        verify(exactly = 1) { first.copyToLocal("~/workspace/a.txt", EDITOR_MAX_FILE_BYTES) }
+    }
+
+    @Test fun oneHundredMiBIsAllowedAfterConfirmation() = runTest(dispatcher) {
+        readableFile(EDITOR_MAX_FILE_BYTES)
+        model.bindWorkspace("/one", "limit100")
+        model.load("~/workspace/a.txt")
+        val warning = model.uiState.first { it is EditorUiState.LargeFileWarning } as EditorUiState.LargeFileWarning
+        model.confirmLargeFile(warning.loadId)
+        model.uiState.first { it is EditorUiState.Success }
+        verify(exactly = 1) { first.copyToLocal("~/workspace/a.txt", EDITOR_MAX_FILE_BYTES) }
+    }
+
+    @Test fun oneHundredMiBPlusOneIsRejectedBeforeDownload() = runTest(dispatcher) {
+        readableFile(EDITOR_MAX_FILE_BYTES + 1)
+        model.bindWorkspace("/one", "limit100plus")
+        model.load("~/workspace/a.txt")
+        val state = model.uiState.first { it is EditorUiState.TooLarge } as EditorUiState.TooLarge
+        assertEquals(EDITOR_MAX_FILE_BYTES + 1, state.sizeBytes)
+        model.confirmLargeFile(0)
+        verify(exactly = 0) { first.copyToLocal(any(), any()) }
+    }
+
+    @Test fun previousFileConfirmationDoesNotApproveCurrentFile() = runTest(dispatcher) {
+        readableFile(EDITOR_LARGE_FILE_WARNING_BYTES + 1)
+        model.bindWorkspace("/one", "stale-file")
+        model.load("~/workspace/a.txt")
+        val firstWarning = model.uiState.first { it is EditorUiState.LargeFileWarning } as EditorUiState.LargeFileWarning
+        model.load("~/workspace/b.txt")
+        model.uiState.first { it is EditorUiState.LargeFileWarning }
+        model.confirmLargeFile(firstWarning.loadId)
+        runCurrent()
+        verify(exactly = 0) { first.copyToLocal(any(), any()) }
+    }
+
+    @Test fun growthBeforeConfirmedDownloadIsStillRejected() = runTest(dispatcher) {
+        readableFile(EDITOR_LARGE_FILE_WARNING_BYTES + 1)
+        model.bindWorkspace("/one", "growth")
+        model.load("~/workspace/a.txt")
+        val warning = model.uiState.first { it is EditorUiState.LargeFileWarning } as EditorUiState.LargeFileWarning
+        every { first.fileSize(any()) } returns EDITOR_MAX_FILE_BYTES + 1
+        model.confirmLargeFile(warning.loadId)
+        model.uiState.first { it is EditorUiState.TooLarge }
+        verify(exactly = 0) { first.copyToLocal(any(), any()) }
+    }
+
+    @Test fun saveDoesNotApplyOpeningSizeLimit() = runTest(dispatcher) {
+        every { first.fileSize(any()) } returns EDITOR_MAX_FILE_BYTES + 1
+        model.bindWorkspace("/one", "save-unrestricted")
+        val request = model.createSaveRequest("~/workspace/a.txt", "saved content")!!
+        val result = async(UnconfinedTestDispatcher(testScheduler)) { model.saveEvents.first() }
+        model.save(request)
+        assertEquals(SaveResult.Success(request), result.await())
+        verify(exactly = 1) { first.writeFile("~/workspace/a.txt", "saved content", any(), any()) }
+        verify(exactly = 0) { first.fileSize(any()) }
+        verify(exactly = 0) { first.copyToLocal(any(), any()) }
+    }
 
     @Test
     fun lateSave_keepsOriginalBoundRootAndCannotAffectNewBinding() = runTest(dispatcher) {

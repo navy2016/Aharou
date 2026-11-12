@@ -79,7 +79,7 @@ data class FileItem(
     val isImageFile: Boolean
         get() {
             val ext = file.extension.lowercase()
-            return ext in setOf("png", "jpg", "jpeg", "gif", "bmp", "webp", "ico")
+            return ext in setOf("png", "jpg", "jpeg", "gif", "bmp", "webp", "ico", "svg")
         }
 
     val isMarkdownFile: Boolean

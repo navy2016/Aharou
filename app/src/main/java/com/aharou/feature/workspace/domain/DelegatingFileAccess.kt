@@ -55,6 +55,8 @@ class DelegatingFileAccess private constructor(
         )
     }
 
+    override fun forStrictRead(): FileAccessProvider = delegate().forStrictRead()
+
     override fun readFile(path: String): String = delegate().readFile(path)
 
     override fun readLines(path: String): Sequence<String> = delegate().readLines(path)
@@ -90,6 +92,8 @@ class DelegatingFileAccess private constructor(
         delegate().writeStream(path, input, overwrite)
 
     override fun copyToLocal(path: String): File = delegate().copyToLocal(path)
+
+    override fun copyToLocal(path: String, maxBytes: Long): File = delegate().copyToLocal(path, maxBytes)
 
     override fun delete(path: String) = delegate().delete(path)
 

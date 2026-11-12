@@ -72,6 +72,7 @@ import com.aharou.feature.editor.domain.TextMateSetup
 import com.aharou.feature.editor.domain.diagnostics.EditorDiagnostics
 import com.aharou.feature.editor.presentation.component.EditorCloseTabDialog
 import com.aharou.feature.editor.presentation.component.EditorFileTitleBar
+import com.aharou.feature.editor.presentation.component.EditorFileSizeDialog
 import com.aharou.feature.editor.presentation.component.EditorSaveConflictDialog
 import com.aharou.feature.editor.presentation.component.EditorUnsavedDialog
 import com.aharou.feature.editor.presentation.component.MarkdownPreviewWebView
@@ -534,14 +535,9 @@ fun CodeEditorScreen(
                     )
                 }
             }
-            is EditorUiState.TooLarge -> CenterBox(content) {
-                HintText(
-                    stringResource(
-                        R.string.editor_file_too_large,
-                        s.sizeBytes / 1024 / 1024
-                    )
-                )
-            }
+            is EditorUiState.LargeFileWarning -> EditorFileSizeDialog(s.sizeBytes,
+                onContinue = { viewModel.confirmLargeFile(s.loadId) }, onDismiss = { closeTab(activePath) })
+            is EditorUiState.TooLarge -> EditorFileSizeDialog(s.sizeBytes, onDismiss = { closeTab(activePath) })
             is EditorUiState.Binary -> CenterBox(content) {
                 HintText(stringResource(R.string.editor_binary_unsupported))
             }

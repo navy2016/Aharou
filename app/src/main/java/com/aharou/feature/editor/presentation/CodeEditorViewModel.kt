@@ -3,6 +3,7 @@ package com.aharou.feature.editor.presentation
 import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.aharou.R
 import com.aharou.core.util.FileLogger
 import com.aharou.feature.agent.domain.tool.FileVersionRegistry
 import com.aharou.feature.editor.data.EditorSettings
@@ -12,6 +13,7 @@ import com.aharou.feature.editor.domain.TextMateSetup
 import com.aharou.feature.editor.lsp.DefinitionTarget
 import com.aharou.feature.editor.lsp.EditorLspManager
 import com.aharou.feature.workspace.domain.FileAccessProvider
+import com.aharou.feature.workspace.domain.FileSizeLimitExceededException
 import com.aharou.feature.workspace.domain.sha256Fingerprint
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -31,11 +33,13 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.io.IOException
 import javax.inject.Inject
 
 sealed interface EditorUiState {
     data object Loading : EditorUiState
     data class Success(val content: String, val scopeName: String?) : EditorUiState
+    data class LargeFileWarning(val sizeBytes: Long, val loadId: Long) : EditorUiState
     data class TooLarge(val sizeBytes: Long) : EditorUiState
     data object Binary : EditorUiState
     data class Error(val detail: String?) : EditorUiState
@@ -77,7 +81,7 @@ class CodeEditorViewModel @Inject constructor(
     fun bindWorkspace(root: String, identity: String): Long {
         require(root.isNotBlank())
         binding?.takeIf { it.root == root && it.identity == identity }?.let { return it.generation }
-        binding = Binding(root, identity, ++generation, fileAccess.forWorkspace(root))
+        binding = Binding(root, identity, ++generation, fileAccess.forWorkspace(root).forStrictRead())
         currentPath = null
         loadId++
         _uiState.value = EditorUiState.Loading
@@ -119,7 +123,7 @@ class CodeEditorViewModel @Inject constructor(
             remove(key)
             entries[key] = state
             chars += weightOf(state)
-            while (entries.size > 8 || chars > 8L * 1024 * 1024) {
+            while (entries.size > 8 || (chars > 8L * 1024 * 1024 && entries.size > 1)) {
                 val eldest = entries.keys.firstOrNull() ?: break
                 remove(eldest)
             }
@@ -145,8 +149,19 @@ class CodeEditorViewModel @Inject constructor(
     fun displayPath(path: String): String = editorLspManager.displayPath(path)
 
     fun load(path: String) {
-        val bound = binding ?: return
         if (currentPath == path) return
+        loadDocument(path, allowLargeFile = false)
+    }
+
+    fun confirmLargeFile(expectedLoadId: Long) {
+        val warning = _uiState.value as? EditorUiState.LargeFileWarning ?: return
+        if (warning.loadId != expectedLoadId || loadId != expectedLoadId) return
+        val path = currentPath ?: return
+        loadDocument(path, allowLargeFile = true)
+    }
+
+    private fun loadDocument(path: String, allowLargeFile: Boolean) {
+        val bound = binding ?: return
         currentPath = path
         val key = DocumentKey(bound.identity, path)
         val loading = ++loadId
@@ -158,25 +173,30 @@ class CodeEditorViewModel @Inject constructor(
         _uiState.value = EditorUiState.Loading
         viewModelScope.launch {
             val (state, fingerprint) = withContext(Dispatchers.IO) {
-                val state = try {
+                try {
                     check(workspaceIdentity.matches(bound.root, bound.identity))
-                    readDocument(bound.access, path)
+                    readDocument(bound.access, path, allowLargeFile, loading)
                 } catch (e: CancellationException) {
                     throw e
+                } catch (e: FileSizeLimitExceededException) {
+                    val state = if (e.sizeBytes > EDITOR_MAX_FILE_BYTES) EditorUiState.TooLarge(e.sizeBytes)
+                        else EditorUiState.LargeFileWarning(e.sizeBytes, loading)
+                    state to null
+                } catch (e: OutOfMemoryError) {
+                    FileLogger.w(TAG, "打开文件时内存不足: $path", e)
+                    EditorUiState.Error(context.getString(R.string.editor_memory_insufficient)) to null
                 } catch (e: Exception) {
                     FileLogger.w(TAG, "打开文件失败: $path", e)
-                    EditorUiState.Error(e.message)
+                    EditorUiState.Error(e.message) to null
                 }
-                state to if (state is EditorUiState.Success) {
-                    runCatching { bound.access.fingerprint(path) }.getOrNull()
-                } else null
             }
             if (binding !== bound || loading != loadId) return@launch
-            loadedStates[key] = state
-            val draft = EditorSessionManager.forWorkspace(bound.identity).snapshot(path)?.takeIf { it.dirty }
-            loadedFingerprints[key] = draft?.let { sha256Fingerprint(it.baselineContent.toByteArray(Charsets.UTF_8)) }
-                ?: fingerprint
-            fingerprint?.let { versions.recordExternal(bound.access.toDisplayPath(path), it) }
+            if (state is EditorUiState.Success || state is EditorUiState.Error || state is EditorUiState.Binary) loadedStates[key] = state
+            if (state is EditorUiState.Success) {
+                val draft = EditorSessionManager.forWorkspace(bound.identity).snapshot(path)?.takeIf { it.dirty }
+                loadedFingerprints[key] = draft?.let { sha256Fingerprint(it.baselineContent.toByteArray(Charsets.UTF_8)) } ?: fingerprint
+                fingerprint?.let { versions.recordExternal(bound.access.toDisplayPath(path), it) }
+            }
             if (currentPath == path) {
                 _uiState.value = state
                 _documentVersion.value++
@@ -184,16 +204,17 @@ class CodeEditorViewModel @Inject constructor(
         }
     }
 
-    private fun readDocument(access: FileAccessProvider, path: String): EditorUiState {
-        if (!access.exists(path) || !access.isFile(path)) return EditorUiState.Error(null)
+    private fun readDocument(access: FileAccessProvider, path: String, allowLargeFile: Boolean, loading: Long): Pair<EditorUiState, String?> {
+        if (!access.exists(path) || !access.isFile(path)) return EditorUiState.Error(null) to null
         val size = access.fileSize(path)
-        if (size > MAX_EDITABLE_BYTES) return EditorUiState.TooLarge(size)
-        val bytes = access.readBytes(path)
-        if (looksBinary(bytes)) return EditorUiState.Binary
+        if (size > EDITOR_MAX_FILE_BYTES) return EditorUiState.TooLarge(size) to null
+        if (!allowLargeFile && size > EDITOR_LARGE_FILE_WARNING_BYTES) return EditorUiState.LargeFileWarning(size, loading) to null
+        val limit = if (allowLargeFile) EDITOR_MAX_FILE_BYTES else EDITOR_LARGE_FILE_WARNING_BYTES
+        val document = readEditorFile(access, path, limit) ?: return EditorUiState.Binary to null
         TextMateSetup.ensureInitialized(context)
         val scope = TextMateSetup.scopeNameFor(path)
         if (scope != null) runCatching { TextMateLanguage.create(scope, false).destroy() }
-        return EditorUiState.Success(bytes.toString(Charsets.UTF_8), scope)
+        return EditorUiState.Success(document.text, scope) to document.fingerprint
     }
 
     fun save(request: EditorSaveRequest) = submitSave(request, force = false)
@@ -214,7 +235,8 @@ class CodeEditorViewModel @Inject constructor(
                             check(workspaceIdentity.matches(bound.root, bound.identity))
                             val current = bound.access.fingerprint(request.path)
                             if (!force && baseline != null && current != baseline) {
-                                SaveResult.Conflict(request, bound.access.readFile(request.path)) to null
+                                SaveResult.Conflict(request, readEditorFile(bound.access, request.path)?.text
+                                    ?: throw IOException(context.getString(R.string.editor_binary_unsupported))) to null
                             } else {
                                 check(workspaceIdentity.matches(bound.root, bound.identity))
                                 bound.access.writeFile(request.path, request.content)
@@ -267,14 +289,5 @@ class CodeEditorViewModel @Inject constructor(
 
     private companion object {
         const val TAG = "CodeEditorViewModel"
-        const val MAX_EDITABLE_BYTES = 2L * 1024 * 1024
-        const val BINARY_SNIFF_BYTES = 8000
-
-        fun looksBinary(bytes: ByteArray): Boolean {
-            for (i in 0 until minOf(bytes.size, BINARY_SNIFF_BYTES)) {
-                if (bytes[i].toInt() == 0) return true
-            }
-            return false
-        }
     }
 }

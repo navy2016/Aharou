@@ -39,7 +39,7 @@ import java.io.File
 import javax.inject.Inject
 
 @HiltAndroidApp
-class AIEditorApp : Application(), Configuration.Provider {
+class AIEditorApp : Application(), Configuration.Provider, coil.ImageLoaderFactory {
 
     companion object {
         const val TAG = "AIEditorApp"
@@ -122,7 +122,7 @@ class AIEditorApp : Application(), Configuration.Provider {
         fun isCrashProcess(context: android.content.Context): Boolean =
             getProcessNameCompat(context).endsWith(":crash")
     }
-
+    override fun newImageLoader(): coil.ImageLoader = com.aharou.core.ui.svgImageLoader(this)
     override fun attachBaseContext(base: android.content.Context) {
         // 最早入口：在任何 Hilt 注入/业务初始化之前就绪日志与崩溃落盘。
         // 启动早期（如 Hilt 注入链实例化 @Singleton 工具）的崩溃若发生在 FileLogger 初始化之前

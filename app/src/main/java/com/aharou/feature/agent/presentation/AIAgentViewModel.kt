@@ -192,6 +192,7 @@ class AIAgentViewModel @Inject constructor(
     private val sessionUseCase: SessionUseCase,
     private val messagePersistenceUseCase: MessagePersistenceUseCase,
     private val messageArchiveStore: MessageArchiveStore,
+    private val messageRegenerator: MessageRegenerator,
     private val planApprovalManager: PlanApprovalManager,
     private val terminalSessionManager: TerminalSessionManager,
     private val terminalSessionProvider: TerminalSessionProvider,
@@ -2058,7 +2059,8 @@ class AIAgentViewModel @Inject constructor(
         /** /init 等场景：调用方已先落过命令文本，这轮不再落用户消息，避免落出两条。 */
         persistUserMessage: Boolean = true,
         completion: AgentTurnCompletion? = null,
-        expectedSubAgentRunId: String? = null
+        expectedSubAgentRunId: String? = null,
+        existingUserMessageId: String? = null,
     ): Job = viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
         val sessionId = targetSessionId ?: ensureSession()
         if (sessionId.isBlank()) {
@@ -2125,7 +2127,8 @@ class AIAgentViewModel @Inject constructor(
                     isAutoTrigger = isAutoTrigger,
                     skipTitleUpdate = skipTitleUpdate,
                     persistUserMessage = persistUserMessage,
-                    expectedSubAgentRunId = expectedSubAgentRunId
+                    expectedSubAgentRunId = expectedSubAgentRunId,
+                    existingUserMessageId = existingUserMessageId,
                 )
             ).collect { event ->
                 completion?.observe(event)
@@ -3069,65 +3072,22 @@ class AIAgentViewModel @Inject constructor(
                 (it.role == MessageRole.ASSISTANT.name && it.content.isNotBlank()))
         }
 
-    /**
-     * 「重新生成」：旧回答连同本轮工具过程标成变体组的一版（退出上下文回放），重跑后新产出是下一版。
-     */
     fun regenerateMessage(messageId: String) = viewModelScope.launch {
         val sessionId = _currentSessionId.value ?: return@launch
-        val target = agentMessageDao.getMessageById(messageId) ?: return@launch
-        if (target.role != MessageRole.ASSISTANT.name) return@launch
-        val all = agentMessageDao.getMessagesBySessionOnce(sessionId)
-        val userMessage = all.lastOrNull {
-            it.role == MessageRole.USER.name && !it.isCompactionMarker && !it.isContextSummary &&
-                it.timestamp < target.timestamp
-        } ?: return@launch
-        // 只对最后一轮生效：重跑中间轮次会把它挪到会话末尾，时序就乱了。
-        val hasLaterTurn = all.any {
-            it.timestamp > userMessage.timestamp && it.role == MessageRole.USER.name &&
-                !it.isCompactionMarker && !it.isContextSummary
-        }
-        if (hasLaterTurn) return@launch
-
-        cancelRunningTurn(sessionId)
-
-        val groupId = target.variantGroupId ?: target.id
-        val turnIds = all.filter { it.timestamp > userMessage.timestamp }.map { it.id }
-        val existingIndices = all.filter { it.variantGroupId == groupId }
-            .map { it.variantIndex }.distinct().sorted()
-        val nextIndex = (existingIndices.lastOrNull() ?: -1) + 1
-        if (turnIds.isNotEmpty()) {
-            if (existingIndices.isEmpty()) {
-                // 首次重新生成：本轮产出整体成为版本 0。
-                agentMessageDao.assignVariant(turnIds, groupId, 0, excluded = true)
-            } else {
-                agentMessageDao.updateContextExcluded(turnIds, excluded = true)
-            }
-        }
-        // 只删用户消息行：本轮旧回答要留在库里供切换，不能按时间戳批量删。
-        agentMessageDao.deleteMessageById(userMessage.id)
-        runCatching { messageArchiveStore.deleteMessage(sessionId, userMessage.id) }
-        messagePersistenceUseCase.invalidateHistory(sessionId)
-        setAgentState(sessionId, AgentUIState.Idle)
-
-        val startedAt = System.currentTimeMillis()
-        executeAgentRequestStream(
-            request = userMessage.content,
-            projectRoot = workspaceOf(sessionId),
-            inputAttachments = decodeAttachmentJson(userMessage.attachmentsJson),
-            targetSessionId = sessionId
-        ).join()
-
-        // 本轮新产出的消息（用户消息之后新落库的）归入同一变体组的下一版。
-        val newIds = agentMessageDao.getMessagesBySessionOnce(sessionId).filter {
-            it.timestamp >= startedAt && it.variantGroupId == null && it.role != MessageRole.USER.name
-        }.map { it.id }
-        if (newIds.isNotEmpty()) {
-            agentMessageDao.assignVariant(newIds, groupId, nextIndex, excluded = false)
-        } else {
-            // 新一轮没产出任何消息（如立刻报错）：组里只剩旧版本，得把它的上下文参与权还回去。
-            agentMessageDao.repairSingletonVariantGroups(sessionId)
-        }
-        _variantSelections.value = _variantSelections.value + (groupId to nextIndex)
+        messageRegenerator.regenerate(
+            sessionId, messageId,
+            cancelTurn = { cancelRunningTurn(sessionId); setAgentState(sessionId, AgentUIState.Idle) },
+            restart = { user ->
+                val input = com.aharou.feature.agent.presentation.component.regenerationInput(context, user, fileAccess.forWorkspace(workspaceOf(sessionId)))
+                executeAgentRequestStream(
+                    request = input.text, modelRequest = input.modelRequest, projectRoot = workspaceOf(sessionId),
+                    inputAttachments = input.attachments, inputImages = input.images, targetSessionId = sessionId,
+                    persistUserMessage = false, existingUserMessageId = user.id, skipTitleUpdate = true,
+                    skipCommandDispatch = true,
+                ).join()
+            },
+            selectVariant = { group, position -> _variantSelections.value = _variantSelections.value + (group to position) },
+        )
     }
 
     fun selectMessageVariant(groupId: String, position: Int) {

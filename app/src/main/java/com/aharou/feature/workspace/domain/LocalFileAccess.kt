@@ -106,7 +106,7 @@ class LocalFileAccess @Inject constructor(
         val file = resolve(path)
         // 目录等非普通文件没有「内容版本」可言，返回 null 让调用方放行。
         if (!file.isFile) return null
-        return sha256Fingerprint(file.readBytes())
+        return file.inputStream().buffered().use { sha256Fingerprint(it) }
     }
 
     override fun permissions(path: String): String {
@@ -131,7 +131,8 @@ class LocalFileAccess @Inject constructor(
                     val w = if (child.canWrite()) "w" else "-"
                     val x = if (child.canExecute() || child.isDirectory) "x" else "-"
                     r + w + x
-                }
+                },
+                isSymbolicLink = Files.isSymbolicLink(child.toPath()),
             )
         }
     }

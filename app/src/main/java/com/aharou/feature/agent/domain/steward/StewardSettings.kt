@@ -1,8 +1,12 @@
 package com.aharou.feature.agent.domain.steward
 
 import android.content.Context
+import android.content.SharedPreferences
 import com.aharou.feature.agent.domain.provider.AutoRetryOptions
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -63,7 +67,18 @@ class StewardSettings @Inject constructor(
                 .putString(KEY_RETRY_KEYWORDS, AutoRetryOptions.formatKeywords(options.retryKeywords))
                 .putString(KEY_RETRY_STOP_KEYWORDS, AutoRetryOptions.formatKeywords(options.stopKeywords))
                 .apply()
+            _autoRetryOptions.value = options
         }
+
+    private val _autoRetryOptions = MutableStateFlow(autoRetryOptions)
+    val autoRetryOptionsFlow: StateFlow<AutoRetryOptions> = _autoRetryOptions.asStateFlow()
+    private val retryPreferenceListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        if (key == null || key.startsWith("retry_")) _autoRetryOptions.value = autoRetryOptions
+    }
+
+    init {
+        prefs.registerOnSharedPreferenceChangeListener(retryPreferenceListener)
+    }
 
     companion object {
         const val DEFAULT_MAX_LOOPS = 5
