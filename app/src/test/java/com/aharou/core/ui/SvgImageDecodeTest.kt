@@ -5,7 +5,13 @@ import androidx.compose.ui.graphics.asAndroidBitmap
 import coil.request.ImageRequest
 import coil.request.SuccessResult
 import com.caverock.androidsvg.SVG
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.setMain
+import kotlin.time.Duration.Companion.seconds
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -53,18 +59,24 @@ class SvgImageDecodeTest {
         assertTrue(width.toLong() * height <= 10)
     }
 
-    @Test fun galleryLoaderRegistersSvgAndDisablesEntityExpansion() = runBlocking {
-        val context = RuntimeEnvironment.getApplication()
-        val file = temporary.newFile("gallery.svg").apply {
-            writeText("""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 40"><rect width="80" height="40"/></svg>""")
-        }
-        val loader = svgImageLoader(context)
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test fun galleryLoaderRegistersSvgAndDisablesEntityExpansion() = runTest(timeout = 60.seconds) {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
         try {
-            val result = loader.execute(ImageRequest.Builder(context).data(file).size(80, 40).build())
-            assertTrue(result is SuccessResult)
-            assertFalse(SVG.isInternalEntitiesEnabled())
+            val context = RuntimeEnvironment.getApplication()
+            val file = temporary.newFile("gallery.svg").apply {
+                writeText("""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 40"><rect width="80" height="40"/></svg>""")
+            }
+            val loader = svgImageLoader(context)
+            try {
+                val result = loader.execute(ImageRequest.Builder(context).data(file).size(80, 40).build())
+                assertTrue(result is SuccessResult)
+                assertFalse(SVG.isInternalEntitiesEnabled())
+            } finally {
+                loader.shutdown()
+            }
         } finally {
-            loader.shutdown()
+            Dispatchers.resetMain()
         }
     }
 }

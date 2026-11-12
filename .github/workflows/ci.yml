@@ -109,6 +109,7 @@ jobs:
       # 只跑 universal debug 变体：单测逻辑与 flavor 无关（flavor 仅影响 abiFilters/assets），
       # 跑全 flavor 6 变体是重复编译，无额外覆盖。
       - name: Run unit tests
+        timeout-minutes: 15
         # 用 tee 而不是重定向：重定向会把 Gradle 输出全写进文件，job 日志里就只剩一行命令，
         # 失败时完全看不到原因（2026-10-25 为此绕了一大圈）。pipefail 保证 gradle 的退出码不被 tee 吃掉。
         run: |
@@ -144,7 +145,7 @@ jobs:
             fi
           else
             tests_failed=1
-            echo '::error title=单测无报告::测试进程在写出报告前就崩了（OOM / 超时）'
+            echo '::error title=单测无报告::未生成单测 XML 报告，请检查测试编译、执行日志及取消或超时状态'
           fi
           # 日志尾部只在失败时进注解：成功时也打 error 注解的话，每次跑绿都挂着一条红字。
           if [ "$tests_failed" = 1 ]; then
@@ -163,7 +164,7 @@ jobs:
             elif compgen -G "$reports/*.xml" > /dev/null; then
               echo '全部用例通过'
             else
-              echo '没有生成测试报告：测试进程可能在写出报告前就崩了（OOM / 超时）'
+              echo '未生成单测 XML 报告，请检查测试编译、执行日志及取消或超时状态'
               echo '```'
               tail -30 /tmp/unit.log 2>/dev/null || echo '（没有 /tmp/unit.log）'
               echo '```'
