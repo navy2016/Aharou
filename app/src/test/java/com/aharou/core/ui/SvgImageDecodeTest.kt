@@ -54,7 +54,7 @@ class SvgImageDecodeTest {
     }
 
     @Test fun galleryLoaderRegistersSvgAndDisablesEntityExpansion() = runBlocking {
-        val context = RuntimeEnvironment.getApplication<Application>()
+        val context = RuntimeEnvironment.getApplication()
         val file = temporary.newFile("gallery.svg").apply {
             writeText("""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 40"><rect width="80" height="40"/></svg>""")
         }
