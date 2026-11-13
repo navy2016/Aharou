@@ -13,6 +13,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.stringResource
@@ -31,26 +35,34 @@ import com.aharou.feature.settings.domain.model.ReasoningDialect
 @Composable
 internal fun ReasoningPreviewCard(preview: ReasoningPreview, modifier: Modifier = Modifier) {
     val parametersMaxHeight = LocalConfiguration.current.screenHeightDp.dp * 0.3f
+    var parametersExpanded by rememberSaveable { mutableStateOf(false) }
+    var sourcesExpanded by rememberSaveable { mutableStateOf(false) }
     SettingsGroup(modifier = modifier) {
         Column(
             Modifier.padding(Spacing.lg),
             verticalArrangement = Arrangement.spacedBy(Spacing.sm),
         ) {
-            Text(stringResource(R.string.reasoning_preview_title), style = MaterialTheme.typography.titleSmall)
-            Text(
-                stringResource(R.string.reasoning_preview_selected_effort, reasoningEffortLabel(preview.selectedEffort)),
-                style = MaterialTheme.typography.bodyMedium,
+            CollapsibleGroupHeader(
+                text = stringResource(R.string.reasoning_preview_title),
+                expanded = parametersExpanded,
+                onToggle = { parametersExpanded = !parametersExpanded },
             )
-            Text(
-                stringResource(R.string.reasoning_preview_dialect, reasoningDialectLabel(preview.dialect)),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Text(
-                stringResource(R.string.reasoning_preview_parameters_hint),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            if (parametersExpanded) {
+                Text(
+                    stringResource(R.string.reasoning_preview_selected_effort, reasoningEffortLabel(preview.selectedEffort)),
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Text(
+                    stringResource(R.string.reasoning_preview_dialect, reasoningDialectLabel(preview.dialect)),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    stringResource(R.string.reasoning_preview_parameters_hint),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             Surface(
                 color = MaterialTheme.semanticColors.mutedSurface,
                 shape = RoundedCornerShape(Radius.sm),
@@ -65,34 +77,40 @@ internal fun ReasoningPreviewCard(preview: ReasoningPreview, modifier: Modifier 
                     )
                 }
             }
-            Text(stringResource(R.string.reasoning_preview_sources), style = MaterialTheme.typography.labelLarge)
-            Text(
-                stringResource(
-                    if (preview.overrides.isEmpty()) R.string.reasoning_preview_no_overrides
-                    else R.string.reasoning_preview_overrides_hint
-                ),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            CollapsibleGroupHeader(
+                text = stringResource(R.string.reasoning_preview_sources),
+                expanded = sourcesExpanded,
+                onToggle = { sourcesExpanded = !sourcesExpanded },
             )
-            preview.overrides.forEach { override ->
+            if (sourcesExpanded) {
                 Text(
-                    stringResource(when (override.scope) {
-                        ReasoningOverrideScope.GLOBAL -> R.string.reasoning_preview_source_global
-                        ReasoningOverrideScope.PROVIDER -> R.string.reasoning_preview_source_provider
-                        ReasoningOverrideScope.MODEL -> R.string.reasoning_preview_source_model
-                    }),
-                    style = MaterialTheme.typography.labelMedium,
+                    stringResource(
+                        if (preview.overrides.isEmpty()) R.string.reasoning_preview_no_overrides
+                        else R.string.reasoning_preview_overrides_hint
+                    ),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                SelectionContainer {
+                preview.overrides.forEach { override ->
                     Text(
-                        text = override.paths.joinToString("\n"),
-                        style = MaterialTheme.typography.bodySmall,
-                        fontFamily = FontFamily.Monospace,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        stringResource(when (override.scope) {
+                            ReasoningOverrideScope.GLOBAL -> R.string.reasoning_preview_source_global
+                            ReasoningOverrideScope.PROVIDER -> R.string.reasoning_preview_source_provider
+                            ReasoningOverrideScope.MODEL -> R.string.reasoning_preview_source_model
+                        }),
+                        style = MaterialTheme.typography.labelMedium,
                     )
+                    SelectionContainer {
+                        Text(
+                            text = override.paths.joinToString("\n"),
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
             }
-            if (preview.warnings.isNotEmpty()) {
+            if (parametersExpanded && preview.warnings.isNotEmpty()) {
                 Surface(
                     color = MaterialTheme.semanticColors.warningContainer,
                     contentColor = MaterialTheme.semanticColors.onWarningContainer,

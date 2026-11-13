@@ -903,6 +903,7 @@ fun AppNavigation(
                     FileAwareUriHandler(
                         delegate = defaultUriHandler,
                         onOpenUrl = browserOpener,
+                        workspaceRoot = { currentWorkspace?.path },
                         toFileUrl = { path ->
                             runCatching {
                                 val f = agentViewModel.fileAccess.copyToLocal(path)
@@ -1361,8 +1362,8 @@ private fun toastFileOpFailed(context: android.content.Context, messageRes: Int)
     Toast.makeText(context, context.getString(messageRes), Toast.LENGTH_SHORT).show()
 }
 
-/** 文件树里点击即在内置查看器预览的图片格式（与 sendFile 的图片判定一致）。 */
-private val PREVIEWABLE_IMAGE_EXTS = setOf("png", "jpg", "jpeg", "gif", "webp", "bmp")
+/** 文件树里点击即在内置查看器预览的图片格式。 */
+private val PREVIEWABLE_IMAGE_EXTS = setOf("png", "jpg", "jpeg", "gif", "webp", "bmp", "svg")
 
 /** 文件树里点击即调系统安装器的安装包格式。 */
 private val INSTALLABLE_APK_EXTS = setOf("apk", "apks", "xapk")

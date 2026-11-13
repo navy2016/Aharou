@@ -91,7 +91,7 @@ class FileItemTest {
     }
 
     @Test
-    fun isImageFile_coversRasterFormatsButNotSvg() {
+    fun isImageFile_coversRasterAndSvgFormats() {
         assertTrue(item("a.png").isImageFile)
         assertTrue(item("a.jpg").isImageFile)
         assertTrue(item("a.jpeg").isImageFile)
@@ -100,13 +100,15 @@ class FileItemTest {
         assertTrue(item("a.webp").isImageFile)
         assertTrue(item("a.ico").isImageFile)
         assertTrue(item("A.JPEG").isImageFile)
-        assertFalse(item("a.svg").isImageFile)
+        assertTrue(item("a.svg").isImageFile)
+        assertTrue(item("A.SVG").isImageFile)
     }
 
     @Test
     fun isPreviewable_isTextOrImageOnly() {
         assertTrue(item("a.txt").isPreviewable)
         assertTrue(item("a.png").isPreviewable)
+        assertTrue(item("a.svg").isPreviewable)
         assertFalse(item("a.mp4").isPreviewable)
         assertFalse(item("a.pdf").isPreviewable)
         assertFalse(item("a.zip").isPreviewable)

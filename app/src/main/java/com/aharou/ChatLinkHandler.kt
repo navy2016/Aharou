@@ -1,6 +1,7 @@
 package com.aharou
 
 import androidx.compose.ui.platform.UriHandler
+import com.aharou.feature.workspace.domain.WorkspacePathMapper
 
 /**
  * 聊天区 Markdown 链接处理（从 MainActivity 抽出，控制单文件体量）：
@@ -15,6 +16,7 @@ internal class FileAwareUriHandler(
     private val delegate: UriHandler,
     private val onOpenUrl: (String) -> Unit,
     private val toFileUrl: (path: String) -> String?,
+    private val workspaceRoot: () -> String?,
     private val onOpenFile: (path: String, line: Int) -> Unit
 ) : UriHandler {
     override fun openUri(uri: String) {
@@ -28,7 +30,12 @@ internal class FileAwareUriHandler(
             delegate.openUri(uri)
             return
         }
-        val (path, line) = splitPathAndLine(filePath)
+        val (rawPath, line) = splitPathAndLine(filePath)
+        val root = workspaceRoot()?.trimEnd('/')
+        // 工作区宿主路径不能再按容器绝对路径拼到 rootfs 下，先还原到工作区别名。
+        val path = if (!root.isNullOrEmpty() && (rawPath == root || rawPath.startsWith("$root/"))) {
+            WorkspacePathMapper.CONTAINER_ROOT + rawPath.removePrefix(root)
+        } else rawPath
         // 本地 HTML 文件 → 内置浏览器渲染预览；解析不到真实文件时退回编辑器。
         if (isHtmlPath(path)) {
             toFileUrl(path)?.let { url ->

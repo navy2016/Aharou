@@ -10,13 +10,9 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import com.aharou.core.util.FileLogger
+import java.io.File
 
-/**
- * 全局统一的位图采样解码。
- *
- * 项目没有引入 Coil/Glide（F-Droid 可复现构建下刻意保持依赖精简），所有图片都是手写
- * [BitmapFactory] 解码。此处收敛采样与 OOM 兜底逻辑，避免各处各写一份、各带一份 bug。
- */
+/** 全局统一的图片采样解码，位图与 SVG 共用聊天缩略图和全屏查看器的尺寸预算。 */
 private const val TAG = "ImageDecode"
 
 /** 缩略图档位：聊天附件预览卡只有 76dp，采样到 180 已有余量。 */
@@ -64,7 +60,8 @@ fun calculateInSampleSize(width: Int, height: Int, maxEdge: Int, maxPixels: Long
 
 /** 采样解码本地文件。文件不存在、不是图片或解码失败均返回 null。 */
 fun decodeSampledBitmap(path: String, maxEdge: Int, maxPixels: Long = Long.MAX_VALUE): ImageBitmap? {
-    val bounds = decodeBounds(path) { BitmapFactory.decodeFile(path, it) } ?: return null
+    val bounds = decodeBounds(path) { BitmapFactory.decodeFile(path, it) }
+        ?: return decodeSvgBitmap(maxEdge, maxPixels) { File(path).inputStream() }
     return decodeWithOomRetry(path, bounds, maxEdge, maxPixels) { BitmapFactory.decodeFile(path, it) }
 }
 
@@ -72,7 +69,8 @@ fun decodeSampledBitmap(path: String, maxEdge: Int, maxPixels: Long = Long.MAX_V
 fun decodeSampledBitmap(bytes: ByteArray, maxEdge: Int, maxPixels: Long = Long.MAX_VALUE): ImageBitmap? {
     val what = "byte[${bytes.size}]"
     val decode: (BitmapFactory.Options) -> Bitmap? = { BitmapFactory.decodeByteArray(bytes, 0, bytes.size, it) }
-    val bounds = decodeBounds(what, decode) ?: return null
+    val bounds = decodeBounds(what, decode)
+        ?: return decodeSvgBitmap(maxEdge, maxPixels) { bytes.inputStream() }
     return decodeWithOomRetry(what, bounds, maxEdge, maxPixels, decode)
 }
 

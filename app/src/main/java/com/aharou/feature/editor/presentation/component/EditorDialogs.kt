@@ -1,5 +1,6 @@
 package com.aharou.feature.editor.presentation.component
 
+import android.text.format.Formatter
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.rememberScrollState
@@ -9,10 +10,37 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import com.aharou.R
 import com.aharou.core.util.LineDiff
+import com.aharou.feature.editor.presentation.EDITOR_MAX_FILE_BYTES
+
+@Composable
+internal fun EditorFileSizeDialog(
+    sizeBytes: Long,
+    onContinue: (() -> Unit)? = null,
+    onDismiss: () -> Unit,
+) {
+    val size = Formatter.formatFileSize(LocalContext.current, sizeBytes)
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(if (onContinue != null) R.string.editor_large_file_title else R.string.editor_file_limit_title)) },
+        text = {
+            Text(if (onContinue != null) stringResource(R.string.editor_large_file_warning, size)
+                else stringResource(R.string.editor_file_too_large, size, EDITOR_MAX_FILE_BYTES / 1024 / 1024))
+        },
+        confirmButton = {
+            TextButton(onClick = onContinue ?: onDismiss) {
+                Text(stringResource(if (onContinue != null) R.string.editor_continue_open else R.string.editor_close_tab))
+            }
+        },
+        dismissButton = {
+            if (onContinue != null) TextButton(onClick = onDismiss) { Text(stringResource(R.string.common_cancel)) }
+        },
+    )
+}
 
 /** 关闭带未保存修改的标签页前的确认框：放弃修改并关掉，或取消留下。 */
 @Composable

@@ -168,6 +168,7 @@ class SendFileTool @Inject constructor(
             "webp" -> "image/webp"
             "gif" -> "image/gif"
             "bmp" -> "image/bmp"
+            "svg" -> "image/svg+xml"
             "pdf" -> "application/pdf"
             "zip" -> "application/zip"
             "txt", "md", "kt", "java", "js", "ts", "json", "xml", "html", "css", "py", "sh", "gradle", "kts" -> "text/plain"

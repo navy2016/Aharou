@@ -93,6 +93,8 @@ accordance with the respective license terms.
    - sshj (com.hierynomus:sshj)
    - commons-net, commons-compress, ftpserver-core (org.apache.*)
    - Material Design Icons (AndroidX material-icons-*)
+   - Coil Compose / SVG (io.coil-kt:coil-compose, io.coil-kt:coil-svg)
+   - AndroidSVG (com.caverock:androidsvg-aar), Copyright 2013 Paul LeBeau
 
 ========================================================================
 7. Components under MIT-style licenses

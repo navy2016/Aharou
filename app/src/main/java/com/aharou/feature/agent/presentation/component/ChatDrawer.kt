@@ -66,6 +66,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
@@ -96,6 +97,7 @@ import com.aharou.feature.agent.presentation.FileBrowseState
 import com.aharou.feature.agent.presentation.FileSearchState
 import com.aharou.feature.agent.presentation.FileSearchViewModel
 import com.aharou.feature.agent.presentation.FileTreeNode
+import com.aharou.feature.agent.presentation.FileShareViewModel
 import com.aharou.feature.agent.presentation.displayName
 import com.aharou.feature.workspace.domain.isValidFileEntryName
 import com.aharou.feature.workspace.domain.model.Workspace
@@ -103,13 +105,10 @@ import compose.icons.FeatherIcons
 import compose.icons.feathericons.ChevronDown
 import compose.icons.feathericons.ChevronRight
 import compose.icons.feathericons.CheckSquare
-import compose.icons.feathericons.Clipboard
 import compose.icons.feathericons.Copy
 import compose.icons.feathericons.Download
 import compose.icons.feathericons.Edit2
-import compose.icons.feathericons.FilePlus
 import compose.icons.feathericons.Folder
-import compose.icons.feathericons.FolderPlus
 import compose.icons.feathericons.Globe
 import compose.icons.feathericons.MessageSquare
 import compose.icons.feathericons.RefreshCw
@@ -873,6 +872,9 @@ private fun FileBrowserTab(
     onPasteEntry: (String, (Boolean) -> Unit) -> Unit,
     onClearClipboard: () -> Unit
 ) {
+    val shareViewModel: FileShareViewModel = hiltViewModel()
+    val sharingPaths by shareViewModel.sharingPaths.collectAsState()
+    val context = LocalContext.current
     var creating by remember { mutableStateOf<CreateTarget?>(null) }
     var menuNode by remember { mutableStateOf<FileTreeNode?>(null) }
     var pendingRename by remember { mutableStateOf<FileTreeNode?>(null) }
@@ -932,7 +934,7 @@ private fun FileBrowserTab(
                                 node = node,
                                 rowWidth = rowWidth,
                                 expanding = node.entry.isDirectory && node.path == expandingPath,
-                                busy = node.path in fileOpPaths,
+                                busy = node.path in fileOpPaths || node.path in sharingPaths,
                                 onClick = {
                                     if (node.entry.isDirectory) onToggleExpand(node.path)
                                     else onOpenFile(node.path)
@@ -959,7 +961,7 @@ private fun FileBrowserTab(
                     modifier = Modifier.padding(end = Spacing.xs)
                 )
             }
-            if (fileOpPaths.isNotEmpty()) {
+            if (fileOpPaths.isNotEmpty() || sharingPaths.isNotEmpty()) {
                 CircularProgressIndicator(
                     modifier = Modifier.padding(end = Spacing.xs).size(16.dp),
                     strokeWidth = 2.dp,
@@ -1031,6 +1033,10 @@ private fun FileBrowserTab(
                 val path = node.path
                 menuNode = null
                 onAddToInput(path)
+            },
+            onShare = {
+                menuNode = null
+                shareViewModel.share(node.path) { launchWorkspaceShare(context, it) }
             },
             onPasteHere = {
                 val target = node.path
@@ -1144,102 +1150,6 @@ private fun ClipboardIndicator(
             modifier = Modifier.size(16.dp),
             tint = MaterialTheme.colorScheme.primary
         )
-    }
-}
-
-/** 文件树节点长按弹出的功能菜单：文件与目录均可「加入输入栏」，目录（含工作区根）可新建，
- * 非根节点可复制/剪切/重命名/删除，剪切板非空时目录可「粘贴到此处」。 */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun FileTreeActionSheet(
-    node: FileTreeNode,
-    clipboard: BrowseClipboard?,
-    onNewFile: () -> Unit,
-    onNewFolder: () -> Unit,
-    onRename: () -> Unit,
-    onDelete: () -> Unit,
-    onCopy: () -> Unit,
-    onCut: () -> Unit,
-    onAddToInput: () -> Unit,
-    onPasteHere: () -> Unit,
-    onDismiss: () -> Unit
-) {
-    AdaptiveModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = rememberModalBottomSheetState(),
-        containerColor = MaterialTheme.colorScheme.surface
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(bottom = Spacing.xl)
-        ) {
-            Text(
-                text = node.displayName,
-                style = MaterialTheme.typography.titleSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier
-                    .padding(horizontal = Spacing.lg)
-                    .padding(bottom = Spacing.md)
-            )
-            // 剪切板非空且当前节点是目录 / 根：优先提供「粘贴到此处」。
-            if (clipboard != null && node.entry.isDirectory) {
-                SheetActionRow(
-                    icon = FeatherIcons.Clipboard,
-                    label = stringResource(R.string.file_browser_paste_here),
-                    tint = MaterialTheme.colorScheme.primary,
-                    onClick = onPasteHere
-                )
-            }
-            if (node.entry.isDirectory) {
-                SheetActionRow(
-                    icon = FeatherIcons.FilePlus,
-                    label = stringResource(R.string.file_browser_new_file),
-                    tint = MaterialTheme.colorScheme.onSurface,
-                    onClick = onNewFile
-                )
-                SheetActionRow(
-                    icon = FeatherIcons.FolderPlus,
-                    label = stringResource(R.string.file_browser_new_folder),
-                    tint = MaterialTheme.colorScheme.onSurface,
-                    onClick = onNewFolder
-                )
-            }
-            if (node.root == null) {
-                SheetActionRow(
-                    icon = FeatherIcons.MessageSquare,
-                    label = stringResource(R.string.common_add_to_input),
-                    tint = MaterialTheme.colorScheme.primary,
-                    onClick = onAddToInput
-                )
-                SheetActionRow(
-                    icon = FeatherIcons.Copy,
-                    label = stringResource(R.string.common_copy),
-                    tint = MaterialTheme.colorScheme.onSurface,
-                    onClick = onCopy
-                )
-                SheetActionRow(
-                    icon = Icons.Filled.ContentCut,
-                    label = stringResource(R.string.common_cut),
-                    tint = MaterialTheme.colorScheme.onSurface,
-                    onClick = onCut
-                )
-                SheetActionRow(
-                    icon = FeatherIcons.Edit2,
-                    label = stringResource(R.string.common_rename),
-                    tint = MaterialTheme.colorScheme.onSurface,
-                    onClick = onRename
-                )
-                SheetActionRow(
-                    icon = FeatherIcons.Trash2,
-                    label = stringResource(R.string.common_delete),
-                    tint = MaterialTheme.colorScheme.error,
-                    onClick = onDelete
-                )
-            }
-        }
     }
 }
 
@@ -1436,7 +1346,7 @@ private fun SessionActionSheet(
 }
 
 @Composable
-private fun SheetActionRow(
+internal fun SheetActionRow(
     icon: ImageVector,
     label: String,
     tint: Color,

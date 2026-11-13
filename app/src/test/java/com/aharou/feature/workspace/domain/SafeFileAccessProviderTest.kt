@@ -89,6 +89,35 @@ class SafeFileAccessProviderTest {
         verify(exactly = 1) { delegate.forWorkspace("/a") }
     }
 
+    @Test fun explicitReadPropagatesFailureInsteadOfReturningEmptyDirectory() {
+        every { delegate.forStrictRead() } returns delegate
+        every { delegate.listFiles(any()) } throws failure
+        val strict = SafeFileAccessProvider(delegate).forStrictRead()
+        assertSame(delegate, strict)
+        try {
+            strict.listFiles("folder")
+            fail("Expected original read failure")
+        } catch (error: IOException) {
+            assertSame(failure, error)
+        }
+    }
+
+    @Test fun boundedCopyReportsLimitWithoutChangingOrdinaryCopy() {
+        val sizeFailure = FileSizeLimitExceededException(4, 5)
+        val file = java.io.File("ordinary.copy")
+        every { delegate.copyToLocal("file") } returns file
+        every { delegate.copyToLocal("file", 4) } throws sizeFailure
+        val safe = SafeFileAccessProvider(delegate)
+        assertSame(file, safe.copyToLocal("file"))
+        try {
+            safe.copyToLocal("file", 4)
+            fail("Expected size limit failure")
+        } catch (error: FileSizeLimitExceededException) {
+            assertSame(sizeFailure, error)
+        }
+        assertSame(file, safe.copyToLocal("file"))
+    }
+
     @Test fun blankBindingKeepsOriginalWrapper() {
         val safe = SafeFileAccessProvider(delegate)
         assertSame(safe, safe.forWorkspace(" "))

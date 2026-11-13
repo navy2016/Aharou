@@ -291,6 +291,7 @@ android {
         // 失败用例打印完整堆栈：CI 日志默认只留首行，定位迁移校验差异时看不到 Room 的期望/实际结构
         unitTests.all {
             it.testLogging {
+                events("started", "passed", "skipped", "failed")
                 exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
             }
         }
@@ -404,6 +405,8 @@ dependencies {
     implementation("br.com.devsrsouza.compose.icons:feather:1.1.1")
     // 图片加载（沙箱图库/全屏查看器移植件依赖）
     implementation("io.coil-kt:coil-compose:2.7.0")
+    implementation("io.coil-kt:coil-svg:2.7.0")
+    implementation("com.caverock:androidsvg-aar:1.4")
 
     // 可拖拽排序列表（长按拖拽手势，提供商排序用）
     implementation("sh.calvin.reorderable:reorderable:3.1.0")

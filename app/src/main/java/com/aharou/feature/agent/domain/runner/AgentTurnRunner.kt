@@ -75,6 +75,7 @@ data class AgentTurnRequest(
      */
     val persistUserMessage: Boolean = true,
     val expectedSubAgentRunId: String? = null,
+    val existingUserMessageId: String? = null,
 )
 
 /**
@@ -235,12 +236,13 @@ class AgentTurnRunner @Inject constructor(
         flushAnsweredQuestions(sessionId)
         // 必须在插入本次用户消息之前取历史：workflow 会自己把 userRequest 加进去，避免重复。
         val history = messagePersistenceUseCase.buildHistory(sessionId, SessionUseCase.PENDING_TOOL_MARKER)
+            .filterNot { it is com.aharou.feature.agent.domain.model.AgentMessage.UserMessage && it.id == turn.existingUserMessageId }
         val isFirst = history.isEmpty()
 
-        val userMsgId = UUID.randomUUID().toString()
+        val userMsgId = turn.existingUserMessageId ?: UUID.randomUUID().toString()
         // 隐身会话不建检查点、不动标题：检查点会存下用户提问片段、标题会写进会话行，都属内容外泄。
         val ghost = messagePersistenceUseCase.isGhost(sessionId)
-        if (!turn.isAutoTrigger) {
+        if (!turn.isAutoTrigger && turn.existingUserMessageId == null) {
             messagePersistenceUseCase.persist(
                 sessionId,
                 MessageRole.USER,
@@ -258,7 +260,7 @@ class AgentTurnRunner @Inject constructor(
                     }
                 }
             }
-        } else if (turn.persistUserMessage) {
+        } else if (turn.persistUserMessage && turn.existingUserMessageId == null) {
             // 落用户可见文本（如 `/技能名 参数`）而非 modelRequest：技能正文只喂模型，不进聊天/历史。
             messagePersistenceUseCase.persist(
                 sessionId,
