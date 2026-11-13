@@ -51,6 +51,20 @@ class EditorFileReaderTest {
         assertEquals(sha256Fingerprint(text.toByteArray()), result.fingerprint)
     }
 
+    @Test fun svgIsReadAsCompleteXmlSource() {
+        val text = """<?xml version="1.0" encoding="UTF-8"?>
+            |<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 40">
+            |  <title>Pelican on bike</title>
+            |  <rect width="80" height="40" fill="#22c55e"/>
+            |</svg>
+        """.trimMargin()
+        bind(text)
+        val result = readEditorFile(access, "~/workspace/pelican-on-bike.svg", EDITOR_LARGE_FILE_WARNING_BYTES)!!
+        assertEquals(text, result.text)
+        assertEquals(sha256Fingerprint(text.toByteArray()), result.fingerprint)
+        verify(exactly = 1) { access.copyToLocal("~/workspace/pelican-on-bike.svg", EDITOR_LARGE_FILE_WARNING_BYTES) }
+    }
+
     @Test fun emptyFileProducesValidContentAndFingerprint() {
         bind("")
         val result = readEditorFile(access, "~/workspace/empty.txt")!!

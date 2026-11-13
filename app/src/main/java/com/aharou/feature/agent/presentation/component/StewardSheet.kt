@@ -65,6 +65,14 @@ internal fun StewardEntryButton(
 
     IconButton(onClick = { showSheet = true }, modifier = modifier.size(36.dp)) {
         Box(Modifier.size(20.dp)) {
+            if (retryOptions.enabled) {
+                Canvas(Modifier.matchParentSize()) {
+                    // 底色只从 SmartToy 原有的眼睛和嘴巴镂空处透出，边缘由原矢量轮廓裁定。
+                    withTransform({ scale(size.width / robot.viewportWidth, size.height / robot.viewportHeight, Offset.Zero) }) {
+                        drawRect(faceColor, topLeft = Offset(7f, 9f), size = Size(10f, 9f))
+                    }
+                }
+            }
             Icon(
                 imageVector = robot,
                 contentDescription = stringResource(
@@ -75,16 +83,6 @@ internal fun StewardEntryButton(
                 tint = if (state.enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.matchParentSize(),
             )
-            if (retryOptions.enabled) {
-                Canvas(Modifier.matchParentSize()) {
-                    // 坐标对应 SmartToy 的 24×24 视口中留空的眼睛与嘴巴。
-                    withTransform({ scale(size.width / robot.viewportWidth, size.height / robot.viewportHeight, Offset.Zero) }) {
-                        drawCircle(faceColor, radius = 1.5f, center = Offset(7.5f, 12.5f))
-                        drawCircle(faceColor, radius = 1.5f, center = Offset(16.5f, 12.5f))
-                        drawRect(faceColor, topLeft = Offset(8f, 15f), size = Size(8f, 1f))
-                    }
-                }
-            }
         }
     }
 

@@ -903,6 +903,7 @@ fun AppNavigation(
                     FileAwareUriHandler(
                         delegate = defaultUriHandler,
                         onOpenUrl = browserOpener,
+                        workspaceRoot = { currentWorkspace?.path },
                         toFileUrl = { path ->
                             runCatching {
                                 val f = agentViewModel.fileAccess.copyToLocal(path)

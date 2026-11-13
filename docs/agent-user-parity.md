@@ -55,7 +55,7 @@
 | 重命名文件 | `ChatDrawer.kt:1014`、`:1050` → `FileBrowseController.kt:320` → `MainActivity.kt:807-811` | 部分 | 无专用 rename；只能 `Bash` `mv`（`ExecuteCommandTool`） | 无原子重命名工具，文件名校验/冲突处理要自己写命令 |
 | 删除文件 | `ChatDrawer.kt:1018`、`:1075` → `FileBrowseController.kt:332`；沙盒浏览器 `feature/sandbox/FileBrowserScreen.kt:363` | 部分 | 无专用 delete；只能 `Bash` `rm` | 同上；且 `rm` 走 shell，绕开了 UI 的删除确认 |
 | 复制 / 剪切 / 粘贴 | `ChatDrawer.kt:1024`、`:1028`、`:1035`（粘贴覆盖 `:404`）→ `FileBrowseController.kt:345`、`:350`、`:365` | 部分 | 无专用工具；`Bash` `cp`/`mv` | 同上 |
-| 打开 / 预览文件 | `ChatDrawer.kt`（`onOpenFile`）→ `MainActivity.kt`；沙盒 `FileBrowserScreen.kt` → `FilePreviewScreen.kt` | 有 | `readFile`（`AgentModule.kt:449`）、`viewImage`（`:452`） | 界面支持SVG预览；文本打开上限100 MiB，超过20 MiB需确认且不截断内容；工具读取仍有单次输出预算 |
+| 打开 / 预览文件 | `ChatDrawer.kt`（`onOpenFile`）→ `MainActivity.kt`；沙盒 `FileBrowserScreen.kt` → `FilePreviewScreen.kt` | 有 | `readFile`（`AgentModule.kt:449`）、`viewImage`（`:452`） | 界面支持SVG预览；聊天SVG文字链接打开源码编辑器，支持当前工作区的实际绝对路径；文本打开上限100 MiB，超过20 MiB需确认且不截断内容；工具读取仍有单次输出预算 |
 | 分享文件 / 文件夹 | `FileTreeActionSheet.kt` → `FileShareViewModel.kt` → `WorkspaceShareLauncher.kt` | 部分 | `sendFile` 向聊天区交付文件 | 用户可用系统分享面板发给其它应用，文件夹自动ZIP；工具不代替用户选择系统分享目标 |
 | 重新生成最后一轮回复 | 用户 / 助手消息的 `MessageActionsBottomSheet.kt` → `MessageRegenerator.kt` | 无 | 未提供专用工具 | 复用原用户消息与附件、保留旧回答变体；历史轮次不显示入口 |
 
@@ -72,7 +72,7 @@
 | 改思考强度（reasoning effort） | `ChatModelSheet.kt` 模型标签 → `ModelReasoningSheet` | 部分 | `config` `providers.<id>.models.<model>.reasoning_effort` | 模型默认值可改；当前会话档位没有独立写入接口 |
 | 配置模型推理映射 | `ReasoningConfigSheet.kt`（模型编辑／聊天思考标签） | 有 | `config` `providers.<id>.models.<model>.reasoning_config` | JSON预览常显，参数详情与覆盖来源独立默认折叠；敏感字段加密审计，固定请求体最后覆盖 |
 | 配置自定义请求头与请求体 | `CustomRequestSheet.kt`（全局、供应商、模型） | 有 | `config` `custom_request.global.headers/body`、`providers.<id>.custom_request.headers/body`、`providers.<id>.models.<model>.custom_request.headers/body` | 敏感字段需确认 |
-| 配置自动重试增强 | `StewardSheet.kt` → `AutoRetrySettingsSheet.kt` | 有 | `config` `steward.retry_*` | 包含开关、额外重试次数（0–100，默认3）、延迟、倍率、状态码与关键字；按钮眼睛和嘴巴独立显示重试开关，配置更新即时反映 |
+| 配置自动重试增强 | `StewardSheet.kt` → `AutoRetrySettingsSheet.kt` | 有 | `config` `steward.retry_*` | 包含开关、额外重试次数（0–100，默认3）、延迟、倍率、状态码与关键字；按钮眼睛和嘴巴的完整留白以状态色独立显示重试开关，主体轮廓不变，配置更新即时反映 |
 | 配置模型服务档位 | `ModelReasoningSheet.kt` → `ModelReasoningEffortSheet` 服务档位页签 | 有 | `config` `providers.<id>.models.<model>.service_tier`；默认模型快捷字段 `model.roles.default_service_tier` | 与推理强度独立，仅OpenAI协议发送，固定请求体最后覆盖 |
 | 测试模型/供应商连通性 | `component/ProviderModelComponents.kt`、`DefaultModelsSection.kt` | 有 | `config action=test_model provider_id=<id> model=<model>`，复用 `ModelApiService` | 极短真实请求，可能计费；不改配置、不返回凭据 |
 
