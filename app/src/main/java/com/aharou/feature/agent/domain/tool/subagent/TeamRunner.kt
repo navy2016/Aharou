@@ -7,6 +7,8 @@ import com.aharou.feature.agent.domain.subagent.AgentTeamEntry
 import com.aharou.feature.agent.domain.subagent.SubAgentProfileMatcher
 import com.aharou.feature.agent.domain.subagent.TeamStage
 import com.aharou.feature.agent.domain.subagent.TeamTask
+import com.aharou.feature.agent.domain.subagent.SUBAGENTS_DISABLED_CODE
+import com.aharou.feature.agent.domain.subagent.SUBAGENTS_DISABLED_MESSAGE
 import com.aharou.feature.agent.domain.teamworkflow.TeamWorkflow
 import com.aharou.feature.agent.domain.teamworkflow.WorkflowOrchestrator
 import com.aharou.feature.agent.domain.teamworkflow.WorkflowTeamRef
@@ -42,6 +44,7 @@ object TeamRunner {
      * 成员不该逼用户去拆阶段。
      */
     fun build(team: AgentTeam, goal: String, enabled: List<AgentDefinition>, maxRunning: Int): Plan {
+        if (maxRunning == 0) return Plan.Rejected(SUBAGENTS_DISABLED_CODE, SUBAGENTS_DISABLED_MESSAGE)
         val badRoles = unknownRoles(team, enabled)
         if (badRoles.isNotEmpty()) {
             return Plan.Rejected(
@@ -52,7 +55,7 @@ object TeamRunner {
             )
         }
 
-        val batchSize = maxRunning.coerceAtLeast(1)
+        val batchSize = maxRunning
         var layers = 0
         val pipeline = buildJsonArray {
             var upstream: List<String> = emptyList()
@@ -100,6 +103,7 @@ object TeamRunner {
         enabled: List<AgentDefinition>,
         maxRunning: Int
     ): Plan {
+        if (maxRunning == 0) return Plan.Rejected(SUBAGENTS_DISABLED_CODE, SUBAGENTS_DISABLED_MESSAGE)
         val badRoles = unknownRoles(team, enabled).toMutableList()
         val lead = ref.lead?.trim()?.takeIf { it.isNotEmpty() }
         if (lead != null && enabled.none { it.name.equals(lead, ignoreCase = true) }) {
@@ -119,7 +123,7 @@ object TeamRunner {
         val judgeDepartment = if (judgeAgent == null) firstTask?.department else null
         val judgeQuery = if (judgeAgent == null) firstTask?.agentQuery else null
 
-        val batchSize = maxRunning.coerceAtLeast(1)
+        val batchSize = maxRunning
         var layers = 0
         // 本层全部成员任务的 id：协调者要看到整层的产出，不能只看最后一批。
         val members = mutableListOf<String>()

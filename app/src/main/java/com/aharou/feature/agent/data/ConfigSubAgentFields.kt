@@ -28,7 +28,7 @@ class ConfigSubAgentFields @Inject constructor(
                 displayName = "子代理并发上限",
                 description = "同时运行的子代理上限（整个应用共享，不按会话分组），范围 " +
                     "${SubAgentSettings.MIN_RUNNING}..${SubAgentSettings.MAX_RUNNING}，默认 " +
-                    "${SubAgentEventBus.DEFAULT_MAX_RUNNING}。超过范围会被自动收敛。",
+                    "${SubAgentEventBus.DEFAULT_MAX_RUNNING}。0 关闭新派发及重新唤醒，不中断已运行轮次。超过范围会被自动收敛。",
                 valueSchema = ConfigSchema.Int(SubAgentSettings.MIN_RUNNING, SubAgentSettings.MAX_RUNNING),
                 reader = { ConfigValue.Int(subAgentSettings.maxRunning()) },
                 writer = { v ->

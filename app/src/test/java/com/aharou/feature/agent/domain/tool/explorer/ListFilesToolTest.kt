@@ -45,6 +45,8 @@ class ListFilesToolTest {
 
         override fun readFile(path: String): String = throw UnsupportedOperationException()
         override fun readLines(path: String): Sequence<String> = throw UnsupportedOperationException()
+        override fun readLinesWithFingerprint(path: String, consumeLine: (String) -> Boolean): String? = throw UnsupportedOperationException()
+        override fun resourceKey(path: String): String = path
         override fun writeFile(path: String, content: String, overwrite: Boolean, encoding: Charset) = throw UnsupportedOperationException()
         override fun fileSize(path: String): Long = throw UnsupportedOperationException()
         override fun lastModified(path: String): Long = throw UnsupportedOperationException()

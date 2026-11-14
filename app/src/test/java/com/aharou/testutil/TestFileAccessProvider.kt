@@ -3,6 +3,7 @@ package com.aharou.testutil
 import com.aharou.feature.workspace.domain.FileAccessProvider
 import com.aharou.feature.workspace.domain.FileEntry
 import com.aharou.feature.workspace.domain.sha256Fingerprint
+import com.aharou.feature.workspace.domain.readLinesAndFingerprint
 import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStream
@@ -27,6 +28,11 @@ class TestFileAccessProvider : FileAccessProvider {
         if (!file.exists()) throw NoSuchFileException(file)
         return file.bufferedReader().useLines { it.toList() }.asSequence()
     }
+
+    override fun readLinesWithFingerprint(path: String, consumeLine: (String) -> Boolean): String? =
+        readLinesAndFingerprint(File(path).inputStream(), consumeLine)
+
+    override fun resourceKey(path: String): String = "local\u0000${File(path).canonicalPath}"
 
     override fun writeFile(path: String, content: String, overwrite: Boolean, encoding: Charset) {
         val file = File(path)

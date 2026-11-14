@@ -56,6 +56,18 @@ class TeamRunnerWorkflowTest {
         (this[key] as? JsonArray).orEmpty().map { (it as JsonPrimitive).content }
 
     @Test
+    fun zeroLimitRejectsTeamAndWorkflowInsteadOfCreatingSingleTaskBatches() {
+        val team = team("需求分析团队", "需求分析师")
+        val plans = listOf(
+            TeamRunner.build(team, "goal", enabled, 0),
+            TeamRunner.buildWorkflowLayer(workflow, 1, workflow.teams[0], team, "goal", "", enabled, 0)
+        )
+        plans.forEach { plan ->
+            assertEquals("SUBAGENTS_DISABLED", (plan as TeamRunner.Plan.Rejected).code)
+        }
+    }
+
+    @Test
     fun buildWorkflowLayer_appendsJudgeTaskAfterMembers() {
         val plan = TeamRunner.buildWorkflowLayer(
             workflow = workflow,

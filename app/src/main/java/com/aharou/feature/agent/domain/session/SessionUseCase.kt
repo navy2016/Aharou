@@ -15,7 +15,8 @@ import javax.inject.Singleton
 class SessionUseCase @Inject constructor(
     private val chatSessionDao: ChatSessionDao,
     private val agentMessageDao: AgentMessageDao,
-    private val messageArchiveStore: MessageArchiveStore
+    private val messageArchiveStore: MessageArchiveStore,
+    private val fileVersions: com.aharou.feature.agent.domain.tool.FileVersionRegistry
 ) {
     companion object {
         private const val TAG = "SessionUseCase"
@@ -88,6 +89,7 @@ class SessionUseCase @Inject constructor(
         chatSessionDao.delete(id)
         messageArchiveStore.deleteSession(id)
         GhostModeStore.forget(id)
+        deleted.forEach(fileVersions::clearSession)
         return deleted
     }
 
@@ -97,7 +99,10 @@ class SessionUseCase @Inject constructor(
         if (sessions.isEmpty()) return 0
         sessions.forEach { session -> agentMessageDao.deleteBySession(session.id) }
         chatSessionDao.deleteByWorkspace(workspacePath)
-        sessions.forEach { session -> messageArchiveStore.deleteSession(session.id) }
+        sessions.forEach { session ->
+            messageArchiveStore.deleteSession(session.id)
+            fileVersions.clearSession(session.id)
+        }
         return sessions.size
     }
 

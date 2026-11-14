@@ -238,9 +238,11 @@ class CodeEditorViewModel @Inject constructor(
                                     ?: throw IOException(context.getString(R.string.editor_binary_unsupported))) to null
                             } else {
                                 check(workspaceIdentity.matches(bound.root, bound.identity))
+                                val key = bound.access.resourceKey(request.path)
+                                val fingerprint = sha256Fingerprint(request.content.toByteArray(Charsets.UTF_8))
                                 bound.access.writeFile(request.path, request.content)
-                                SaveResult.Success(request) to
-                                    runCatching { bound.access.fingerprint(request.path) }.getOrNull()
+                                versions.recordExternal(key, fingerprint)
+                                SaveResult.Success(request) to fingerprint
                             }
                         } catch (e: CancellationException) {
                             throw e
@@ -255,7 +257,6 @@ class CodeEditorViewModel @Inject constructor(
                             (loadedStates[key] as? EditorUiState.Success)?.scopeName)
                         loadedFingerprints[key] = result.second
                         if (binding === bound) {
-                            versions.recordExternal(bound.access.toDisplayPath(request.path))
                             markSaved(key, request.content)
                         }
                     }

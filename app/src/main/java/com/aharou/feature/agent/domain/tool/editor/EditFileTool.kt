@@ -23,6 +23,7 @@ import com.aharou.feature.agent.domain.tool.file.runFileOpWithTimeout
 import com.aharou.core.util.FileLogger
 import com.aharou.core.util.LineDiff
 import com.aharou.feature.workspace.domain.FileAccessProvider
+import com.aharou.feature.workspace.domain.sha256Fingerprint
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -229,12 +230,12 @@ class EditFileTool @Inject constructor(
         val access = fileAccess.forWorkspace(context.projectRoot)
         val path = args["path"]?.jsonPrimitive?.contentOrNull
             ?: return ToolResult.Error("路径参数缺失", "MISSING_PATH")
-        return withEditGuards(access, path, context.sessionId) {
+        return withEditGuards(access, path, context.sessionId) { key ->
             // 实时查租约：同 writeFile，grant 要能在本轮内生效。
             performEdit(
                 access, path, args,
                 writeLease.pathsFor(context.sessionId) ?: context.writePaths,
-                context.sessionId, context.projectRoot
+                context.sessionId, context.projectRoot, key
             )
         }
     }
@@ -250,28 +251,22 @@ class EditFileTool @Inject constructor(
         access: FileAccessProvider,
         path: String,
         sessionId: String?,
-        block: suspend () -> ToolResult
+        block: suspend (String) -> ToolResult
     ): ToolResult {
-        val key = access.toDisplayPath(path)
+        val key = runFileOpWithTimeout { access.resourceKey(path) }
+            ?: return ToolResult.Error("解析文件路径超时：$path", "TIMEOUT")
         checkVersion(access, path, key, sessionId)?.let { return it }
 
         return fileLock.withLock(key) {
             checkVersion(access, path, key, sessionId)?.let { return@withLock it }
-            val result = block()
-            // 写成功后把新版本登记下来，使同一会话的连续编辑不被自己判为冲突。用 runCatching 包住：
-            // 写已经落盘，登记失败不能反过来把成功报成失败（最坏后果只是该文件退化成"未登记"的放行语义）。
-            if (result is ToolResult.Success) {
-                recordVersion(access, path, key, sessionId)
-            }
-            result
+            block(key)
         }
     }
 
     /**
      * 版本比对。返回 null 表示可以继续，返回 Error 表示内容已过期、拒绝写入。
      *
-     * [path] 用于访问文件，[key] 用于查登记表——两者必须分开传：key 是给用户看的逻辑路径
-     * （`~/workspace/...`）。
+     * [path] 用于访问与回显，[key] 是后端解析出的资源身份，用于查登记表。
      *
      * **fail-open**：拿不到当前指纹时（远端文件超上限、IO 瞬时失败）放行并记日志。版本校验是
      * **辅助保护**，它自己的失败绝不能阻塞正常编辑——宁可漏判一次过期写，也不能因为算不出指纹就
@@ -285,30 +280,14 @@ class EditFileTool @Inject constructor(
     ): ToolResult? {
         val recorded = versions.get(sessionId, key) ?: return null
         val current = runCatching { runFileOpWithTimeout { access.fingerprint(path) } }
-            .onFailure { FileLogger.w(TAG, "edit_file 无法计算当前指纹，跳过版本校验: $key", it) }
+            .onFailure { FileLogger.w(TAG, "edit_file 无法计算当前指纹，跳过版本校验: $path", it) }
             .getOrNull() ?: return null
         if (recorded == current) return null
-        FileLogger.w(TAG, "edit_file 拒绝过期写: $key（记录版本与当前不一致）")
+        FileLogger.w(TAG, "edit_file 拒绝过期写: $path（记录版本与当前不一致）")
         // 带上冲突来源：模型不用把整文件重读一遍才知道是谁改的、改完多少行。
         val writer = versions.lastWriter(key)
         val currentLines = runCatching { runFileOpWithTimeout { access.readLines(path).count() } }.getOrNull()
-        return ToolResult.Error(staleFileMessage(key, writer, currentLines), STALE_FILE_CODE)
-    }
-
-    /** 写成功后登记新指纹（供本会话后续编辑做基线）。登记失败只记日志，不改变写入结果。 */
-    private suspend fun recordVersion(
-        access: FileAccessProvider,
-        path: String,
-        key: String,
-        sessionId: String?
-    ) {
-        runCatching { runFileOpWithTimeout { access.fingerprint(path) } }
-            .onFailure { FileLogger.w(TAG, "edit_file 写后登记版本失败: $key", it) }
-            .getOrNull()
-            ?.let {
-                versions.record(sessionId, key, it)
-                versions.recordWriter(key, sessionId?.takeIf { id -> id.isNotBlank() } ?: "未知会话")
-            }
+        return ToolResult.Error(staleFileMessage(access.toDisplayPath(path), writer, currentLines), STALE_FILE_CODE)
     }
 
     /** 真正的编辑逻辑：不涉及锁与版本，纯粹按 [args] 完成一次「读-改-写」。 */
@@ -318,7 +297,8 @@ class EditFileTool @Inject constructor(
         args: Map<String, JsonElement>,
         writePaths: Set<String>?,
         sessionId: String?,
-        workspaceRoot: String?
+        workspaceRoot: String?,
+        key: String
     ): ToolResult {
         return try {
             WriteLease.denialReason(writePaths, path, sessionId, workspaceRoot)?.let { reason ->
@@ -371,6 +351,8 @@ class EditFileTool @Inject constructor(
             val hunks = applied.hunks
             val totalReplacements = applied.replacements
 
+            val fingerprint = sha256Fingerprint(content.toByteArray(Charsets.UTF_8))
+            val displayPath = access.toDisplayPath(path)
             val writeFinished = runFileOpWithTimeout { access.writeFile(path, content, overwrite = true) }
             if (writeFinished == null) {
                 FileLogger.w(TAG, "edit_file 写入超时（>${FILE_TOOL_TIMEOUT_MS}ms）: $path")
@@ -380,6 +362,7 @@ class EditFileTool @Inject constructor(
                 )
             }
 
+            versions.recordWrite(sessionId, key, fingerprint, displayPath)
             val addedTotal = hunks.sumOf { it.added }
             val removedTotal = hunks.sumOf { it.removed }
             val hunksJson = JsonArray(hunks.map { h ->

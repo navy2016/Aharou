@@ -56,6 +56,7 @@
 | 删除文件 | `ChatDrawer.kt:1018`、`:1075` → `FileBrowseController.kt:332`；沙盒浏览器 `feature/sandbox/FileBrowserScreen.kt:363` | 部分 | 无专用 delete；只能 `Bash` `rm` | 同上；且 `rm` 走 shell，绕开了 UI 的删除确认 |
 | 复制 / 剪切 / 粘贴 | `ChatDrawer.kt:1024`、`:1028`、`:1035`（粘贴覆盖 `:404`）→ `FileBrowseController.kt:345`、`:350`、`:365` | 部分 | 无专用工具；`Bash` `cp`/`mv` | 同上 |
 | 打开 / 预览文件 | `ChatDrawer.kt`（`onOpenFile`）→ `MainActivity.kt`；沙盒 `FileBrowserScreen.kt` → `FilePreviewScreen.kt` | 有 | `readFile`（`AgentModule.kt:449`）、`viewImage`（`:452`） | 界面支持SVG预览；聊天SVG文字链接打开源码编辑器，支持当前工作区的实际绝对路径；文本打开上限100 MiB，超过20 MiB需确认且不截断内容；工具读取仍有单次输出预算 |
+| 查看已读文件变化提醒 | 会话中的系统通知条 | 有 | 文件工具结果中的 `file_change`，或下一次正常会话开始时注入 | 按实际文件资源定位；只提醒重新读取与核对依赖，不更新他人的读取基线，也不自动唤醒空闲会话 |
 | 分享文件 / 文件夹 | `FileTreeActionSheet.kt` → `FileShareViewModel.kt` → `WorkspaceShareLauncher.kt` | 部分 | `sendFile` 向聊天区交付文件 | 用户可用系统分享面板发给其它应用，文件夹自动ZIP；工具不代替用户选择系统分享目标 |
 | 重新生成最后一轮回复 | 用户 / 助手消息的 `MessageActionsBottomSheet.kt` → `MessageRegenerator.kt` | 无 | 未提供专用工具 | 复用原用户消息与附件、保留旧回答变体；历史轮次不显示入口 |
 
@@ -159,6 +160,7 @@
 
 | 用户能做什么 | 界面入口（file:line） | Agent 有对应工具吗 | 工具名与入口（file:line） | 差距说明 |
 |---|---|---|---|---|
+| 调整子代理并发上限 / 关闭派发 | `SubAgentsSection.kt` → `SubAgentSettingsViewModel.kt` | 有 | `config subagent.max_running`（`ConfigSubAgentFields.kt`） | 范围0–15、默认5；0禁止新建与重新唤醒，不中断当前轮次，保留查看、停止与删除 |
 | 新建会话 | `component/ChatHeaderComponents.kt:115` → `AIChatPanel.kt:1209`（`newSession`） | 无 | 未找到（`task` 派生的是子代理会话，不是用户会话） | **缺口** |
 | 切换会话 | `MainActivity.kt:838`（`selectSession`） | 无 | `sessions` 只有 list/search/read | **缺口** |
 | 重命名会话 | `ChatDrawer.kt:436`、`:508` → `MainActivity.kt:840` | 无 | 未找到 | **缺口** |

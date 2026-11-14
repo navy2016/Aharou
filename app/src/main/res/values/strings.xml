@@ -997,6 +997,7 @@
     <string name="chat_context_usage">上下文已用 %1$d%%</string>
     <string name="chat_bg_command_done">后台命令已完成</string>
     <string name="chat_bg_commands_done">%1$d 个后台任务已完成</string>
+    <string name="chat_notifications_updated">收到 %1$d 条更新通知</string>
     <string name="chat_bg_commands_partial_failed">%1$d 个后台任务结束，%2$d 个失败</string>
     <string name="chat_context_compressed">上下文已压缩</string>
     <string name="chat_compaction_failed">上下文压缩失败</string>
@@ -1746,7 +1747,8 @@
     <!-- Subagent Settings -->
     <string name="settings_subagents">子代理</string>
     <string name="subagent_max_running">并发上限</string>
-    <string name="subagent_max_running_hint">同时运行的子代理数量上限，范围 %1$d~%2$d。名额整个应用共享，不按会话分组。</string>
+    <string name="subagent_max_running_hint">同时运行的子代理数量上限，范围 %1$d~%2$d，名额整个应用共享。设为 0 可关闭新派发和重新唤醒，不中断已运行的轮次。</string>
+    <string name="subagent_concurrency_disabled">0（已关闭）</string>
     <string name="subagent_comm_enabled">允许子代理互相对话</string>
     <string name="subagent_comm_enabled_desc">同一批次的子代理可以互相查看队友、发消息（team / tell）；关闭后它们只能向上汇报，主代理对子代理的收发不受影响。</string>
     <string name="settings_teams">团队预设</string>

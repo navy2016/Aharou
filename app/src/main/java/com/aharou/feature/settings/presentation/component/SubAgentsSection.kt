@@ -447,7 +447,7 @@ private fun MaxRunningGroup(maxRunning: Int, onClick: () -> Unit) {
                 onClick = onClick,
                 trailing = {
                     Text(
-                        text = maxRunning.toString(),
+                        text = if (maxRunning == 0) stringResource(R.string.subagent_concurrency_disabled) else maxRunning.toString(),
                         style = MaterialTheme.typography.bodyLarge,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )

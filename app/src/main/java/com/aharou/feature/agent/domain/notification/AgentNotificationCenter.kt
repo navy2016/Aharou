@@ -6,7 +6,7 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /** 待送通知的来源类型。 */
-enum class AgentNotificationKind { BACKGROUND_TASK, SUBAGENT, AGENT_MESSAGE, MODE_CHANGE, USER_MESSAGE, USER_INTERRUPT }
+enum class AgentNotificationKind { BACKGROUND_TASK, SUBAGENT, AGENT_MESSAGE, MODE_CHANGE, USER_MESSAGE, USER_INTERRUPT, FILE_CHANGE }
 
 /**
  * 异步任务的结束方式。[STOPPED] 与 [FAILED] 必须区分：被用户手动终止不是执行出错，
@@ -65,7 +65,11 @@ class AgentNotificationCenter @Inject constructor() {
     fun enqueue(sessionId: String, item: PendingNotification): Long {
         val seq = seqGenerator.incrementAndGet()
         synchronized(lock) {
-            pending.getOrPut(sessionId) { mutableListOf() }.add(item.copy(seq = seq))
+            val items = pending.getOrPut(sessionId) { mutableListOf() }
+            if (item.kind == AgentNotificationKind.FILE_CHANGE) {
+                items.removeAll { it.kind == AgentNotificationKind.FILE_CHANGE && it.sourceId == item.sourceId }
+            }
+            items.add(item.copy(seq = seq))
         }
         return seq
     }
@@ -73,6 +77,11 @@ class AgentNotificationCenter @Inject constructor() {
     /** 读取该会话当前所有待送通知（不移除）。 */
     fun peek(sessionId: String): List<PendingNotification> = synchronized(lock) {
         pending[sessionId]?.toList() ?: emptyList()
+    }
+
+    fun peekForWakeup(sessionId: String): List<PendingNotification> = synchronized(lock) {
+        pending[sessionId]?.takeIf { items -> items.any { it.kind != AgentNotificationKind.FILE_CHANGE } }
+            ?.toList() ?: emptyList()
     }
 
     /** 确认已送达：按序号移除，peek 之后新入队的条目不受影响。 */
@@ -88,6 +97,22 @@ class AgentNotificationCenter @Inject constructor() {
     /** 原子取走该会话全部待送通知。 */
     fun drain(sessionId: String): List<PendingNotification> = synchronized(lock) {
         pending.remove(sessionId) ?: emptyList()
+    }
+
+    fun clearFileChange(sessionId: String, resourceKey: String) {
+        synchronized(lock) {
+            val items = pending[sessionId] ?: return
+            items.removeAll { it.kind == AgentNotificationKind.FILE_CHANGE && it.sourceId == resourceKey }
+            if (items.isEmpty()) pending.remove(sessionId)
+        }
+    }
+
+    fun clearFileChanges(sessionId: String) {
+        synchronized(lock) {
+            val items = pending[sessionId] ?: return
+            items.removeAll { it.kind == AgentNotificationKind.FILE_CHANGE }
+            if (items.isEmpty()) pending.remove(sessionId)
+        }
     }
 
     fun pendingCount(sessionId: String): Int = synchronized(lock) {

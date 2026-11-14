@@ -998,6 +998,7 @@
     <string name="chat_context_usage">Context %1$d%% used</string>
     <string name="chat_bg_command_done">Background command completed</string>
     <string name="chat_bg_commands_done">%1$d background tasks completed</string>
+    <string name="chat_notifications_updated">%1$d update notifications received</string>
     <string name="chat_bg_commands_partial_failed">%1$d background tasks finished, %2$d failed</string>
     <string name="chat_context_compressed">Context compressed</string>
     <string name="chat_compaction_failed">Context compaction failed</string>
@@ -1747,7 +1748,8 @@
     <!-- Subagent Settings -->
     <string name="settings_subagents">Subagents</string>
     <string name="subagent_max_running">Concurrency limit</string>
-    <string name="subagent_max_running_hint">Max subagents running at the same time, %1$d to %2$d. The quota is shared by the whole app, not per session.</string>
+    <string name="subagent_max_running_hint">Max subagents running at the same time, %1$d to %2$d, shared by the whole app. Set to 0 to disable new launches and reawakening without interrupting running turns.</string>
+    <string name="subagent_concurrency_disabled">0 (disabled)</string>
     <string name="subagent_comm_enabled">Let subagents talk to each other</string>
     <string name="subagent_comm_enabled_desc">Subagents in the same batch can list their teammates and message them (team / tell). When off, they can only report upward; the parent side is unaffected.</string>
     <string name="settings_teams">Team presets</string>

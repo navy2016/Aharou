@@ -19,10 +19,8 @@ private const val TAG = "WorkspaceFileLock"
  *
  * ### 锁键的选取
  *
- * 键必须用 [com.aharou.feature.workspace.domain.FileAccessProvider.toDisplayPath] 的结果
- * （`~/workspace/...` 这类**逻辑**路径），**不能**用物理路径：同一个文件在本地模式是宿主绝对路径、
- * PRoot 下是 `/data/...`、远端 SFTP 下是 `/root/workspace/...`，三者字符串不同，用物理路径会导致锁
- * 形同虚设。逻辑路径在三种后端下对同一文件稳定一致。
+ * 键来自 [com.aharou.feature.workspace.domain.FileAccessProvider.resourceKey]：显示路径在不同
+ * 工作区可能相同，而符号链接的显示路径不同却可能访问同一文件，不能用于判定资源身份。
  *
  * ### 边界（必须知道）
  *
@@ -53,7 +51,7 @@ class WorkspaceFileLock @Inject constructor() {
     /**
      * 在指定逻辑路径的互斥保护下执行 [block]。
      *
-     * @param keys 逻辑路径（[com.aharou.feature.workspace.domain.FileAccessProvider.toDisplayPath] 的结果）。
+     * @param keys 资源身份（[com.aharou.feature.workspace.domain.FileAccessProvider.resourceKey] 的结果）。
      *             null/空白会被忽略，因此调用方可以直接传可能为 null 的路径而不必先判空。
      *             空集合等价于不加锁。
      */

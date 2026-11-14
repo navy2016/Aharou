@@ -44,13 +44,20 @@ class CredentialRequestBridgeTest {
     private val engine = mockk<LinuxContainerEngine>(relaxed = true)
     private val hub = mockk<FileChangeHub>()
     private val events = MutableSharedFlow<FileChangeBatch>()
-    private val bridge = CredentialRequestBridge(context, credentials, engine, hub)
+    private val lifetime = mockk<CredentialRequestLifetime>()
+    private val exited = mutableSetOf<String>()
+    private val bridge = CredentialRequestBridge(context, credentials, engine, hub, lifetime)
     private val directory: File get() = File(temporary.root, "aharou")
 
     @Before
     fun setUp() {
         every { context.filesDir } returns temporary.root
         every { hub.watchAicode() } returns events
+        every { lifetime.isActive(any(), any(), any()) } answers {
+            val file = firstArg<File>()
+            val request = secondArg<CredentialRequestBridge.CredentialRequest>()
+            file.isFile && request.requestId !in exited && thirdArg<Long>() - file.lastModified() <= CredentialRequestLifetime.MAX_AGE_MS
+        }
         mockkObject(FileLogger)
         every { FileLogger.i(any(), any()) } returns Unit
         every { FileLogger.w(any(), any(), any()) } returns Unit
@@ -165,6 +172,63 @@ class CredentialRequestBridgeTest {
         assertFalse(response("first").exists())
         assertEquals("cancel=1\n", response("second").readText())
         verify(exactly = 2) { engine.decPromptInFlight() }
+    }
+
+    @Test
+    fun exitedHelperWithARequestFileIsReclaimedByPolling() = runTest {
+        val first = request("first")
+        bridge.start(backgroundScope)
+        runCurrent()
+        changed(request("second"))
+        exited += "first"
+        assertTrue(first.exists())
+        advanceTimeBy(1000)
+        runCurrent()
+        assertEquals("second", bridge.request.value?.requestId)
+        assertFalse(first.exists())
+        bridge.respond("first", "late", "fixture")
+        runCurrent()
+        assertFalse(response("first").exists())
+        coVerify(exactly = 0) { credentials.save(any()) }
+        verify(exactly = 1) { engine.decPromptInFlight() }
+    }
+
+    @Test
+    fun answerChecksHelperLivenessWithoutWaitingForAPollOrDeleteEvent() = runTest {
+        request("first")
+        bridge.start(backgroundScope)
+        runCurrent()
+        exited += "first"
+        bridge.respond("first", "late", "fixture")
+        runCurrent()
+        assertNull(bridge.request.value)
+        assertFalse(response("first").exists())
+        coVerify(exactly = 0) { credentials.save(any()) }
+        verify(exactly = 1) { engine.decPromptInFlight() }
+    }
+
+    @Test
+    fun requestsThatExpireAfterStartupAreRemovedWithoutRestartingTheBridge() = runTest {
+        val file = request("first")
+        bridge.start(backgroundScope)
+        runCurrent()
+        assertTrue(file.setLastModified(System.currentTimeMillis() - CredentialRequestLifetime.MAX_AGE_MS - 1000))
+        advanceTimeBy(1000)
+        runCurrent()
+        assertNull(bridge.request.value)
+        assertFalse(file.exists())
+        verify(exactly = 1) { engine.decPromptInFlight() }
+    }
+
+    @Test
+    fun requestCarriesProcessGenerationForLivenessChecks() = runTest {
+        request("first").writeText("host=github.com\npid=321\nstart_ticks=456\nboot_id=fixture-boot\n")
+        bridge.start(backgroundScope)
+        runCurrent()
+        val current = requireNotNull(bridge.request.value)
+        assertEquals(321, current.pid)
+        assertEquals(456L, current.startTimeTicks)
+        assertEquals("fixture-boot", current.bootId)
     }
 
     @Test

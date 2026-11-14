@@ -16,6 +16,8 @@ import com.aharou.feature.agent.domain.subagent.SubAgentEventType
 import com.aharou.feature.agent.domain.subagent.SubAgentProfileMatcher
 import com.aharou.feature.agent.domain.subagent.SubAgentResultInspector
 import com.aharou.feature.agent.domain.subagent.SubAgentRunLifecycle
+import com.aharou.feature.agent.domain.subagent.SUBAGENTS_DISABLED_CODE
+import com.aharou.feature.agent.domain.subagent.SUBAGENTS_DISABLED_MESSAGE
 import com.aharou.feature.agent.domain.subagent.SubAgentWriteLease
 import com.aharou.feature.agent.domain.subagent.WriteLease
 import com.aharou.feature.agent.domain.tool.AbstractContextualTool
@@ -123,12 +125,15 @@ class TaskTool @Inject constructor(
         }
     }
 
-    override val description: String get() = "管理子代理：创建、发消息、读取结果、停止、删除、列表、查角色。子代理拥有独立上下文与完整工具能力，可并行工作，最多同时运行 ${eventBus.maxRunning} 个。任务复杂或几个活能并行时默认直接派，不必等用户开口；多个独立子任务应同一轮并发发起多个 create。完成后会收到后台通知，不要轮询。用 send 可反复追加指令或对已完成子代理继续追问；子代理运行中也可能主动发消息。create 选角：优先用 department + agentQuery（部门 + 2~5 个功能关键词，中英文都可）让系统选一个最对口的角色；不确定有哪些角色名时先用 action=\"roles\" 查出来，确知角色名时用 agent 点名。" + SubAgentCommGate.descriptionHint(eventBus.communicationEnabled()) + "子代理最多嵌套 2 层。子代理写到租约外被拦时会来求助，用 action=\"grant\"（id + writePaths）运行期追加写权限即可，不必重派。团队预设（teams/*.md）可一键跑完整流程：task(action=\"team_run\", team=\"<名>\", goal=\"<本次目标>\")，阶段内并行、阶段间串行；先用 action=\"teams\" 看有哪些团队。"
+    override val description: String get() = if (!eventBus.enabled) SUBAGENTS_DISABLED_MESSAGE else "管理子代理：创建、发消息、读取结果、停止、删除、列表、查角色。子代理拥有独立上下文与完整工具能力，可并行工作，最多同时运行 ${eventBus.maxRunning} 个。任务复杂或几个活能并行时默认直接派，不必等用户开口；多个独立子任务应同一轮并发发起多个 create。完成后会收到后台通知，不要轮询。用 send 可反复追加指令或对已完成子代理继续追问；子代理运行中也可能主动发消息。create 选角：优先用 department + agentQuery（部门 + 2~5 个功能关键词，中英文都可）让系统选一个最对口的角色；不确定有哪些角色名时先用 action=\"roles\" 查出来，确知角色名时用 agent 点名。" + SubAgentCommGate.descriptionHint(eventBus.communicationEnabled()) + "子代理最多嵌套 2 层。子代理写到租约外被拦时会来求助，用 action=\"grant\"（id + writePaths）运行期追加写权限即可，不必重派。团队预设（teams/*.md）可一键跑完整流程：task(action=\"team_run\", team=\"<名>\", goal=\"<本次目标>\")，阶段内并行、阶段间串行；先用 action=\"teams\" 看有哪些团队。"
 
     override val parameters: Map<String, ToolParameter> = TaskToolSpec.parameters
 
     override suspend fun executeWithContext(args: Map<String, JsonElement>, context: AgentContext): ToolResult {
         val action = (args["action"] as? JsonPrimitive)?.content?.trim()?.lowercase() ?: "create"
+        if (!eventBus.enabled && action in setOf("create", "pipeline", "team_run")) {
+            return ToolResult.Error(SUBAGENTS_DISABLED_MESSAGE, SUBAGENTS_DISABLED_CODE)
+        }
         return when (action) {
             "create" -> createSubagent(args, context)
             "pipeline" -> runPipeline(args, context)
@@ -237,6 +242,7 @@ class TaskTool @Inject constructor(
         val report = mutableListOf<String>()
 
         for ((layerIndex, layer) in layers.withIndex()) {
+            if (!eventBus.enabled) return ToolResult.Error(SUBAGENTS_DISABLED_MESSAGE, SUBAGENTS_DISABLED_CODE)
             overlappingPair(layer)?.let { (a, b) ->
                 return ToolResult.Error(
                     WriteLease.layerConflictMessage(a.id, a.writePaths, b.id, b.writePaths, context.projectRoot),
@@ -273,6 +279,7 @@ class TaskTool @Inject constructor(
                 }
                 val created = createSubagent(createArgs, context)
                 if (created is ToolResult.Error) {
+                    if (created.code == SUBAGENTS_DISABLED_CODE) return created
                     outputs[task.id] = ""
                     report += "- ${task.id}：派发失败（${created.code}）${created.message}"
                     continue
@@ -436,6 +443,7 @@ class TaskTool @Inject constructor(
 
     /** 创建子代理并启动执行。 */
     private suspend fun createSubagent(args: Map<String, JsonElement>, context: AgentContext): ToolResult {
+        if (!eventBus.enabled) return ToolResult.Error(SUBAGENTS_DISABLED_MESSAGE, SUBAGENTS_DISABLED_CODE)
         val parentSessionId = context.sessionId ?: return ToolResult.Error("缺少会话上下文", "NO_SESSION")
         val parentSession = sessionUseCase.getSessionById(parentSessionId)
             ?: return ToolResult.Error("当前会话不存在", "SESSION_NOT_FOUND")
@@ -513,6 +521,7 @@ class TaskTool @Inject constructor(
         // 并行写隔离：同一时刻两个子代理写同一处会互相踩，冲突的直接拒绝，由主代理串行派发。
         val writePaths = parseWritePaths(args)
         val subSession = createMutex.withLock {
+            if (!eventBus.enabled) return ToolResult.Error(SUBAGENTS_DISABLED_MESSAGE, SUBAGENTS_DISABLED_CODE)
             if (writePaths != null && writePaths.isNotEmpty()) {
                 subAgentWriteLease.conflictingSession(writePaths, eventBus.activeSubSessionIds.value)?.let { conflictId ->
                     return conflictError(conflictId, writePaths, WriteLease.NEXT_CREATE, context.projectRoot)
@@ -584,6 +593,8 @@ class TaskTool @Inject constructor(
         if (sub.parentId != parentSessionId) {
             return ToolResult.Error("只能向当前会话派生的子代理发消息", "NOT_YOUR_SUBAGENT")
         }
+        val running = eventBus.currentRun(subSessionId)?.let(eventBus::isCurrentRun) == true
+        if (!eventBus.enabled && !running) return ToolResult.Error(SUBAGENTS_DISABLED_MESSAGE, SUBAGENTS_DISABLED_CODE)
 
         eventBus.emit(
             SubAgentEvent(
@@ -759,6 +770,7 @@ class TaskTool @Inject constructor(
                 put("count", subs.size)
                 put("runningCount", activeIds.size)
                 put("maxRunning", eventBus.maxRunning)
+                put("enabled", eventBus.enabled)
             }
         )
     }

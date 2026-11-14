@@ -1869,7 +1869,7 @@ class AIAgentViewModel @Inject constructor(
     private fun flushPendingNotifications(sessionId: String) {
         // 会话正忙或正在停止时起不了新一轮，这时消费队列等于把通知吞掉；留给下一次收尾。
         if (sessionId in stoppingSessions || sessionJobs[sessionId]?.isCompleted == false) return
-        val items = agentNotificationCenter.peek(sessionId)
+        val items = agentNotificationCenter.peekForWakeup(sessionId)
         if (items.isEmpty()) return
         FileLogger.d(TAG, "flushPendingNotifications: sid=$sessionId items=${items.size} state=${_agentStates.value[sessionId]}")
         viewModelScope.launch {

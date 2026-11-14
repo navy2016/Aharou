@@ -22,6 +22,9 @@ fun interface MaxRunningSource {
     fun maxRunning(): Int
 }
 
+const val SUBAGENTS_DISABLED_CODE = "SUBAGENTS_DISABLED"
+const val SUBAGENTS_DISABLED_MESSAGE = "子代理功能已关闭（并发上限为 0），不能新建或重新唤醒子代理。已有任务可查看、停止和删除；只有用户要求重新开启后才调整上限。"
+
 /**
  * 子代理通信总开关的读取口。
  *
@@ -87,7 +90,7 @@ class SubAgentSettings @Inject constructor(
         prefs.getBoolean(KEY_COMMUNICATION_ENABLED, true)
 
     companion object {
-        const val MIN_RUNNING = 1
+        const val MIN_RUNNING = 0
         const val MAX_RUNNING = 15
 
         private const val PREFS = "aharou_subagent_prefs"

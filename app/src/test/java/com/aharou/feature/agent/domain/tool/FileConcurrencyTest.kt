@@ -9,6 +9,8 @@ import com.aharou.feature.agent.domain.tool.file.ReadFileTool
 import com.aharou.feature.agent.domain.tool.file.WriteFileTool
 import com.aharou.feature.workspace.domain.FileAccessProvider
 import com.aharou.feature.workspace.domain.sha256Fingerprint
+import com.aharou.feature.workspace.domain.readLinesAndFingerprint
+import com.aharou.feature.agent.domain.notification.AgentNotificationCenter
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkObject
@@ -29,7 +31,8 @@ import org.junit.Test
 class FileConcurrencyTest {
     private val path = "~/workspace/file.kt"
     private val files = mockk<FileAccessProvider>(relaxed = true)
-    private val versions = FileVersionRegistry()
+    private val notifications = AgentNotificationCenter()
+    private val versions = FileVersionRegistry(notifications)
     private val locks = WorkspaceFileLock()
     private val inbox = mockk<SharedInboxEvents>(relaxed = true)
     private val leases = SubAgentWriteLease()
@@ -42,6 +45,11 @@ class FileConcurrencyTest {
     @Before
     fun setUp() {
         every { files.forWorkspace("/project") } returns files
+        every { files.forStrictRead() } returns files
+        every { files.resourceKey(path) } returns path
+        every { files.readLinesWithFingerprint(path, any()) } answers {
+            readLinesAndFingerprint(content.byteInputStream(), secondArg())
+        }
         every { files.toDisplayPath(path) } returns path
         every { files.exists(path) } returns true
         every { files.readLines(path) } answers { content.lineSequence() }
@@ -75,7 +83,7 @@ class FileConcurrencyTest {
             val read = reader.executeWithContext(readArgs(), context)
             assertTrue(read.toString(), read is ToolResult.Success)
             content = "base\nuser change"
-            versions.recordExternal(path)
+            versions.recordExternal(path, sha256Fingerprint(content.toByteArray()))
             val write = writer.executeWithContext(writeArgs("old overwrite"), context)
             val edit = editor.executeWithContext(editArgs("base", "outdated"), context)
             assertEquals(STALE_FILE_CODE, (write as ToolResult.Error).code)
@@ -94,7 +102,7 @@ class FileConcurrencyTest {
             assertTrue(read.toString(), read is ToolResult.Success)
             assertTrue(otherRead.toString(), otherRead is ToolResult.Success)
             content = "base\nuser change"
-            versions.recordExternal(path)
+            versions.recordExternal(path, sha256Fingerprint(content.toByteArray()))
             val reread = reader.executeWithContext(readArgs(), context)
             assertTrue(reread.toString(), reread is ToolResult.Success)
             val edited = editor.executeWithContext(editArgs("base", "updated"), context)
@@ -121,10 +129,52 @@ class FileConcurrencyTest {
     }
 
     @Test
+    fun readKeepsItsSnapshotWhenAnotherWriterReplacesTheFileBeforeRegistration() = runTest {
+        withContext(Dispatchers.IO) {
+            every { files.readLinesWithFingerprint(path, any()) } answers {
+                val fingerprint = readLinesAndFingerprint(content.byteInputStream(), secondArg())
+                content = "external"
+                versions.recordExternal(path, sha256Fingerprint(content.toByteArray()))
+                fingerprint
+            }
+            val read = reader.executeWithContext(readArgs(), context)
+            assertTrue(read.toString(), read is ToolResult.Success)
+            assertEquals(sha256Fingerprint("base".toByteArray()), versions.get("session", path))
+            assertEquals(1, notifications.pendingCount("session"))
+            val write = writer.executeWithContext(writeArgs("stale overwrite"), context)
+            assertEquals(STALE_FILE_CODE, (write as ToolResult.Error).code)
+            assertEquals("external", content)
+        }
+    }
+
+    @Test
+    fun writeRegistersItsSubmittedBytesRatherThanALaterExternalVersion() = runTest {
+        withContext(Dispatchers.IO) {
+            assertTrue(reader.executeWithContext(readArgs(), context) is ToolResult.Success)
+            every { files.writeFile(path, any(), any(), any()) } answers { content = "external" }
+            assertTrue(writer.executeWithContext(writeArgs("submitted"), context) is ToolResult.Success)
+            assertEquals(sha256Fingerprint("submitted".toByteArray()), versions.get("session", path))
+            val edit = editor.executeWithContext(editArgs("external", "old rewrite"), context)
+            assertEquals(STALE_FILE_CODE, (edit as ToolResult.Error).code)
+            assertEquals("external", content)
+        }
+    }
+
+    @Test
+    fun failedSnapshotDoesNotReplaceAnExistingBaseline() = runTest {
+        withContext(Dispatchers.IO) {
+            versions.record("session", path, "old")
+            every { files.readLinesWithFingerprint(path, any()) } throws java.io.IOException("fixture")
+            assertTrue(reader.executeWithContext(readArgs(), context) is ToolResult.Error)
+            assertEquals("old", versions.get("session", path))
+        }
+    }
+
+    @Test
     fun externalWriterDoesNotCreateAnUnreadSessionBaseline() = runTest {
         withContext(Dispatchers.IO) {
             versions.record("other", "other-path", "other-version")
-            versions.recordExternal(path)
+            versions.recordExternal(path, sha256Fingerprint(content.toByteArray()))
             val written = writer.executeWithContext(writeArgs("new content"), context)
             assertTrue(written.toString(), written is ToolResult.Success)
             assertEquals("new content", content)

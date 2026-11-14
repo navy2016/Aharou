@@ -107,6 +107,8 @@ class SubAgentEventBus @Inject constructor(
     /** 当前并发上限，读用户配置（默认 [DEFAULT_MAX_RUNNING]）。整个应用共享，不按父会话分组。 */
     val maxRunning: Int get() = maxRunningSource.maxRunning()
 
+    val enabled: Boolean get() = maxRunning > 0
+
     /** 是否已达并发上限。 */
     val isFull: Boolean get() = activeCount >= maxRunning
 
@@ -161,6 +163,7 @@ class SubAgentEventBus @Inject constructor(
     fun beginRun(subSessionId: String, parentSessionId: String, version: Long, expectedRunId: String? = null): SubAgentRun? = synchronized(activeLock) {
         if (expectedRunId != null && reservations[subSessionId]?.runId != expectedRunId) return@synchronized null
         if (subSessionId in deletedSessions || runs.containsKey(subSessionId)) return@synchronized null
+        if (!enabled) throw SubAgentRunRejectedException(SUBAGENTS_DISABLED_MESSAGE, SUBAGENTS_DISABLED_CODE)
         if (subSessionId !in _activeSubSessionIds.value && isFull) throw SubAgentRunRejectedException(
             "子代理已达上限（最多 $maxRunning 个同时运行），请先等待其中某个完成或用 stop 停止后再创建",
             "MAX_SUBAGENTS_REACHED",

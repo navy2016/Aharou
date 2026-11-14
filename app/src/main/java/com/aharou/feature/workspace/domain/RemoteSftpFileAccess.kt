@@ -172,6 +172,26 @@ class RemoteSftpFileAccess private constructor(
         }
     }
 
+    override fun readLinesWithFingerprint(path: String, consumeLine: (String) -> Boolean): String? = withSftp { sftp ->
+        val remote = toRemotePath(path)
+        val attrs = sftp.statExistence(remote) ?: throw NoSuchFileException(remote)
+        if (attrs.type == FileMode.Type.DIRECTORY) throw IOException("是目录，无法按文件读取: $remote")
+        readLinesAndFingerprint(RemoteFileInputStream(sftp.open(remote)), consumeLine)
+    }
+
+    override fun resourceKey(path: String): String = withSftp { sftp ->
+        val config = boundConfig ?: connection.config ?: throw IOException("SSH 未连接")
+        val remote = toRemotePath(path)
+        var parent = remote
+        val suffix = ArrayDeque<String>()
+        while (sftp.statExistence(parent) == null && parent != "/") {
+            suffix.addFirst(parent.substringAfterLast('/'))
+            parent = parent.substringBeforeLast('/').ifEmpty { "/" }
+        }
+        val resolved = (listOf(sftp.canonicalize(parent).trimEnd('/')) + suffix).joinToString("/").ifEmpty { "/" }
+        listOf("ssh", config.host.lowercase(), config.port.toString(), config.username, resolved).joinToString("\u0000")
+    }
+
     override fun writeFile(path: String, content: String, overwrite: Boolean, encoding: Charset) =
         writeBytes(path, content.toByteArray(encoding), overwrite)
 

@@ -20,6 +20,8 @@ import com.aharou.feature.agent.domain.subagent.AgentDefinitionRepository
 import com.aharou.feature.agent.domain.subagent.AgentTeamRepository
 import com.aharou.feature.agent.domain.subagent.InjectPart
 import com.aharou.feature.agent.domain.subagent.SubAgentProfileMatcher
+import com.aharou.feature.agent.domain.subagent.MaxRunningSource
+import com.aharou.feature.agent.domain.subagent.SUBAGENTS_DISABLED_MESSAGE
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
@@ -54,6 +56,7 @@ class SystemPromptProvider @Inject constructor(
     private val ruleRepository: RuleRepository,
     private val chatSessionDao: ChatSessionDao,
     private val sharedInbox: SharedInbox,
+    private val maxRunningSource: MaxRunningSource,
     private val containerProfileResolver: com.aharou.feature.agent.domain.container.ContainerProfileResolver, private val projectIndex: ProjectIndex
 ) {
     // 抽象独立的 Source
@@ -113,6 +116,7 @@ class SystemPromptProvider @Inject constructor(
         private val cachedByKey = ConcurrentHashMap<SourceCacheKey, String>()
 
         override fun build(ctx: AgentContext): String? {
+            if (maxRunningSource.maxRunning() == 0) return SUBAGENTS_DISABLED_MESSAGE
             val key = SourceCacheKey(ctx.sessionId, ctx.projectRoot)
             val cached = cachedByKey[key]
             if (cached != null) return cached.ifEmpty { null }
@@ -150,6 +154,7 @@ class SystemPromptProvider @Inject constructor(
         private val cachedByKey = ConcurrentHashMap<SourceCacheKey, String>()
 
         override fun build(ctx: AgentContext): String? {
+            if (maxRunningSource.maxRunning() == 0) return null
             val key = SourceCacheKey(ctx.sessionId, ctx.projectRoot)
             val cached = cachedByKey[key]
             if (cached != null) return cached.ifEmpty { null }

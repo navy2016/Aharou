@@ -48,7 +48,7 @@ class CodeEditorViewModelTest {
     private val first = mockk<FileAccessProvider>(relaxed = true)
     private val second = mockk<FileAccessProvider>(relaxed = true)
     private val identity = mockk<EditorWorkspaceIdentity>(relaxed = true)
-    private val versions = FileVersionRegistry()
+    private val versions = FileVersionRegistry(com.aharou.feature.agent.domain.notification.AgentNotificationCenter())
     private val settings = mockk<EditorSettingsRepository>()
     private lateinit var model: CodeEditorViewModel
 
@@ -62,6 +62,8 @@ class CodeEditorViewModelTest {
         every { first.fingerprint(any()) } returns "first"
         every { second.fingerprint(any()) } returns "second"
         every { first.toDisplayPath(any()) } answers { arg(0) }
+        every { first.resourceKey(any()) } answers { arg(0) }
+        every { second.resourceKey(any()) } answers { arg(0) }
         every { second.toDisplayPath(any()) } answers { arg(0) }
         every { identity.matches(any(), any()) } returns true
         every { settings.settingsFlow } returns MutableStateFlow(EditorSettings())

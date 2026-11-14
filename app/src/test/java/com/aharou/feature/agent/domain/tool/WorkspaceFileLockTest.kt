@@ -7,6 +7,11 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertSame
 import org.junit.Assert.fail
@@ -130,6 +135,34 @@ class WorkspaceFileLockTest {
         }
         assertEquals(0, locks.trackedKeyCount())
         assertEquals("ok", locks.withLock(listOf("b", "a")) { "ok" })
+    }
+
+    @Test
+    fun releasingAndReacquiringOnMultipleThreadsNeverCreatesTwoHolders() = runBlocking {
+        val inside = AtomicInteger()
+        val entered = AtomicInteger()
+        val start = CompletableDeferred<Unit>()
+        Executors.newFixedThreadPool(4).asCoroutineDispatcher().use { dispatcher ->
+            withTimeout(10_000) {
+                val jobs = List(4) {
+                    launch(dispatcher) {
+                        start.await()
+                        repeat(500) {
+                            locks.withLock("path") {
+                                assertEquals(1, inside.incrementAndGet())
+                                try { entered.incrementAndGet(); Thread.yield() }
+                                finally { inside.decrementAndGet() }
+                            }
+                        }
+                    }
+                }
+                start.complete(Unit)
+                jobs.joinAll()
+            }
+        }
+        assertEquals(2000, entered.get())
+        assertEquals(0, inside.get())
+        assertEquals(0, locks.trackedKeyCount())
     }
 
     @Test

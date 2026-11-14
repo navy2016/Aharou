@@ -57,6 +57,21 @@ class AgentNotificationFormatterTest {
     )
 
     @Test
+    fun fileChangeUsesDisplayPathAndDoesNotExposeItsInternalResourceKey() {
+        val change = PendingNotification(AgentNotificationKind.FILE_CHANGE, "ssh\u0000private-resource", "~/workspace/<A>.kt",
+            NotificationOutcome.COMPLETED, detail = "read again")
+        val text = AgentNotificationFormatter.buildMessage(listOf(change))
+        assertTrue(text.contains("<file-change>"))
+        assertTrue(text.contains("<status>changed</status>"))
+        assertTrue(text.contains("&lt;A&gt;.kt"))
+        assertFalse(text.contains("private-resource"))
+        val json = AgentNotificationFormatter.buildJsonArray(listOf(change)).single() as JsonObject
+        assertEquals(JsonPrimitive("file_change"), json["kind"])
+        assertEquals(JsonPrimitive("~/workspace/<A>.kt"), json["path"])
+        assertFalse(json.toString().contains("private-resource"))
+    }
+
+    @Test
     fun message_singleBackgroundTask_hasFenceAndFields() {
         val text = AgentNotificationFormatter.buildMessage(listOf(backgroundTask))
 

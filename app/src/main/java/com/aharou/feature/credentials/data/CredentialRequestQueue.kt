@@ -10,6 +10,7 @@ internal class CredentialRequestQueue {
 
     val current: CredentialRequest? get() = pending.values.firstOrNull()
     val requestIds: Set<String> get() = pending.keys.toSet()
+    val requests: List<CredentialRequest> get() = pending.values.toList()
 
     fun enqueue(request: CredentialRequest): Boolean {
         if (request.requestId in pending || request.requestId in completed) return false
