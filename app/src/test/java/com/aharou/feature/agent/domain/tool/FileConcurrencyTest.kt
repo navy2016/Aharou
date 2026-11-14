@@ -14,7 +14,9 @@ import io.mockk.mockk
 import io.mockk.mockkObject
 import io.mockk.unmockkObject
 import io.mockk.verify
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -66,48 +68,66 @@ class FileConcurrencyTest {
         ))))
     )
 
+    // 文件工具使用真实 IO；让超时也使用真实时钟，避免虚拟时钟在 IO 返回前推进到超时。
     @Test
     fun userWriteAfterReadIsRejectedByBothFileTools() = runTest {
-        assertTrue(reader.executeWithContext(readArgs(), context) is ToolResult.Success)
-        content = "base\nuser change"
-        versions.recordExternal(path)
-        val write = writer.executeWithContext(writeArgs("old overwrite"), context)
-        val edit = editor.executeWithContext(editArgs("base", "outdated"), context)
-        assertEquals(STALE_FILE_CODE, (write as ToolResult.Error).code)
-        assertEquals(STALE_FILE_CODE, (edit as ToolResult.Error).code)
-        assertEquals("base\nuser change", content)
-        verify(exactly = 0) { files.writeFile(any(), any(), any(), any()) }
+        withContext(Dispatchers.IO) {
+            val read = reader.executeWithContext(readArgs(), context)
+            assertTrue(read.toString(), read is ToolResult.Success)
+            content = "base\nuser change"
+            versions.recordExternal(path)
+            val write = writer.executeWithContext(writeArgs("old overwrite"), context)
+            val edit = editor.executeWithContext(editArgs("base", "outdated"), context)
+            assertEquals(STALE_FILE_CODE, (write as ToolResult.Error).code)
+            assertEquals(STALE_FILE_CODE, (edit as ToolResult.Error).code)
+            assertEquals("base\nuser change", content)
+            verify(exactly = 0) { files.writeFile(any(), any(), any(), any()) }
+        }
     }
 
     @Test
     fun rereadAllowsEditsAndKeepsOtherSessionsStale() = runTest {
-        val other = context.copy(sessionId = "other")
-        reader.executeWithContext(readArgs(), context)
-        reader.executeWithContext(readArgs(), other)
-        content = "base\nuser change"
-        versions.recordExternal(path)
-        assertTrue(reader.executeWithContext(readArgs(), context) is ToolResult.Success)
-        assertTrue(editor.executeWithContext(editArgs("base", "updated"), context) is ToolResult.Success)
-        assertEquals("updated\nuser change", content)
-        val stale = writer.executeWithContext(writeArgs("other overwrite"), other)
-        assertEquals(STALE_FILE_CODE, (stale as ToolResult.Error).code)
-        assertEquals("updated\nuser change", content)
+        withContext(Dispatchers.IO) {
+            val other = context.copy(sessionId = "other")
+            val read = reader.executeWithContext(readArgs(), context)
+            val otherRead = reader.executeWithContext(readArgs(), other)
+            assertTrue(read.toString(), read is ToolResult.Success)
+            assertTrue(otherRead.toString(), otherRead is ToolResult.Success)
+            content = "base\nuser change"
+            versions.recordExternal(path)
+            val reread = reader.executeWithContext(readArgs(), context)
+            assertTrue(reread.toString(), reread is ToolResult.Success)
+            val edited = editor.executeWithContext(editArgs("base", "updated"), context)
+            assertTrue(edited.toString(), edited is ToolResult.Success)
+            assertEquals("updated\nuser change", content)
+            val stale = writer.executeWithContext(writeArgs("other overwrite"), other)
+            assertEquals(STALE_FILE_CODE, (stale as ToolResult.Error).code)
+            assertEquals("updated\nuser change", content)
+        }
     }
 
     @Test
     fun successfulWritesRefreshTheirOwnBaselineForFollowingEdits() = runTest {
-        reader.executeWithContext(readArgs(), context)
-        assertTrue(writer.executeWithContext(writeArgs("first"), context) is ToolResult.Success)
-        assertTrue(editor.executeWithContext(editArgs("first", "second"), context) is ToolResult.Success)
-        assertEquals("second", content)
-        assertEquals(sha256Fingerprint(content.toByteArray()), versions.get("session", path))
+        withContext(Dispatchers.IO) {
+            val read = reader.executeWithContext(readArgs(), context)
+            assertTrue(read.toString(), read is ToolResult.Success)
+            val written = writer.executeWithContext(writeArgs("first"), context)
+            assertTrue(written.toString(), written is ToolResult.Success)
+            val edited = editor.executeWithContext(editArgs("first", "second"), context)
+            assertTrue(edited.toString(), edited is ToolResult.Success)
+            assertEquals("second", content)
+            assertEquals(sha256Fingerprint(content.toByteArray()), versions.get("session", path))
+        }
     }
 
     @Test
     fun externalWriterDoesNotCreateAnUnreadSessionBaseline() = runTest {
-        versions.record("other", "other-path", "other-version")
-        versions.recordExternal(path)
-        assertTrue(writer.executeWithContext(writeArgs("new content"), context) is ToolResult.Success)
-        assertEquals("new content", content)
+        withContext(Dispatchers.IO) {
+            versions.record("other", "other-path", "other-version")
+            versions.recordExternal(path)
+            val written = writer.executeWithContext(writeArgs("new content"), context)
+            assertTrue(written.toString(), written is ToolResult.Success)
+            assertEquals("new content", content)
+        }
     }
 }
