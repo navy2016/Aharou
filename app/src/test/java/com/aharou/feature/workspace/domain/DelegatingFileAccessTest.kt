@@ -16,7 +16,9 @@ import org.junit.Test
 
 class DelegatingFileAccessTest {
     private val mode = ExecutionModeHolder()
-    private val resolver = mockk<ContainerProfileResolver>()
+    private val resolver = mockk<ContainerProfileResolver> {
+        every { executionFor(any()) } returns null
+    }
     private val local = mockk<LocalFileAccess>()
     private val remote = mockk<RemoteSftpFileAccess>()
 
