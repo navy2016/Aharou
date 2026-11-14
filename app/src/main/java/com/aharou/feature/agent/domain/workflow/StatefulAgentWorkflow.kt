@@ -31,7 +31,6 @@ import com.aharou.feature.agent.domain.ocr.TesseractOcrEngine
 import com.aharou.feature.agent.domain.subagent.AgentDefinition
 import com.aharou.feature.agent.domain.session.SessionUseCase
 import com.aharou.feature.agent.domain.session.MessagePersistenceUseCase
-import com.aharou.feature.agent.domain.checkpoint.CheckpointManager
 import com.aharou.feature.agent.domain.permission.PermissionChoice
 import com.aharou.feature.agent.domain.permission.ToolPermissionPolicyEngine
 import com.aharou.feature.agent.domain.receipt.ToolCallReceiptRepository
@@ -134,7 +133,6 @@ class StatefulAgentWorkflow @Inject constructor(
     private val providerRequestSettings: com.aharou.feature.agent.domain.provider.ProviderRequestSettings,
     private val sessionUseCase: SessionUseCase,
     private val messagePersistenceUseCase: MessagePersistenceUseCase,
-    private val checkpointManager: CheckpointManager,
     private val llmCallRecordDao: LlmCallRecordDao,
     private val keyRotator: ProviderKeyRotator,
     private val generatedImagePersister: GeneratedImagePersister,
@@ -980,18 +978,6 @@ class StatefulAgentWorkflow @Inject constructor(
     ): AgentContext {
         val batchId = telemetry.toolBatchStart(toolCalls)
         var currentContext = initialContext
-        // 并行执行本批已批准的工具。先统一记录 checkpoint（editFile/writeFile 修改前快照），
-        // 再并行执行；mode 切换检查在结果收集后于主协程串行处理（planApproval 单例）。
-        toolCalls.forEach { toolCall ->
-            if (toolCall.name == "editFile" || toolCall.name == "writeFile") {
-                (toolCall.arguments["path"] as? JsonPrimitive)?.contentOrNull?.let { path ->
-                    currentContext.sessionId?.let { sid ->
-                        checkpointManager.beforeFileModified(sid, path)
-                    }
-                }
-            }
-        }
-
         // 批内去重：同一次响应里的同名同参调用只执行第一次，重复项不执行、只补一条说明；
         // 仍按原顺序返回（tool 消息条数须与 assistant(toolCalls) 对齐，否则 API 报 400）。
         val seenSignatures = HashSet<String>()
@@ -1038,12 +1024,6 @@ class StatefulAgentWorkflow @Inject constructor(
                 ?: ToolRunResult(toolError(toolCall, "工具未执行", "TOOL_NOT_EXECUTED"), true)
             var rawResult = runResult.raw
             var isError = runResult.isError
-            // 写入成功后记录内容摘要，供回退时判断文件是否被检查点之外的操作改过
-            if (!isError && (toolCall.name == "editFile" || toolCall.name == "writeFile")) {
-                (toolCall.arguments["path"] as? JsonPrimitive)?.contentOrNull?.let { path ->
-                    currentContext.sessionId?.let { sid -> checkpointManager.afterFileModified(sid, path) }
-                }
-            }
             val (newCtx, updated) = checkAndUpdateMode(toolCall, isError, currentContext)
             if (updated) {
                 val reason = (toolCall.arguments["reason"] as? JsonPrimitive)?.content?.trim()

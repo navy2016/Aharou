@@ -1,6 +1,7 @@
 package com.aharou.feature.agent.domain.container
 
 import com.aharou.feature.settings.data.repository.ExecutionMode
+import com.aharou.feature.agent.domain.execution.ExecutionBinding
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 import javax.inject.Inject
@@ -25,8 +26,8 @@ class DelegatingCommandEngine @Inject constructor(
 ) : CommandEngine {
 
     /** 按本次执行的工作区选引擎。 */
-    private fun delegate(projectPath: String?): CommandEngine =
-        if (profileResolver.forWorkspace(projectPath).mode == ExecutionMode.REMOTE_SSH) remoteEngine
+    private fun delegate(projectPath: String?, execution: ExecutionBinding?): CommandEngine =
+        if ((execution?.let(profileResolver::forExecution) ?: profileResolver.forWorkspace(projectPath)).mode == ExecutionMode.REMOTE_SSH) remoteEngine
         else localEngine
 
     /** 无工作区上下文时按全局默认容器选引擎。 */
@@ -40,32 +41,32 @@ class DelegatingCommandEngine @Inject constructor(
     override fun runCommandStream(
         command: String,
         projectPath: String?,
-        timeoutMs: Long
-    ): Flow<CommandEvent> = delegate(projectPath).runCommandStream(command, projectPath, timeoutMs)
+        timeoutMs: Long, execution: ExecutionBinding?
+    ): Flow<CommandEvent> = delegate(projectPath, execution).runCommandStream(command, projectPath, timeoutMs, execution ?: profileResolver.executionFor(projectPath))
 
     override suspend fun runCommandSync(
         command: String,
         projectPath: String?,
-        timeoutMs: Long
-    ): String = delegate(projectPath).runCommandSync(command, projectPath, timeoutMs)
+        timeoutMs: Long, execution: ExecutionBinding?
+    ): String = delegate(projectPath, execution).runCommandSync(command, projectPath, timeoutMs, execution ?: profileResolver.executionFor(projectPath))
 
     override suspend fun runCommandSyncWithExit(
         command: String,
         projectPath: String?,
-        timeoutMs: Long
-    ): CommandResult = delegate(projectPath).runCommandSyncWithExit(command, projectPath, timeoutMs)
+        timeoutMs: Long, execution: ExecutionBinding?
+    ): CommandResult = delegate(projectPath, execution).runCommandSyncWithExit(command, projectPath, timeoutMs, execution ?: profileResolver.executionFor(projectPath))
 
     override suspend fun runCommandSyncUnbounded(
         command: String,
         projectPath: String?,
-        timeoutMs: Long
-    ): CommandResult = delegate(projectPath).runCommandSyncUnbounded(command, projectPath, timeoutMs)
+        timeoutMs: Long, execution: ExecutionBinding?
+    ): CommandResult = delegate(projectPath, execution).runCommandSyncUnbounded(command, projectPath, timeoutMs, execution ?: profileResolver.executionFor(projectPath))
 
     override suspend fun runCommandSyncIfReady(
         command: String,
         projectPath: String?,
-        timeoutMs: Long
-    ): CommandResult? = delegate(projectPath).runCommandSyncIfReady(command, projectPath, timeoutMs)
+        timeoutMs: Long, execution: ExecutionBinding?
+    ): CommandResult? = delegate(projectPath, execution).runCommandSyncIfReady(command, projectPath, timeoutMs, execution ?: profileResolver.executionFor(projectPath))
 
     override fun isContainerInstalled(): Boolean = delegateByDefault().isContainerInstalled()
 

@@ -51,6 +51,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.jsonObject
 
 /**
@@ -176,6 +177,11 @@ internal data class ParsedSubAgentDispatch(
     val sessionId: String?,
     val agentName: String?,
     val taskText: String,
+    val isolation: String? = null,
+    val executionRoot: String? = null,
+    val branch: String? = null,
+    val baseCommit: String? = null,
+    val parentDirty: Boolean = false
 )
 
 /** 卡片里最多逐条列几个改动文件，其余只报数量（绝对路径很占版面）。 */
@@ -227,7 +233,12 @@ internal fun parseSubAgentDispatch(argsJson: String?, resultJson: String?): Pars
     return ParsedSubAgentDispatch(
         sessionId = sessionId,
         agentName = data.stringOrNull("agent")?.takeIf { it.isNotBlank() } ?: argAgent,
-        taskText = taskText
+        taskText = taskText,
+        isolation = data.stringOrNull("isolation"),
+        executionRoot = data.stringOrNull("executionRoot"),
+        branch = data.stringOrNull("branch"),
+        baseCommit = data.stringOrNull("baseCommit"),
+        parentDirty = (data["parentDirty"] as? JsonPrimitive)?.booleanOrNull == true
     )
 }
 
@@ -385,6 +396,16 @@ internal fun SubAgentDispatchCard(
             maxLines = 2,
             overflow = TextOverflow.Ellipsis
         )
+        dispatch.executionRoot?.let { root ->
+            Text(stringResource(if (dispatch.isolation == "worktree") R.string.execution_worktree else R.string.execution_shared),
+                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+            Text(root, style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            dispatch.branch?.let { Text(stringResource(R.string.execution_branch, it), style = MaterialTheme.typography.labelSmall) }
+            dispatch.baseCommit?.let { Text(stringResource(R.string.execution_base_commit, it.take(12)), style = MaterialTheme.typography.labelSmall) }
+            if (dispatch.parentDirty) Text(stringResource(R.string.execution_parent_dirty),
+                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
+        }
         if (status != SubAgentCardStatus.RUNNING && summary != null) {
             Text(
                 text = summary,

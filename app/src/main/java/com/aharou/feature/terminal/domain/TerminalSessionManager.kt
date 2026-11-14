@@ -120,17 +120,17 @@ class TerminalSessionManager @Inject constructor(
      *
      * 首次会触发 rootfs/proot 解压（幂等）；失败抛异常由调用方处理。
      */
-    suspend fun createInteractiveTab(): String = createTab()
+    suspend fun createInteractiveTab(execution: com.aharou.feature.agent.domain.execution.ExecutionBinding? = null): String = createTab(execution = execution)
 
-    private suspend fun createTab(workspacePath: String? = null): String {
+    private suspend fun createTab(workspacePath: String? = null, execution: com.aharou.feature.agent.domain.execution.ExecutionBinding? = null): String {
         FileLogger.i(TAG, "新建交互终端标签：开始准备容器")
         val id = nextId()
-        val workspace = resolveWorkspace(workspacePath)
-        val profile = ensureContainer(workspace)
+        val workspace = execution?.executionRoot ?: resolveWorkspace(workspacePath)
+        val profile = ensureContainer(workspace, execution)
         val shellCommand = buildInteractiveCommand(profile)
         FileLogger.i(TAG, "交互 shell 命令（$id）：$shellCommand")
         val (session, client) = try {
-            buildSession(shellCommand, workspace)
+            buildSession(shellCommand, workspace, execution)
         } catch (e: Exception) {
             FileLogger.e(TAG, "创建交互终端会话失败（$id）", e)
             containerEngine.logContainerDiagnostics("创建交互终端会话失败")
@@ -195,11 +195,12 @@ class TerminalSessionManager @Inject constructor(
         title: String?,
         notify: Boolean,
         sourceSessionId: String?,
-        workspacePath: String?
+        workspacePath: String?,
+        execution: com.aharou.feature.agent.domain.execution.ExecutionBinding?
     ): String {
         val id = nextId()
-        val workspace = resolveWorkspace(workspacePath)
-        val profile = ensureContainer(workspace)
+        val workspace = execution?.executionRoot ?: resolveWorkspace(workspacePath)
+        val profile = ensureContainer(workspace, execution)
         // 用 `ec=$?` 捕获命令真实退出码后再 echo，否则 echo 本身恒为 0 会覆盖进程退出码，导致
         // onFinished 回调里的 exitStatus 永远是 0、与屏幕上 echo 出来的码对不上。
         // notify=true：echo 后 `exit $ec` 让 shell 以命令真实退出码结束 → proot 透传 → 回调 exitStatus
@@ -210,7 +211,7 @@ class TerminalSessionManager @Inject constructor(
         val afterCommand = if (notify) "; exit \$ec" else "; exec ${containerEngine.defaultShellFor(profile)}"
         val shellCommand = "cd ~/workspace 2>/dev/null; export ENV=/etc/profile; " +
             "$command; ec=\$?; echo \"[command exited: \$ec]\"$afterCommand"
-        val (session, client) = buildSession(shellCommand, workspace)
+        val (session, client) = buildSession(shellCommand, workspace, execution)
         addTab(
             TerminalTab(
                 id = id,
@@ -375,10 +376,10 @@ class TerminalSessionManager @Inject constructor(
      * 必须按工作区解析出的容器装：以前无论工作区覆盖成什么都只装全局默认，
      * 终端随即回退到默认容器，工作区覆盖形同虚设。
      */
-    private suspend fun ensureContainer(workspace: String): ContainerProfile {
+    private suspend fun ensureContainer(workspace: String, execution: com.aharou.feature.agent.domain.execution.ExecutionBinding? = null): ContainerProfile {
         val startedAt = System.currentTimeMillis()
-        val profile = containerEngine.profileForTerminal(workspace)
-        containerEngine.ensureInstalledFor(profile)
+        val profile = containerEngine.profileForTerminal(workspace, execution)
+        if (execution?.isWorktree != true) containerEngine.ensureInstalledFor(profile)
         if (!containerEngine.isInstalledFor(profile)) {
             throw IllegalStateException("容器未安装（缺少 rootfs/proot）：${profile.name}")
         }
@@ -481,8 +482,8 @@ class TerminalSessionManager @Inject constructor(
     private fun resolveWorkspace(workspacePath: String?): String =
         workspacePath?.takeIf { it.isNotBlank() } ?: workspaceRepository.currentPath()
 
-    private fun buildSession(shellCommand: String, workspace: String): Pair<TerminalSession, AppTerminalSessionClient> {
-        val invocation = containerEngine.buildProotInvocation(shellCommand, workspace)
+    private fun buildSession(shellCommand: String, workspace: String, execution: com.aharou.feature.agent.domain.execution.ExecutionBinding? = null): Pair<TerminalSession, AppTerminalSessionClient> {
+        val invocation = containerEngine.buildProotInvocation(shellCommand, workspace, execution)
         FileLogger.i(
             TAG,
             "PTY 启动：workspace=$workspace 可执行=${invocation.executable}" +

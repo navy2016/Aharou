@@ -107,6 +107,7 @@ class AgentTurnRunner @Inject constructor(
     private val subAgentRunLifecycle: SubAgentRunLifecycle,
     private val subAgentWriteLease: SubAgentWriteLease,
     private val workspaceRepository: WorkspaceRepository,
+    private val executions: com.aharou.feature.agent.domain.execution.SessionExecutionRepository,
     private val pendingQuestionStore: PendingUserQuestionStore,
     @param:ApplicationContext private val context: Context,
 ) {
@@ -197,7 +198,32 @@ class AgentTurnRunner @Inject constructor(
         val initialSession = sessionUseCase.getSessionById(sessionId) ?: return@flow
         val parentId = initialSession.parentId
         val reservedRun = subAgentEventBus.currentRun(sessionId)?.takeIf { it.version == 0L }
+        val root = initialSession.workspacePath.ifBlank { turn.projectRoot.ifBlank { currentWorkspacePath() } }
+        val execution = try {
+            if (root.isBlank()) null else executions.resolve(sessionId, root)
+        } catch (error: Exception) {
+            reservedRun?.let { reserved ->
+                subAgentEventBus.stopReserved(com.aharou.feature.agent.domain.subagent.SubAgentEvent(sessionId,
+                    reserved.parentSessionId, SubAgentEventType.FAILED, error.message.orEmpty(), accepted = false, runId = reserved.runId))
+                subAgentEventBus.releaseReserved(reserved)
+            }
+            if (error is CancellationException) throw error
+            emit(AgentEvent.Failed(error.message.orEmpty(), "EXECUTION_NOT_READY"))
+            return@flow
+        }
         val run = try {
+        if (parentId != null) {
+            val parent = sessionUseCase.getSessionById(parentId)
+            if (parent == null) {
+                reservedRun?.let(subAgentEventBus::releaseReserved)
+                emit(AgentEvent.Failed("Parent session no longer exists", "SESSION_NOT_FOUND"))
+                return@flow
+            }
+            val childMode = runCatching { AgentMode.valueOf(initialSession.mode) }.getOrDefault(AgentMode.BUILD)
+            val parentMode = runCatching { AgentMode.valueOf(parent.mode) }.getOrDefault(AgentMode.BUILD)
+            val limited = childMode.limitedBy(parentMode)
+            if (limited != childMode) sessionUseCase.updateMode(sessionId, limited.name)
+        }
             parentId?.let { subAgentRunLifecycle.beginRun(sessionId, it, turn.expectedSubAgentRunId) }
         } catch (rejected: SubAgentRunRejectedException) {
             emit(AgentEvent.Failed(rejected.message.orEmpty(), rejected.reasonCode))
@@ -252,6 +278,7 @@ class AgentTurnRunner @Inject constructor(
         val userMsgId = turn.existingUserMessageId ?: UUID.randomUUID().toString()
         // 隐身会话不建检查点、不动标题：检查点会存下用户提问片段、标题会写进会话行，都属内容外泄。
         val ghost = messagePersistenceUseCase.isGhost(sessionId)
+        if (ghost) checkpointManager.setActiveCheckpointId(sessionId, null)
         if (!turn.isAutoTrigger && turn.existingUserMessageId == null) {
             messagePersistenceUseCase.persist(
                 sessionId,
@@ -261,7 +288,7 @@ class AgentTurnRunner @Inject constructor(
                 attachments = turn.inputAttachments,
             )
             if (!ghost) {
-                checkpointManager.createCheckpoint(sessionId, userMsgId, turn.text)
+                checkpointManager.createCheckpoint(sessionId, userMsgId, turn.text, execution)
                 if (isFirst && !turn.skipTitleUpdate) {
                     sessionUseCase.updateTitle(sessionId, sessionUseCase.deriveTitle(turn.text))
                     // 后台异步用 LLM 生成更贴切的标题替换临时标题；失败或取不到时保留临时标题
@@ -292,7 +319,8 @@ class AgentTurnRunner @Inject constructor(
         val agentDefinition = withContext(Dispatchers.IO) {
             sessionEntity?.takeIf { it.parentId != null }
                 ?.subagentType
-                ?.let { agentDefinitionRepository.findIncludingDisabled(it) }
+                ?.let { name -> if (execution == null) agentDefinitionRepository.findIncludingDisabled(name) else
+                    agentDefinitionRepository.listForExecution(execution, includeDisabled = true).firstOrNull { it.definition.name.equals(name, true) }?.definition }
         }
         val isSub = sessionEntity?.parentId != null
 
@@ -300,8 +328,9 @@ class AgentTurnRunner @Inject constructor(
         // 调用方没给 projectRoot 时回退到会话绑定的工作区、再回退全局当前值：
         // ask_ai 这类投递不带 projectRoot，而工具执行用的是全局当前工作区，两边不一致会让
         // 系统提示说「未选择工作区」、命令却落在远程容器里。
-        val effectiveProjectRoot = turn.projectRoot.takeIf { it.isNotBlank() }
+        val effectiveProjectRoot = execution?.projectRoot
             ?: sessionDomain?.workspacePath?.takeIf { it.isNotBlank() }
+            ?: turn.projectRoot.takeIf { it.isNotBlank() }
             ?: workspaceRepository.current.value?.path.orEmpty()
         val workspace = effectiveProjectRoot.takeIf { it.isNotBlank() }?.let(::workspaceRef)
         val previousWorkspace = workspace?.let { lastWorkspaceBySession.put(sessionId, it) }
@@ -336,6 +365,7 @@ class AgentTurnRunner @Inject constructor(
             workspaceName = workspace?.name,
             workspaceSwitchedFrom = switchedFrom,
             selectedWorkspace = selectedWorkspace,
+            executionBinding = execution,
             // 模型身份：会话上就存着 provider / model，顺手带进上下文，供系统提示词注入。
             modelIdentity = sessionEntity?.model?.takeIf { it.isNotBlank() }
                 ?.let { ModelIdentity(modelId = it, providerId = sessionEntity.providerId) },

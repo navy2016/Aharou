@@ -13,5 +13,6 @@ data class CheckpointEntity(
     val sessionId: String,
     val userMessageId: String,
     val promptSnippet: String,
-    val createdAt: Long = System.currentTimeMillis()
+    val createdAt: Long = System.currentTimeMillis(),
+    val executionId: String? = null
 )

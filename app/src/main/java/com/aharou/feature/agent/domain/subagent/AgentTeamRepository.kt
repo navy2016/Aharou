@@ -19,6 +19,9 @@ class AgentTeamRepository @Inject constructor(
     val globalRoot: String = "~/.aharou/teams"
     val projectRoot: String = "${WorkspacePathMapper.CONTAINER_ROOT}/.aharou/teams"
 
+    fun forExecution(binding: com.aharou.feature.agent.domain.execution.ExecutionBinding): AgentTeamRepository =
+        AgentTeamRepository(fileAccess.forExecution(binding.copy(executionRoot = binding.projectExecutionRoot, isolation = "shared")))
+
     /** 全部预设（含来源作用域），按名称排序。 */
     fun listAll(): List<AgentTeamEntry> = mergeAll(scan(globalRoot), scan(projectRoot))
 

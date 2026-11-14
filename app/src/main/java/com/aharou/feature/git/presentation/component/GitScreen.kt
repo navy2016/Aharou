@@ -100,8 +100,10 @@ fun GitScreen(
     onOpenFile: ((String) -> Unit)? = null,
     embedded: Boolean = false,
     /** CI 失败时把失败摘要交给当前会话的 AI；为 null（未接线）时不显示「让 AI 分析」入口。 */
-    onAnalyzeWithAi: ((String) -> Unit)? = null
+    onAnalyzeWithAi: ((String) -> Unit)? = null,
+    executionBinding: com.aharou.feature.agent.domain.execution.ExecutionBinding? = null
 ) {
+    LaunchedEffect(viewModel, executionBinding) { viewModel.bindExecution(executionBinding) }
     val state by viewModel.state.collectAsStateWithLifecycle()
     val prViewModel: PullRequestViewModel = hiltViewModel()
     val prState by prViewModel.state.collectAsStateWithLifecycle()

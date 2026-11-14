@@ -229,6 +229,26 @@ class SubAgentEventBus @Inject constructor(
         if (broadcast) _events.tryEmit(event)
     }
 
+    fun reserveSpawn(sessionId: String, parentSessionId: String, detail: String): SubAgentRun = synchronized(activeLock) {
+        if (!enabled) throw SubAgentRunRejectedException(SUBAGENTS_DISABLED_MESSAGE, SUBAGENTS_DISABLED_CODE)
+        if (isFull || sessionId in _activeSubSessionIds.value || sessionId in deletedSessions)
+            throw SubAgentRunRejectedException("Subagent concurrency limit reached", "MAX_SUBAGENTS_REACHED")
+        val reservation = SubAgentRun(sessionId, parentSessionId, UUID.randomUUID().toString(), 0)
+        reservations[sessionId] = reservation
+        parentOfSub[sessionId] = parentSessionId
+        instructions[sessionId] = detail
+        _activeSubSessionIds.value = _activeSubSessionIds.value + sessionId
+        _lifecycleChanges.value++
+        reservation
+    }
+
+    fun publishSpawn(run: SubAgentRun, detail: String): Boolean = synchronized(activeLock) {
+        if (reservations[run.sessionId] != run || !enabled || activeCount > maxRunning) return@synchronized false
+        instructions[run.sessionId] = detail
+        if (_events.subscriptionCount.value == 0) return@synchronized false
+        _events.tryEmit(SubAgentEvent(run.sessionId, run.parentSessionId, SubAgentEventType.SPAWNED, detail, runId = run.runId))
+    }
+
     fun emit(event: SubAgentEvent) = synchronized(activeLock) {
         when (event.type) {
             SubAgentEventType.SPAWNED -> {

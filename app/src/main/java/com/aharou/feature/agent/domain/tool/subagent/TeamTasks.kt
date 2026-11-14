@@ -29,8 +29,8 @@ class TeamTasks @Inject constructor(
     private val maxRunningSource: MaxRunningSource
 ) {
 
-    fun list(args: Map<String, JsonElement>): ToolResult {
-        val entries = loadEntries() ?: return ToolResult.Error("读取团队预设失败", "TEAM_LIST_FAILED")
+    fun list(args: Map<String, JsonElement>, execution: com.aharou.feature.agent.domain.execution.ExecutionBinding? = null): ToolResult {
+        val entries = loadEntries(execution) ?: return ToolResult.Error("读取团队预设失败", "TEAM_LIST_FAILED")
         val target = (args["team"] as? JsonPrimitive)?.contentOrNull?.trim().orEmpty()
         if (target.isNotEmpty()) {
             val entry = entries.firstOrNull { it.team.name.equals(target, ignoreCase = true) }
@@ -65,6 +65,7 @@ class TeamTasks @Inject constructor(
      */
     suspend fun run(
         args: Map<String, JsonElement>,
+        execution: com.aharou.feature.agent.domain.execution.ExecutionBinding? = null,
         exec: suspend (JsonArray) -> ToolResult
     ): ToolResult {
         val teamName = (args["team"] as? JsonPrimitive)?.contentOrNull?.trim().orEmpty()
@@ -76,12 +77,12 @@ class TeamTasks @Inject constructor(
             return ToolResult.Error("team_run 需要 goal（本次团队要达成的目标）", "MISSING_GOAL")
         }
 
-        val entries = loadEntries() ?: return ToolResult.Error("读取团队预设失败", "TEAM_LIST_FAILED")
+        val entries = loadEntries(execution) ?: return ToolResult.Error("读取团队预设失败", "TEAM_LIST_FAILED")
         val team = entries.firstOrNull { it.team.name.equals(teamName, ignoreCase = true) }?.team
             ?: return ToolResult.Error(notFoundMessage(entries, teamName), "TEAM_NOT_FOUND")
 
         val enabled: List<AgentDefinition> = try {
-            agentDefinitionRepository.listEnabled().map { it.definition }
+            (execution?.let { agentDefinitionRepository.listForExecution(it) } ?: agentDefinitionRepository.listEnabled()).map { it.definition }
         } catch (e: Exception) {
             FileLogger.e(TAG, "读取子代理定义失败", e)
             return ToolResult.Error("读取子代理定义失败：${e.message ?: "未知错误"}", "AGENT_LIST_FAILED")
@@ -99,8 +100,8 @@ class TeamTasks @Inject constructor(
         }
     }
 
-    private fun loadEntries(): List<AgentTeamEntry>? = try {
-        teamRepository.listAll()
+    private fun loadEntries(execution: com.aharou.feature.agent.domain.execution.ExecutionBinding?): List<AgentTeamEntry>? = try {
+        (execution?.let(teamRepository::forExecution) ?: teamRepository).listAll()
     } catch (e: Exception) {
         FileLogger.e(TAG, "读取团队预设失败", e)
         null

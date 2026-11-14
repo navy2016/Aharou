@@ -17,6 +17,8 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import com.aharou.feature.terminal.data.repository.TerminalSettings
 import com.aharou.feature.terminal.data.repository.TerminalSettingsRepository
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.StateFlow
@@ -38,12 +40,23 @@ class TerminalViewModel @Inject constructor(
     private val remoteManager: RemoteTerminalSessionManager,
     private val modeHolder: ExecutionModeHolder,
     private val containerEngine: LinuxContainerEngine,
-    private val terminalSettingsRepository: TerminalSettingsRepository
+    private val terminalSettingsRepository: TerminalSettingsRepository,
+    private val executions: com.aharou.feature.agent.domain.execution.SessionExecutionRepository
 ) : ViewModel() {
 
     private companion object { const val TAG = "TerminalViewModel" }
 
-    private fun isRemote() = modeHolder.currentMode() == ExecutionMode.REMOTE_SSH
+    private val execution = MutableStateFlow<com.aharou.feature.agent.domain.execution.ExecutionBinding?>(null)
+    private var boundOnce = false
+    private var preparationVersion = 0L
+    private fun isRemote() = (execution.value?.mode ?: modeHolder.currentMode().name) == ExecutionMode.REMOTE_SSH.name
+
+    fun bindExecution(binding: com.aharou.feature.agent.domain.execution.ExecutionBinding?) {
+        if (boundOnce && execution.value == binding) return
+        execution.value = binding
+        boundOnce = true
+        prepare()
+    }
 
     /** 当前是否远程 SSH 模式（UI 据此隐藏本地容器专属入口，如环境工具）。 */
     val isRemoteMode: Boolean get() = isRemote()
@@ -73,9 +86,16 @@ class TerminalViewModel @Inject constructor(
     /** 容器初始化实时进度（解压/部署/装包），Loading 阶段用它展示细粒度文案。 */
     val containerInit: StateFlow<ContainerInitState> = containerEngine.initProgress
 
-    val tabs get() = if (isRemote()) remoteManager.tabs else localManager.tabs
-    val activeTabId get() = if (isRemote()) remoteManager.activeTabId else localManager.activeTabId
-    val revision get() = if (isRemote()) remoteManager.revision else localManager.revision
+    val tabs = combine(localManager.tabs, remoteManager.tabs, modeHolder.mode, execution) { local, remote, mode, binding ->
+        val selected = if ((binding?.mode ?: mode.name) == ExecutionMode.REMOTE_SSH.name) remote else local
+        if (binding == null) selected else selected.filter { it.workspacePath == binding.executionRoot }
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+    val activeTabId = combine(localManager.activeTabId, remoteManager.activeTabId, tabs, execution, modeHolder.mode) { local, remote, visible, binding, mode ->
+        val id = if ((binding?.mode ?: mode.name) == ExecutionMode.REMOTE_SSH.name) remote else local
+        if (visible.any { it.id == id }) id else visible.firstOrNull()?.id
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
+    val revision = combine(localManager.revision, remoteManager.revision) { a, b -> a + b }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, 0)
 
     /** 额外按键行驱动的虚拟修饰键，供 TerminalView 读取。 */
     val modifiers = TerminalKeyModifiers()
@@ -99,20 +119,31 @@ class TerminalViewModel @Inject constructor(
         viewModelScope.launch { terminalSettingsRepository.setFontPath(path) }
     }
 
-    init {
-        prepare()
-    }
-
     /** 进入终端页：确保至少有一个标签（首次会解压容器或连 SSH）。 */
     fun prepare() {
+        val version = ++preparationVersion
+        val binding = execution.value
         viewModelScope.launch {
             _prepareState.value = PrepareState.Loading
+            if (binding?.ready == false) {
+                if (binding.preparationState != "preparing") _prepareState.value = PrepareState.Error(context.getString(R.string.execution_prepare_failed))
+                return@launch
+            }
             try {
-                if (isRemote()) remoteManager.ensureInitialTab() else localManager.ensureInitialTab()
-                _prepareState.value = PrepareState.Ready
+                if (binding != null) {
+                    executions.validate(binding)
+                    val existing = (if (isRemote()) remoteManager.tabs.value else localManager.tabs.value)
+                        .firstOrNull { it.workspacePath == binding.executionRoot }
+                    if (existing != null) activate(existing.id) else {
+                        if (isRemote()) remoteManager.createInteractiveTab(binding) else localManager.createInteractiveTab(binding)
+                    }
+                } else if (isRemote()) remoteManager.ensureInitialTab() else localManager.ensureInitialTab()
+                if (version == preparationVersion && binding == execution.value) _prepareState.value = PrepareState.Ready
             } catch (e: Exception) {
+                if (e is CancellationException) throw e
                 FileLogger.e(TAG, "终端准备失败", e)
-                _prepareState.value = PrepareState.Error(e.message ?: context.getString(R.string.terminal_prepare_error_unknown))
+                if (version == preparationVersion && binding == execution.value)
+                    _prepareState.value = PrepareState.Error(e.message ?: context.getString(R.string.terminal_prepare_error_unknown))
             }
         }
     }
@@ -122,8 +153,11 @@ class TerminalViewModel @Inject constructor(
         _creatingTab.value = true
         viewModelScope.launch {
             try {
-                if (isRemote()) remoteManager.createInteractiveTab() else localManager.createInteractiveTab()
+                val binding = execution.value
+                binding?.let { executions.validate(it) }
+                if (isRemote()) remoteManager.createInteractiveTab(binding) else localManager.createInteractiveTab(binding)
             } catch (e: Exception) {
+                if (e is CancellationException) throw e
                 FileLogger.e(TAG, "新建标签失败", e)
                 _tabError.value = context.getString(
                     R.string.terminal_new_tab_failed,
@@ -135,15 +169,16 @@ class TerminalViewModel @Inject constructor(
         }
     }
 
-    fun activate(id: String) = if (isRemote()) remoteManager.activate(id) else localManager.activate(id)
+    fun activate(id: String) = if (id.startsWith("ssh-term-")) remoteManager.activate(id) else localManager.activate(id)
+    fun closeTab(id: String) = if (id.startsWith("ssh-term-")) remoteManager.closeTab(id) else localManager.closeTab(id)
 
-    fun closeTab(id: String) = if (isRemote()) remoteManager.closeTab(id) else localManager.closeTab(id)
+    fun write(text: String) {
+        activeTabId.value?.let { id -> if (id.startsWith("ssh-term-")) remoteManager.writeToTab(id, text) else localManager.writeToTab(id, text) }
+    }
 
-    /** 向当前活动标签写入文本（额外按键行：方向键/Tab 等）。 */
-    fun write(text: String) = if (isRemote()) remoteManager.writeToActive(text) else localManager.writeToActive(text)
-
-    /** 向当前活动标签写入原始字节（发送控制字符，如 Ctrl-C=0x03、Ctrl-D=0x04）。 */
-    fun writeBytes(vararg bytes: Int) = if (isRemote()) remoteManager.writeBytesToActive(*bytes) else localManager.writeBytesToActive(*bytes)
+    fun writeBytes(vararg bytes: Int) {
+        activeTabId.value?.let { id -> if (id.startsWith("ssh-term-")) remoteManager.writeBytesToTab(id, *bytes) else localManager.writeBytesToTab(id, *bytes) }
+    }
 
     // 注意：故意不在 onCleared 里销毁会话——会话归 Singleton 管理器所有，需常驻后台。
 }

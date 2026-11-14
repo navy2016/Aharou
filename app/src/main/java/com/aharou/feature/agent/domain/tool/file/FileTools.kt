@@ -19,6 +19,7 @@ import com.aharou.feature.agent.domain.tool.staleFileMessage
 import com.aharou.core.util.FileLogger
 import com.aharou.core.util.LineDiff
 import com.aharou.feature.workspace.domain.FileAccessProvider
+import com.aharou.feature.workspace.domain.forAgent
 import com.aharou.feature.workspace.domain.sha256Fingerprint
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -99,7 +100,7 @@ class ReadFileTool @Inject constructor(
         context: AgentContext
     ): ToolResult {
         // 会话绑定的工作区：本会话的文件操作只落在自己的工作区，不跟着全局切换走
-        val access = fileAccess.forWorkspace(context.projectRoot).forStrictRead()
+        val access = fileAccess.forAgent(context).forStrictRead()
         return performRead(access, args, context.sessionId)
     }
 
@@ -244,7 +245,8 @@ class WriteFileTool @Inject constructor(
     private val fileLock: WorkspaceFileLock,
     private val versions: FileVersionRegistry,
     private val inboxEvents: SharedInboxEvents,
-    private val writeLease: SubAgentWriteLease
+    private val writeLease: SubAgentWriteLease,
+    private val checkpoints: com.aharou.feature.agent.domain.checkpoint.CheckpointManager
 ) : AgentTool() {
     override val name = "writeFile"
     override val description = "写入完整文件内容，文件不存在时自动创建（含父目录）。局部修改请用 editFile。"
@@ -279,7 +281,7 @@ class WriteFileTool @Inject constructor(
         context: AgentContext
     ): ToolResult {
         // 会话绑定的工作区：本会话的文件操作只落在自己的工作区，不跟着全局切换走
-        val access = fileAccess.forWorkspace(context.projectRoot)
+        val access = fileAccess.forAgent(context)
         val path = args["path"]?.jsonPrimitive?.contentOrNull ?: run {
             FileLogger.w(TAG, "write_file 缺少 path 参数")
             return ToolResult.Error("路径参数缺失", "MISSING_PATH")
@@ -290,7 +292,7 @@ class WriteFileTool @Inject constructor(
             performWrite(
                 access, path, args,
                 writeLease.pathsFor(context.sessionId) ?: context.writePaths,
-                context.sessionId, context.projectRoot, key
+                context.sessionId, context.executionRoot, key
             )
         }
         if (result is ToolResult.Success && SharedInbox.isInboxPath(path)) inboxEvents.notifyChanged()
@@ -313,8 +315,13 @@ class WriteFileTool @Inject constructor(
         checkVersion(access, path, key, sessionId, existedBefore)?.let { return it }
 
         return fileLock.withLock(key) {
+            if (access.resourceKey(path) != key) return@withLock ToolResult.Error("File target changed; reread the file", "RESOURCE_CHANGED")
             checkVersion(access, path, key, sessionId, access.exists(path))?.let { return@withLock it }
-            block(key)
+            val checkpoint = sessionId?.let { checkpoints.beforeFileModified(it, path, access) }
+            val result = block(key)
+            if (result is ToolResult.Success && sessionId != null && checkpoint != null)
+                checkpoints.afterFileModified(sessionId, path, access, checkpoint, versions.get(sessionId, key))
+            result
         }
     }
 

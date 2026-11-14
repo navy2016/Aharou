@@ -111,7 +111,6 @@ class StatefulAgentWorkflowTest {
         providerRequestSettings = mockk(relaxed = true),
         sessionUseCase = sessions,
         messagePersistenceUseCase = persistence,
-        checkpointManager = mockk(),
         llmCallRecordDao = mockk<LlmCallRecordDao>(relaxed = true),
         keyRotator = mockk(),
         generatedImagePersister = imagePersister,

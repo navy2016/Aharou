@@ -9,6 +9,7 @@ import com.aharou.feature.agent.domain.tool.ToolParameter
 import com.aharou.feature.agent.domain.tool.ToolResult
 import com.aharou.feature.editor.domain.diagnostics.DiagnosticsRunner
 import com.aharou.feature.workspace.domain.FileAccessProvider
+import com.aharou.feature.workspace.domain.forAgent
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -66,7 +67,7 @@ class DiagnosticsTool @Inject constructor(
         val path = args["path"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
         if (path.isEmpty()) return ToolResult.Error("路径参数缺失", "MISSING_PATH")
 
-        val access = fileAccess.forWorkspace(context.projectRoot)
+        val access = fileAccess.forAgent(context)
         return try {
             // 取文件元数据可能是远程 SFTP 的阻塞调用，不能放在调用方线程（工具默认跑在主线程）。
             val size = withContext(Dispatchers.IO) {
@@ -76,7 +77,7 @@ class DiagnosticsTool @Inject constructor(
             // fileSize 是 Long，check 的阈值按 Int 比；超过 Int 上限的文件必然也已越过 512KB 阈值，
             // 直接饱和到 MAX_VALUE 让它照常被跳过，不做窄化截断（那会把大文件误判成小文件）。
             val contentLength = size.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
-            val all = diagnosticsRunner.check(path, contentLength, context.projectRoot)
+            val all = diagnosticsRunner.check(path, contentLength, context.executionRoot)
             val only = args["severity"]?.jsonPrimitive?.contentOrNull?.uppercase()
             val kept = if (only.isNullOrEmpty()) all else all.filter { it.severity.name == only }
 

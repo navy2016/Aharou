@@ -4,6 +4,8 @@ import com.aharou.core.util.BoundedLineReader
 import com.aharou.core.util.FileLogger
 import com.aharou.core.util.LINE_TRUNCATED_NOTE
 import com.aharou.core.util.shellQuote
+import com.aharou.feature.agent.domain.execution.ExecutionBinding
+import com.aharou.feature.agent.domain.execution.executionIdentity
 import com.aharou.feature.agent.domain.container.CommandEngine
 import com.aharou.feature.credentials.data.CredentialInjectSettingsRepository
 import com.aharou.feature.credentials.domain.repository.CredentialRepository
@@ -96,8 +98,8 @@ class RemoteSshEngine @Inject constructor(
      * 不能依赖全局 active_profile 那条：容器可以按工作区指定，全局仍是本地时那条收集器
      * 根本不建立连接，执行会报「SSH 连接失败: 未配置 SSH 连接」。
      */
-    private suspend fun ensureConnectedFor(projectPath: String?) {
-        val profile = profileResolver.forWorkspace(projectPath)
+    private suspend fun ensureConnectedFor(projectPath: String?, execution: ExecutionBinding? = null) {
+        val profile = execution?.let(profileResolver::forExecution) ?: profileResolver.forWorkspace(projectPath)
         if (profile.mode != ExecutionMode.REMOTE_SSH) {
             // 这个工作区已改成非远程（或覆盖被取消）：若还挂着旧 SSH 连接就断开，
             // 断开会先回拉远端共享区（见 RemoteSshConnection.disconnect）。
@@ -111,6 +113,7 @@ class RemoteSshEngine @Inject constructor(
         }
         val cfg = connectionResolver.configForProfile(profile.id)
             ?: throw IllegalStateException("容器 ${profile.name} 未配置可用的 SSH 连接")
+        if (execution != null && cfg.executionIdentity() != execution.sshIdentity) throw java.io.IOException("SSH execution identity changed")
         if (connection.isConnected() && connection.config == cfg) {
             // 连接已就绪：这里就必须回拉——下面的「建连」分支只在首次连接时跑，
             // 挂在这里之后会导致首次之后再也不回拉（实测各条命令都只刷首次那一次）。
@@ -134,7 +137,7 @@ class RemoteSshEngine @Inject constructor(
         // 远程里 `git push` 就会认证失败。
         syncGitCredentialsIfEnabled()
         // `~/workspace` 指向本工作区（远程路径与本地区别大，AI 习惯用这个别名）
-        projectPath?.takeIf { it.isNotBlank() }
+        projectPath?.takeIf { it.isNotBlank() && execution == null }
             ?.let { connection.remoteWorkspaceFor(it) }
             ?.let { connection.updateWorkspaceSymlink(it) }
     }
@@ -178,20 +181,20 @@ class RemoteSshEngine @Inject constructor(
     override fun runCommandStream(
         command: String,
         projectPath: String?,
-        timeoutMs: Long
+        timeoutMs: Long, execution: ExecutionBinding?
     ): Flow<CommandEvent> = flow {
-        ensureConnectedFor(projectPath)
-        emitAll(streamExec(command, projectPath, timeoutMs))
+        ensureConnectedFor(projectPath, execution)
+        emitAll(streamExec(command, projectPath, timeoutMs, execution))
     }.flowOn(Dispatchers.IO)
 
     private fun streamExec(
         command: String,
         projectPath: String?,
-        timeoutMs: Long
+        timeoutMs: Long, execution: ExecutionBinding?
     ): Flow<CommandEvent> = channelFlow {
         val effectiveTimeout = timeoutMs.coerceIn(1L, CommandEngine.MAX_TIMEOUT_MS)
         FileLogger.d(TAG, "执行命令(远程流式) cwd=$projectPath timeout=${effectiveTimeout}ms: ${sanitizeCommandForLog(command)}")
-        val session = connection.startExecSession(buildCdCommand(command, projectPath))
+        val session = connection.startBoundExecSession(buildCdCommand(command, projectPath, execution), execution?.sshIdentity)
         val timedOut = AtomicBoolean(false)
         val watchScope = CoroutineScope(Dispatchers.IO + Job())
         val watchdog = watchScope.launch {
@@ -257,28 +260,28 @@ class RemoteSshEngine @Inject constructor(
     override suspend fun runCommandSync(
         command: String,
         projectPath: String?,
-        timeoutMs: Long
+        timeoutMs: Long, execution: ExecutionBinding?
     ): String = withContext(Dispatchers.IO) {
-        ensureConnectedFor(projectPath)
-        execCaptured(command, projectPath, timeoutMs).output
+        ensureConnectedFor(projectPath, execution)
+        execCaptured(command, projectPath, timeoutMs, execution = execution).output
     }
 
     override suspend fun runCommandSyncWithExit(
         command: String,
         projectPath: String?,
-        timeoutMs: Long
+        timeoutMs: Long, execution: ExecutionBinding?
     ): CommandResult = withContext(Dispatchers.IO) {
-        ensureConnectedFor(projectPath)
-        execCaptured(command, projectPath, timeoutMs)
+        ensureConnectedFor(projectPath, execution)
+        execCaptured(command, projectPath, timeoutMs, execution = execution)
     }
 
     override suspend fun runCommandSyncIfReady(
         command: String,
         projectPath: String?,
-        timeoutMs: Long
+        timeoutMs: Long, execution: ExecutionBinding?
     ): CommandResult? {
         if (!isContainerInstalled()) return null
-        return runCatching { execCaptured(command, projectPath, timeoutMs) }
+        return runCatching { execCaptured(command, projectPath, timeoutMs, execution = execution) }
             .getOrElse {
                 FileLogger.w(TAG, "远程命令执行失败(连接可能已断): ${sanitizeCommandForLog(command)}", it)
                 null
@@ -288,21 +291,21 @@ class RemoteSshEngine @Inject constructor(
     override suspend fun runCommandSyncUnbounded(
         command: String,
         projectPath: String?,
-        timeoutMs: Long
+        timeoutMs: Long, execution: ExecutionBinding?
     ): CommandResult = withContext(Dispatchers.IO) {
-        ensureConnectedFor(projectPath)
-        execCaptured(command, projectPath, timeoutMs, unbounded = true)
+        ensureConnectedFor(projectPath, execution)
+        execCaptured(command, projectPath, timeoutMs, unbounded = true, execution = execution)
     }
 
     private suspend fun execCaptured(
         command: String,
         projectPath: String?,
         timeoutMs: Long,
-        unbounded: Boolean = false
+        unbounded: Boolean = false, execution: ExecutionBinding? = null
     ): CommandResult = withContext(Dispatchers.IO) {
         val effectiveTimeout = timeoutMs.coerceIn(1L, CommandEngine.MAX_TIMEOUT_MS)
         FileLogger.d(TAG, "执行命令(远程同步) cwd=$projectPath timeout=${effectiveTimeout}ms: ${sanitizeCommandForLog(command)}")
-        val session = connection.startExecSession(buildCdCommand(command, projectPath))
+        val session = connection.startBoundExecSession(buildCdCommand(command, projectPath, execution), execution?.sshIdentity)
         val output = if (unbounded) BoundedOutput.hardCapped(MAX_UNBOUNDED_CHARS) else BoundedOutput()
         var exitCode: Int? = null
         try {
@@ -390,8 +393,9 @@ class RemoteSshEngine @Inject constructor(
      *  注入 GIT_CONFIG_GLOBAL 指向 App 管理的 ~/.aharou/gitconfig：
      *  仅当用户开启「自动注入」时该文件存在（含 include 用户全局配置 + includeIf 限定工作区根），
      *  文件不存在时 git 静默跳过——不影响用户在服务器上手动 git。 */
-    private fun buildCdCommand(command: String, projectPath: String?): String {
+    private fun buildCdCommand(command: String, projectPath: String?, execution: ExecutionBinding? = null): String {
         val prefix = "export GIT_CONFIG_GLOBAL=\"\$HOME/.aharou/gitconfig\"; "
+        if (execution != null) return prefix + "cd ${shellQuote(execution.executionRoot)} || exit 1; " + command
         if (projectPath == null) return prefix + command
         // cd 失败就不要往下跑了：路径写错时在 $HOME 里执行命令，比直接报错危险得多。
         // 路径用单引号包并转义内部单引号，避免路径含特殊字符时被 shell 拆成别的参数。

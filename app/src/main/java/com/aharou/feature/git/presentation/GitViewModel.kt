@@ -31,6 +31,7 @@ import com.aharou.feature.settings.data.repository.ThemeSettingsRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -58,7 +59,7 @@ private fun GitGraph.toGitCommits() =
 
 @HiltViewModel
 class GitViewModel @Inject constructor(
-    private val repository: GitRepository,
+    private val sourceRepository: GitRepository,
     @param:ApplicationContext private val context: Context,
     private val themeSettings: ThemeSettingsRepository,
     private val agentWorkflow: AgentWorkflow,
@@ -143,10 +144,27 @@ class GitViewModel @Inject constructor(
         val setupGuide: GitSetupGuide? = null
     )
 
+    private var repository = sourceRepository
+    private var boundExecution: com.aharou.feature.agent.domain.execution.ExecutionBinding? = null
+    private var boundOnce = false
+
+    fun bindExecution(binding: com.aharou.feature.agent.domain.execution.ExecutionBinding?) {
+        if (boundOnce && boundExecution == binding) return
+        check(!_state.value.busy)
+        viewModelScope.coroutineContext.cancelChildren()
+        repository = sourceRepository.forExecution(binding)
+        boundExecution = binding
+        boundOnce = true
+        if (binding?.ready == false) {
+            _state.value = GitUiState(loading = binding.preparationState == "preparing", notARepo = true,
+                toast = if (binding.preparationState == "preparing") null else context.getString(R.string.execution_prepare_failed))
+            return
+        }
+        refresh()
+    }
+
     private val _state = MutableStateFlow(GitUiState())
     val state: StateFlow<GitUiState> = _state.asStateFlow()
-
-    init { refresh() }
 
     /** 仓库快照：并发拉取 status/graph/remote（+可选 identity）的结果。不含全量分支/标签——
      * 那些在 [refresh] 成功后异步拉取（[loadBranches]），避免阻塞首屏。

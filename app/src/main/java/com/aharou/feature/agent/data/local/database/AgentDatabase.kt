@@ -5,6 +5,8 @@ import androidx.room.RoomDatabase
 import com.aharou.feature.agent.data.local.dao.AgentMessageDao
 import com.aharou.feature.agent.data.local.dao.AgentTaskDao
 import com.aharou.feature.agent.data.local.dao.ChatSessionDao
+import com.aharou.feature.agent.data.local.dao.SessionExecutionDao
+import com.aharou.feature.agent.data.local.entity.SessionExecutionEntity
 import com.aharou.feature.agent.data.local.dao.CheckpointDao
 import com.aharou.feature.agent.data.local.dao.LlmCallRecordDao
 import com.aharou.feature.agent.data.local.dao.ScheduledTaskDao
@@ -30,7 +32,7 @@ import com.aharou.feature.workspace.data.local.entity.RemoteConnectionEntity
 import com.aharou.feature.workspace.data.local.entity.RemoteMountEntity
 
 @Database(
-    entities = [AgentMessageEntity::class, ChatSessionEntity::class, AgentTaskEntity::class, ScheduledTaskEntity::class, AIProviderEntity::class, RemoteConnectionEntity::class, RemoteMountEntity::class, TodoItemEntity::class, CheckpointEntity::class, CheckpointFileSnapshotEntity::class, LlmCallRecordEntity::class, BackupTargetEntity::class, PendingUserQuestionEntity::class, ToolCallReceiptEntity::class],
+    entities = [SessionExecutionEntity::class, AgentMessageEntity::class, ChatSessionEntity::class, AgentTaskEntity::class, ScheduledTaskEntity::class, AIProviderEntity::class, RemoteConnectionEntity::class, RemoteMountEntity::class, TodoItemEntity::class, CheckpointEntity::class, CheckpointFileSnapshotEntity::class, LlmCallRecordEntity::class, BackupTargetEntity::class, PendingUserQuestionEntity::class, ToolCallReceiptEntity::class],
     version = AgentDatabase.SCHEMA_VERSION,
     exportSchema = true
 )
@@ -39,6 +41,7 @@ abstract class AgentDatabase : RoomDatabase() {
     abstract fun agentTaskDao(): AgentTaskDao
     abstract fun scheduledTaskDao(): ScheduledTaskDao
     abstract fun chatSessionDao(): ChatSessionDao
+    abstract fun sessionExecutionDao(): SessionExecutionDao
     abstract fun aiProviderDao(): AIProviderDao
     abstract fun remoteConnectionDao(): RemoteConnectionDao
     abstract fun todoItemDao(): TodoItemDao
@@ -49,7 +52,7 @@ abstract class AgentDatabase : RoomDatabase() {
     abstract fun toolCallReceiptDao(): ToolCallReceiptDao
 
     companion object {
-        const val SCHEMA_VERSION = 80
+        const val SCHEMA_VERSION = 81
 
         /** 数据库文件名（落在 `databases/` 下，另有 Room 默认 WAL 模式产生的 `-wal`/`-shm`）。 */
         const val DATABASE_NAME = "aicode_agent_db"

@@ -1,6 +1,7 @@
 package com.aharou.feature.agent.domain.tool.subagent
 
 import com.aharou.core.util.FileLogger
+import com.aharou.feature.agent.domain.execution.putExecution
 import com.aharou.feature.agent.data.local.dao.ChatSessionDao
 import com.aharou.feature.agent.domain.model.AgentContext
 import com.aharou.feature.agent.domain.model.AgentMode
@@ -29,6 +30,7 @@ import com.aharou.feature.agent.domain.tool.ToolResult
 import com.aharou.feature.agent.presentation.MessageRole
 import com.aharou.feature.settings.domain.repository.AIProviderRepository
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
@@ -76,6 +78,8 @@ class TaskTool @Inject constructor(
     private val aiProviderRepository: AIProviderRepository,
     private val subAgentWriteLease: SubAgentWriteLease,
     private val subAgentRunLifecycle: SubAgentRunLifecycle,
+    private val executionWorkspaces: TaskExecutionWorkspaces,
+    private val executions: com.aharou.feature.agent.domain.execution.SessionExecutionRepository,
 ) : AbstractContextualTool() {
 
     /**
@@ -121,7 +125,9 @@ class TaskTool @Inject constructor(
         val action = (args["action"] as? JsonPrimitive)?.content?.trim()?.lowercase() ?: "create"
         return when (action) {
             "read", "list", "send", "roles", "team", "tell", "teams" -> emptySet()
-            else -> setOf(ToolCapability.MODIFY_SESSION_STATE)
+            else -> if ((args["isolation"] as? JsonPrimitive)?.contentOrNull == "worktree")
+                setOf(ToolCapability.MODIFY_SESSION_STATE, ToolCapability.WRITE_WORKSPACE)
+                else setOf(ToolCapability.MODIFY_SESSION_STATE)
         }
     }
 
@@ -142,11 +148,11 @@ class TaskTool @Inject constructor(
             "stop" -> stopSubagent(args, context)
             "del" -> deleteSubagent(args, context)
             "list" -> listSubagents(context)
-            "roles" -> listRoles(args)
+            "roles" -> listRoles(args, context)
             "team" -> if (eventBus.communicationEnabled()) listTeam(context) else SubAgentCommGate.disabledError()
             "tell" -> if (eventBus.communicationEnabled()) tellSibling(args, context) else SubAgentCommGate.disabledError()
             "grant" -> grantWrite(args, context)
-            "teams" -> workflowTarget(args)?.let { workflowRunner.list(it) } ?: teamTasks.list(args)
+            "teams" -> workflowTarget(args)?.let { workflowRunner.list(it, context.executionBinding) } ?: teamTasks.list(args, context.executionBinding)
             "team_run" -> runTeam(args, context)
             else -> ToolResult.Error("未知 action: $action，支持：create / pipeline / send / read / stop / del / list / roles / team / tell / grant / teams / team_run", "INVALID_ARGS")
         }
@@ -164,10 +170,12 @@ class TaskTool @Inject constructor(
         }
         val paths = stringSetOf(args["writePaths"]).orEmpty().filter { it.isNotBlank() }.toSet()
         if (paths.isEmpty()) return ToolResult.Error("grant 需要非空 writePaths", "MISSING_WRITEPATHS")
-        subAgentWriteLease.conflictFor(id, paths, eventBus.activeSubSessionIds.value)?.let { conflictId ->
-            return conflictError(conflictId, paths, WriteLease.NEXT_GRANT, context.projectRoot)
-        }
-        val merged = subAgentWriteLease.grant(id, paths)
+        val binding = executions.resolve(id, target?.workspacePath.orEmpty())
+        val resourceKeys = executionWorkspaces.resources(paths, binding)
+        subAgentWriteLease.grantIfAvailable(id, paths, resourceKeys, eventBus.activeSubSessionIds.value) { merged ->
+            executions.saveWritePaths(id, merged)
+        }?.let { conflictId -> return conflictError(conflictId, paths, WriteLease.NEXT_GRANT, binding.executionRoot) }
+        val merged = subAgentWriteLease.pathsFor(id).orEmpty()
         FileLogger.i("TaskTool", "追加写租约 $id += ${paths.joinToString(", ")}（合并后：${merged.joinToString(", ")}）")
         return ToolResult.Success(buildJsonObject {
             put("id", JsonPrimitive(id))
@@ -233,17 +241,21 @@ class TaskTool @Inject constructor(
         }
 
         val layers = try {
-            pipelineLayers(tasks)
+            TaskPipelinePlan.layers(tasks)
         } catch (e: IllegalStateException) {
             return ToolResult.Error("pipeline 的依赖关系无法排序：${e.message}", "INVALID_ARGS")
         }
 
+        val pipelineContext = try { executionWorkspaces.pipeline(args, context) } catch (error: Exception) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            return ToolResult.Error(error.message.orEmpty(), "ISOLATION_PREPARATION_FAILED")
+        }
         val outputs = mutableMapOf<String, String>()
         val report = mutableListOf<String>()
 
         for ((layerIndex, layer) in layers.withIndex()) {
             if (!eventBus.enabled) return ToolResult.Error(SUBAGENTS_DISABLED_MESSAGE, SUBAGENTS_DISABLED_CODE)
-            overlappingPair(layer)?.let { (a, b) ->
+            TaskPipelinePlan.overlapping(layer)?.let { (a, b) ->
                 return ToolResult.Error(
                     WriteLease.layerConflictMessage(a.id, a.writePaths, b.id, b.writePaths, context.projectRoot),
                     "WRITE_CONFLICT"
@@ -277,7 +289,7 @@ class TaskTool @Inject constructor(
                         put("writePaths", buildJsonArray { paths.forEach { add(JsonPrimitive(it)) } })
                     }
                 }
-                val created = createSubagent(createArgs, context)
+                val created = createSubagent(createArgs, pipelineContext)
                 if (created is ToolResult.Error) {
                     if (created.code == SUBAGENTS_DISABLED_CODE) return created
                     outputs[task.id] = ""
@@ -316,6 +328,8 @@ class TaskTool @Inject constructor(
                 put("state", "done")
                 put("layers", layers.size)
                 put("report", summary)
+                putExecution(pipelineContext.executionBinding)
+                put("parentDirty", pipelineContext.executionParentDirty)
                 // 工作流要拿某层协调者的判定，必须能按任务 id 取回产出；只回 report 文本的话，
                 // 上层只能去解析正则或重新 read 一遍，两条路都脆。
                 put(
@@ -383,35 +397,6 @@ class TaskTool @Inject constructor(
         return (data?.get("lastOutput") as? JsonPrimitive)?.contentOrNull.orEmpty()
     }
 
-    /** 拓扑分层：同层任务互不依赖（可并发）；依赖成环时抛 IllegalStateException。 */
-    private fun pipelineLayers(tasks: List<PipelineTask>): List<List<PipelineTask>> {
-        val byId = tasks.associateBy { it.id }
-        val depth = mutableMapOf<String, Int>()
-        val visiting = mutableSetOf<String>()
-        fun depthOf(id: String): Int {
-            depth[id]?.let { return it }
-            if (!visiting.add(id)) throw IllegalStateException("任务「$id」形成依赖环")
-            val task = byId.getValue(id)
-            val value = if (task.dependsOn.isEmpty()) 0 else task.dependsOn.maxOf { depthOf(it) } + 1
-            visiting.remove(id)
-            depth[id] = value
-            return value
-        }
-        return tasks.groupBy { depthOf(it.id) }.toSortedMap().values.toList()
-    }
-
-    /** 同层里第一对写范围相交的任务；没有则返回 null。 */
-    private fun overlappingPair(layer: List<PipelineTask>): Pair<PipelineTask, PipelineTask>? {
-        for (i in layer.indices) {
-            val a = layer[i].writePaths ?: continue
-            for (j in i + 1 until layer.size) {
-                val b = layer[j].writePaths ?: continue
-                if (WriteLease.overlaps(a, b)) return layer[i] to layer[j]
-            }
-        }
-        return null
-    }
-
     /** 把 JSON 数组参数读成字符串集合；非数组返回 null（表示「未声明」，与 create 的语义一致）。 */
     private fun stringSetOf(element: JsonElement?): Set<String>? {
         val array = element as? JsonArray ?: return null
@@ -419,19 +404,6 @@ class TaskTool @Inject constructor(
             .filter { it.isNotEmpty() }
             .toSet()
     }
-
-    private data class PipelineTask(
-        val id: String,
-        val prompt: String,
-        val description: String,
-        val dependsOn: Set<String>,
-        val writePaths: Set<String>?,
-        val agent: String?,
-        val department: String?,
-        val agentQuery: String?,
-        val model: String?,
-        val provider: String?
-    )
 
     /** 解析 writePaths 参数；未提供返回 null（不登记租约 = 不限制）。 */
     private fun parseWritePaths(args: Map<String, JsonElement>): Set<String>? {
@@ -486,7 +458,8 @@ class TaskTool @Inject constructor(
         var definition: AgentDefinition? = null
         if (agentName != null || department != null || agentQuery != null) {
             val enabled: List<AgentDefinition> = try {
-                agentDefinitionRepository.listEnabled().map { it.definition }
+                (context.executionBinding?.let { agentDefinitionRepository.listForExecution(it) }
+                    ?: agentDefinitionRepository.listEnabled()).map { it.definition }
             } catch (e: Exception) {
                 FileLogger.e(TAG, "读取子代理定义失败", e)
                 return ToolResult.Error("读取子代理定义失败：${e.message ?: "未知错误"}", "AGENT_LIST_FAILED")
@@ -520,13 +493,10 @@ class TaskTool @Inject constructor(
 
         // 并行写隔离：同一时刻两个子代理写同一处会互相踩，冲突的直接拒绝，由主代理串行派发。
         val writePaths = parseWritePaths(args)
+        var prepared: com.aharou.feature.agent.domain.execution.WorktreeManager.Prepared? = null
+        var reservation: com.aharou.feature.agent.domain.subagent.SubAgentRun? = null
         val subSession = createMutex.withLock {
             if (!eventBus.enabled) return ToolResult.Error(SUBAGENTS_DISABLED_MESSAGE, SUBAGENTS_DISABLED_CODE)
-            if (writePaths != null && writePaths.isNotEmpty()) {
-                subAgentWriteLease.conflictingSession(writePaths, eventBus.activeSubSessionIds.value)?.let { conflictId ->
-                    return conflictError(conflictId, writePaths, WriteLease.NEXT_CREATE, context.projectRoot)
-                }
-            }
             sessionUseCase.newSubSessionEntity(
                 title = description,
                 parentId = parentSessionId,
@@ -539,9 +509,27 @@ class TaskTool @Inject constructor(
                 },
                 mode = definition?.mode
             ).also { created ->
-                sessionUseCase.upsertSession(created)
-                // 写路径租约：派发时声明了才登记；未声明则不限制（保持旧行为）。锁内登记，后续并发派发才看得见。
-                writePaths?.let { subAgentWriteLease.register(created.id, it) }
+                val reserved = try { eventBus.reserveSpawn(created.id, parentSessionId, prompt) } catch (error: com.aharou.feature.agent.domain.subagent.SubAgentRunRejectedException) {
+                    return ToolResult.Error(error.message.orEmpty(), error.reasonCode)
+                }
+                reservation = reserved
+                var accepted = false
+                try {
+                    sessionUseCase.upsertSession(created.copy(executionBindingRequired = true))
+                    val workspace = executionWorkspaces.child(created.id, args, context)
+                    val resources = writePaths?.let { executionWorkspaces.resources(it, workspace.binding) }
+                    writePaths?.let { executions.saveWritePaths(created.id, it) }
+                    if (writePaths != null) subAgentWriteLease.claim(created.id, writePaths, resources, eventBus.activeSubSessionIds.value)?.let { conflictId ->
+                        return conflictError(conflictId, writePaths, WriteLease.NEXT_CREATE, workspace.binding.executionRoot)
+                    }
+                    prepared = workspace
+                    accepted = true
+                } catch (error: Exception) {
+                    if (error is kotlinx.coroutines.CancellationException) throw error
+                    return ToolResult.Error(error.message.orEmpty(), "ISOLATION_PREPARATION_FAILED")
+                } finally {
+                    if (!accepted) eventBus.releaseReserved(reserved)
+                }
             }
         }
         val subSessionId = subSession.id
@@ -551,21 +539,21 @@ class TaskTool @Inject constructor(
         val briefing = runCatching { teamBriefing(parentSessionId, subSessionId) }.getOrNull()
         val detail = if (briefing.isNullOrBlank()) prompt else "$briefing\n\n---\n\n$prompt"
 
-        // 通知 ViewModel 在子会话上启动 AI 工作流
-        eventBus.emit(
-            SubAgentEvent(
-                subSessionId = subSessionId,
-                parentSessionId = parentSessionId,
-                type = SubAgentEventType.SPAWNED,
-                detail = detail
-            )
-        )
+        val reserved = requireNotNull(reservation)
+        try {
+            kotlinx.coroutines.currentCoroutineContext().ensureActive()
+            if (!eventBus.publishSpawn(reserved, detail)) {
+                eventBus.releaseReserved(reserved)
+                return ToolResult.Error("Subagent launch was cancelled before the workspace became ready", "SPAWN_CANCELLED")
+            }
+        } catch (error: kotlinx.coroutines.CancellationException) { eventBus.releaseReserved(reserved); throw error }
         FileLogger.i(TAG, "子代理已创建: session=$subSessionId parent=$parentSessionId agent=${definition?.name ?: "-"}")
 
         return ToolResult.Success(
             buildJsonObject {
                 put("id", subSessionId)
                 put("state", "running")
+                prepared?.let { workspace -> putExecution(workspace.binding); put("parentDirty", workspace.parentDirty) }
                 definition?.let { put("agent", it.name) }
                 put("message", "子代理已创建并开始执行，任务完成后会通知。可用 task(action=\"read\", id=...) 读取输出，task(action=\"stop\", id=...) 主动关闭。")
             }
@@ -654,6 +642,7 @@ class TaskTool @Inject constructor(
         val report = inspection.report
         val verdict = inspection.verdict
         val outputText = if (lastAssistant != null) inspection.conclusion.ifBlank { lastAssistant.content } else content
+        val execution = executions.get(subSessionId)
 
         return ToolResult.Success(
             buildJsonObject {
@@ -661,6 +650,7 @@ class TaskTool @Inject constructor(
                 put("title", sub.title)
                 put("updatedAt", last)
                 put("lastOutput", outputText)
+                putExecution(execution)
                 put("termination", verdict.termination.name)
                 if (verdict.reason.isNotBlank()) put("terminationReason", verdict.reason)
                 put(
@@ -751,6 +741,7 @@ class TaskTool @Inject constructor(
     private suspend fun listSubagents(context: AgentContext): ToolResult {        val parentSessionId = context.sessionId ?: return ToolResult.Error("缺少会话上下文", "NO_SESSION")
         val subs = chatSessionDao.getSubSessionsByParentOnce(parentSessionId)
         val activeIds = eventBus.activeSubSessionIds.value
+        val bindings = subs.associate { it.id to executions.get(it.id) }
 
         val jsonArray = buildJsonArray {
             subs.forEach { entity ->
@@ -760,6 +751,7 @@ class TaskTool @Inject constructor(
                     put("state", if (entity.id in activeIds) "running" else "completed")
                     put("createdAt", entity.createdAt)
                     put("updatedAt", entity.updatedAt)
+                    putExecution(bindings[entity.id])
                 }
             }
         }
@@ -899,11 +891,11 @@ class TaskTool @Inject constructor(
      * 列出可用子代理角色（不创建）：[department] 收窄部门，[agentQuery] 走与 create 同一套选角打分排序。
      * 常驻索引里每个部门只展示 2 个代表角色，主代理想点名时先用这里把名字与用途查出来。
      */
-    private suspend fun listRoles(args: Map<String, JsonElement>): ToolResult {
+    private suspend fun listRoles(args: Map<String, JsonElement>, context: AgentContext): ToolResult {
         val department = (args["department"] as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf { it.isNotBlank() }
         val agentQuery = (args["agentQuery"] as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf { it.isNotBlank() }
         val enabled: List<AgentDefinition> = try {
-            agentDefinitionRepository.listEnabled().map { it.definition }
+            (context.executionBinding?.let { agentDefinitionRepository.listForExecution(it) } ?: agentDefinitionRepository.listEnabled()).map { it.definition }
         } catch (e: Exception) {
             FileLogger.e(TAG, "读取子代理定义失败", e)
             return ToolResult.Error("读取子代理定义失败：${e.message ?: "未知错误"}", "AGENT_LIST_FAILED")
@@ -950,16 +942,19 @@ class TaskTool @Inject constructor(
      * 按预设执行：给了 `workflow` 就走多团队工作流（逐层判定 + 专家级驳回），否则按单个团队跑。
      * 两条路共用 [runPipeline]，分层调度与写冲突拦截不重复实现。
      */
-    private suspend fun runTeam(args: Map<String, JsonElement>, context: AgentContext): ToolResult =
-        if (workflowTarget(args) != null) {
-            workflowRunner.run(args) { pipeline ->
-                runPipeline(buildJsonObject { put("pipeline", pipeline) }, context)
-            }
-        } else {
-            teamTasks.run(args) { pipeline ->
-                runPipeline(buildJsonObject { put("pipeline", pipeline) }, context)
-            }
+    private suspend fun runTeam(args: Map<String, JsonElement>, context: AgentContext): ToolResult {
+        val bound = try { executionWorkspaces.pipeline(args, context) } catch (error: Exception) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            return ToolResult.Error(error.message.orEmpty(), "ISOLATION_PREPARATION_FAILED")
         }
+        val result = if (workflowTarget(args) != null) {
+            workflowRunner.run(args, bound.executionBinding) { pipeline -> runPipeline(buildJsonObject { put("pipeline", pipeline) }, bound) }
+        } else {
+            teamTasks.run(args, bound.executionBinding) { pipeline -> runPipeline(buildJsonObject { put("pipeline", pipeline) }, bound) }
+        }
+        val data = (result as? ToolResult.Success)?.data as? JsonObject ?: return result
+        return ToolResult.Success(buildJsonObject { data.forEach { (key, value) -> put(key, value) }; putExecution(bound.executionBinding); put("parentDirty", bound.executionParentDirty) })
+    }
 
     /** `workflow` 参数：空或缺失返回 null（按单团队跑），`*` 用于列工作流清单。 */
     private fun workflowTarget(args: Map<String, JsonElement>): String? =

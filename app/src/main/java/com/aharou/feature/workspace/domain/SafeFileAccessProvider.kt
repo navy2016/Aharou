@@ -29,6 +29,10 @@ class SafeFileAccessProvider(
     override fun forWorkspace(workspacePath: String): FileAccessProvider =
         if (workspacePath.isBlank()) this else SafeFileAccessProvider(delegate.forWorkspace(workspacePath))
 
+    override fun forExecution(binding: com.aharou.feature.agent.domain.execution.ExecutionBinding,
+        profile: com.aharou.feature.agent.domain.container.ContainerProfile?): FileAccessProvider =
+        SafeFileAccessProvider(delegate.forExecution(binding, profile))
+
     override fun forStrictRead(): FileAccessProvider = delegate.forStrictRead()
 
     override fun readFile(path: String): String = guard("readFile", "") { delegate.readFile(path) }

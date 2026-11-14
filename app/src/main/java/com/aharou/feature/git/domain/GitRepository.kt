@@ -34,11 +34,20 @@ private const val TAG = "GitRepository"
  * （`中文` → `\344\270\255\346\226\207`），关掉后直接输出 UTF-8 原文，中文目录/文件名不再乱码。
  */
 @Singleton
-class GitRepository @Inject constructor(
+class GitRepository private constructor(
     private val engine: CommandEngine,
     private val workspaceRepository: WorkspaceRepository,
     private val preCommitChecker: PreCommitChecker,
+    private val metadataLocks: com.aharou.feature.agent.domain.tool.WorkspaceFileLock,
+    private val execution: com.aharou.feature.agent.domain.execution.ExecutionBinding?
 ) {
+    @Inject
+    constructor(engine: CommandEngine, workspaceRepository: WorkspaceRepository, preCommitChecker: PreCommitChecker,
+        metadataLocks: com.aharou.feature.agent.domain.tool.WorkspaceFileLock) :
+        this(engine, workspaceRepository, preCommitChecker, metadataLocks, null)
+
+    fun forExecution(binding: com.aharou.feature.agent.domain.execution.ExecutionBinding?): GitRepository =
+        GitRepository(engine, workspaceRepository, preCommitChecker, metadataLocks, binding)
     /** 当前选中的 git 仓库路径；null 表示未指定（用工作区根）。由 [setRepoPath] 写入、[repoCwd] 读取。 */
     @Volatile
     var currentRepoPath: String? = null
@@ -71,7 +80,7 @@ class GitRepository @Inject constructor(
      * 回到工作区根，避免命令被发到另一个工作区的仓库里。
      */
     private fun repoCwd(): String {
-        val root = workspaceRepository.currentPath()
+        val root = workspaceRoot()
         val selected = currentRepoPath ?: return root
         val rootPrefix = root.trimEnd('/')
         return if (selected == rootPrefix || selected.startsWith("$rootPrefix/")) selected else root
@@ -83,14 +92,14 @@ class GitRepository @Inject constructor(
     }
 
     /** 当前工作区根路径（git 命令的默认执行目录，也是仓库扫描的基准目录）。 */
-    fun workspaceRoot(): String = workspaceRepository.currentPath()
+    fun workspaceRoot(): String = execution?.executionRoot ?: workspaceRepository.currentPath()
 
     /**
      * 扫描工作区根的一层直接子目录，返回「绝对路径 → 自身是否仓库根」。
      * 实现在 [GitRepoDiscovery]：远程模式下不能用本地 File 列目录，得走 engine 在容器/远端里扫。
      */
     private suspend fun scanDirectSubdirs(): List<Pair<String, Boolean>> =
-        GitRepoDiscovery.scan(engine, workspaceRepository.currentPath())
+        GitRepoDiscovery.scan(engine, workspaceRoot())
 
     /**
      * 发现工作区里的 git 仓库：工作区根 + 一层直接子目录，根优先、子目录按名称排序。
@@ -98,7 +107,7 @@ class GitRepository @Inject constructor(
      * 子目录只认自身是仓库根（见 [scanDirectSubdirs]）。
      */
     suspend fun discoverRepos(): List<String> {
-        val root = workspaceRepository.currentPath()
+        val root = workspaceRoot()
         val repos = mutableListOf<String>()
         if (isGitRepo(root)) repos.add(root)
         repos += scanDirectSubdirs().filter { (_, isRepo) -> isRepo }.map { (path, _) -> path }
@@ -107,7 +116,7 @@ class GitRepository @Inject constructor(
 
     /** 指定路径是否处于 git 工作树内（供切换仓库前校验）。异常（SSH 未连接、目录不存在等）返回 false。 */
     suspend fun isGitRepo(path: String): Boolean = runCatching {
-        engine.runCommandSyncUnbounded("git rev-parse --is-inside-work-tree", path).output.trim() == "true"
+        engine.runCommandSyncUnbounded("git rev-parse --is-inside-work-tree", path, execution = execution).output.trim() == "true"
     }.getOrElse { false }
 
     /** 列出工作区根的一层直接子目录（仓库选择弹窗展示扫描范围）。 */
@@ -127,9 +136,11 @@ class GitRepository @Inject constructor(
         timeoutMs: Long,
         vararg args: String
     ): String {
+        if (execution?.ready == false) throw java.io.IOException("Execution workspace is still preparing")
         // 用不限幅执行：diff 内容/文件内容可能远超 AI 工具链路的 4 万字符限幅，
         // 截断占位符会混入 diff 数据流被 UI 渲染成伪 diff 行。
-        val result = engine.runCommandSyncUnbounded(buildGitCommand(args), repoCwd(), timeoutMs)
+        val key = "git\u0000${execution?.sshIdentity.orEmpty()}\u0000${execution?.gitCommonDir ?: (workspaceRoot().trimEnd('/') + "/.git")}"
+        val result = metadataLocks.withLock(key) { engine.runCommandSyncUnbounded(buildGitCommand(args), repoCwd(), timeoutMs, execution) }
         if (result.outputTruncated) throw GitOutputTooLargeException()
         if (result.exitCode == 0) return result.output
         throw GitCommandFailureException(result.output.ifBlank { "git 退出码 ${result.exitCode}" })
@@ -137,7 +148,7 @@ class GitRepository @Inject constructor(
 
     /** 拼命令并跑（不判退出码），[git] 与 [gitChecked] 复用。 */
     private suspend fun gitRaw(args: Array<out String>): String {
-        val result = engine.runCommandSyncUnbounded(buildGitCommand(args), repoCwd())
+        val result = engine.runCommandSyncUnbounded(buildGitCommand(args), repoCwd(), execution = execution)
         if (result.outputTruncated) throw GitOutputTooLargeException()
         return result.output
     }
@@ -877,6 +888,7 @@ class GitRepository @Inject constructor(
      */
     suspend fun worktreeFileContent(path: String): String {
         val local = withContext(Dispatchers.IO) {
+            if (execution?.mode == "REMOTE_SSH") return@withContext null
             runCatching {
                 java.io.File(repoCwd(), path)
                     .takeIf { it.isFile }
@@ -890,7 +902,7 @@ class GitRepository @Inject constructor(
         if (local != null) return local
         val result = engine.runCommandSyncUnbounded(
             "cat -- ${shellQuote(path)}",
-            repoCwd()
+            repoCwd(), execution = execution
         )
         if (result.outputTruncated) throw GitOutputTooLargeException()
         return if (result.exitCode == 0) result.output else ""

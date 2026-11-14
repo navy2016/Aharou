@@ -3,6 +3,8 @@ package com.aharou.feature.workspace.domain
 import com.aharou.core.util.BoundedLineReader
 import com.aharou.core.util.FileLogger
 import com.aharou.feature.agent.domain.container.RemoteConnectionConfig
+import com.aharou.feature.agent.domain.execution.ExecutionBinding
+import com.aharou.feature.agent.domain.execution.executionIdentity
 import com.aharou.feature.agent.domain.container.RemoteSshConnection
 import com.aharou.feature.agent.domain.container.friendlySshError
 import com.aharou.feature.workspace.data.repository.WorkspaceRepository
@@ -58,7 +60,8 @@ class RemoteSftpFileAccess private constructor(
     private val workspaceRepository: WorkspaceRepository,
     private val boundWorkspace: String?,
     private val boundConfig: RemoteConnectionConfig?,
-    private val boundHome: String?
+    private val boundHome: String?,
+    private val execution: ExecutionBinding? = null
 ) : FileAccessProvider {
 
     @Inject
@@ -73,6 +76,13 @@ class RemoteSftpFileAccess private constructor(
             if (boundWorkspace != null) boundConfig else snapshot?.config,
             if (boundWorkspace != null) boundHome else snapshot?.home
         )
+    }
+
+    override fun forExecution(binding: ExecutionBinding,
+        profile: com.aharou.feature.agent.domain.container.ContainerProfile?): FileAccessProvider {
+        val snapshot = connection.fileAccessSnapshot ?: throw IOException("SSH execution connection is not ready")
+        if (snapshot.config.executionIdentity() != binding.sshIdentity) throw IOException("SSH execution identity changed")
+        return RemoteSftpFileAccess(connection, workspaceRepository, binding.executionRoot, snapshot.config, snapshot.home, binding)
     }
 
     /** 当前选中工作区在远程服务器上的真实路径（如 /data/.../test/111）。 */
@@ -94,9 +104,10 @@ class RemoteSftpFileAccess private constructor(
 
     /** 把远程路径还原为 AI 视角的容器路径（回显用）。 */
     private fun toDisplayPathFromRemote(remotePath: String): String =
-        displayPathFor(remotePath, currentWorkspaceRoot())
+        if (execution?.isWorktree == true) remotePath else displayPathFor(remotePath, currentWorkspaceRoot())
 
     private fun requireBoundConnection() {
+        if (execution != null && connection.config?.executionIdentity() != execution.sshIdentity) throw IOException("SSH execution identity changed")
         if (boundWorkspace != null && boundConfig == null) {
             throw IOException("SSH connection was not configured when the workspace was bound; rebind before accessing files")
         }
