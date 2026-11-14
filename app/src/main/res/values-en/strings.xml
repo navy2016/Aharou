@@ -1752,6 +1752,12 @@
     <string name="subagent_max_running">Concurrency limit</string>
     <string name="subagent_max_running_hint">Max subagents running at the same time, %1$d to %2$d, shared by the whole app. Set to 0 to disable new launches and reawakening without interrupting running turns.</string>
     <string name="subagent_concurrency_disabled">0 (disabled)</string>
+    <string name="execution_prepare_failed">Execution workspace preparation failed. The original project was not used. Check the environment and create a new task.</string>
+    <string name="execution_shared">Shared execution directory</string>
+    <string name="execution_worktree">Independent Git worktree</string>
+    <string name="execution_branch">Execution branch: %1$s</string>
+    <string name="execution_base_commit">Base commit: %1$s</string>
+    <string name="execution_parent_dirty">The parent has uncommitted changes. They were not copied into this worktree.</string>
     <string name="subagent_comm_enabled">Let subagents talk to each other</string>
     <string name="subagent_comm_enabled_desc">Subagents in the same batch can list their teammates and message them (team / tell). When off, they can only report upward; the parent side is unaffected.</string>
     <string name="settings_teams">Team presets</string>

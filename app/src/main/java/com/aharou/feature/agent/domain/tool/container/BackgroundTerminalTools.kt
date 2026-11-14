@@ -332,7 +332,8 @@ class TerminalSessionTool @Inject constructor(
                     title,
                     notify,
                     context.sessionId,
-                    context.projectRoot
+                    context.executionRoot,
+                    context.executionBinding
                 )
             }
         } catch (e: CancellationException) {
@@ -420,7 +421,7 @@ class TerminalSessionTool @Inject constructor(
         val notify = args["notify"]?.asPlainString()?.toBooleanStrictOrNull() ?: false
         try {
             // 新建标签绑定发起会话的工作区：proot 挂载写死在进程 argv 里，用全局工作区会在切工作区后落错仓库。
-            val tabId = sessionManager.startBackgroundCommand(command, title, notify, context?.sessionId, context?.projectRoot)
+            val tabId = sessionManager.startBackgroundCommand(command, title, notify, context?.sessionId, context?.executionRoot, context?.executionBinding)
             FileLogger.i(TAG, "后台命令已启动 tab=$tabId: $command")
 
             // 轮询捕获初始输出：命令退出则提前结束，否则最多等满 START_CAPTURE_MS。

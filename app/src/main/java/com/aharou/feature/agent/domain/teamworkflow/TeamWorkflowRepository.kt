@@ -26,6 +26,10 @@ class TeamWorkflowRepository @Inject constructor(
     val globalRoot: String = "~/.aharou/workflows"
     val projectRoot: String = "${WorkspacePathMapper.CONTAINER_ROOT}/.aharou/workflows"
 
+    fun forExecution(binding: com.aharou.feature.agent.domain.execution.ExecutionBinding): TeamWorkflowRepository =
+        TeamWorkflowRepository(fileAccess.forExecution(binding.copy(executionRoot = binding.projectExecutionRoot, isolation = "shared")),
+            teamRepository.forExecution(binding))
+
     /** 全部预设（含来源作用域），按名称排序。 */
     fun listAll(): List<TeamWorkflowEntry> = mergeAll(scan(globalRoot), scan(projectRoot))
 

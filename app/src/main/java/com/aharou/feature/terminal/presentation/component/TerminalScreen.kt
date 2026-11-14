@@ -116,7 +116,9 @@ fun TerminalScreen(
     initCommand: String? = null,
     /** [Aharou] initCommand 已预填后的回调（宿主清空，避免重复预填）。 */
     onInitCommandConsumed: () -> Unit = {},
+    executionBinding: com.aharou.feature.agent.domain.execution.ExecutionBinding? = null
 ) {
+    LaunchedEffect(viewModel, executionBinding) { viewModel.bindExecution(executionBinding) }
     val prepareState by viewModel.prepareState.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val containerInit by viewModel.containerInit.collectAsStateWithLifecycle()

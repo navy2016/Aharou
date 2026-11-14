@@ -1751,6 +1751,12 @@
     <string name="subagent_max_running">并发上限</string>
     <string name="subagent_max_running_hint">同时运行的子代理数量上限，范围 %1$d~%2$d，名额整个应用共享。设为 0 可关闭新派发和重新唤醒，不中断已运行的轮次。</string>
     <string name="subagent_concurrency_disabled">0（已关闭）</string>
+    <string name="execution_prepare_failed">执行目录准备失败。原项目未用于继续执行，请检查环境后新建任务。</string>
+    <string name="execution_shared">共享执行目录</string>
+    <string name="execution_worktree">独立 Git 工作树</string>
+    <string name="execution_branch">执行分支：%1$s</string>
+    <string name="execution_base_commit">基准提交：%1$s</string>
+    <string name="execution_parent_dirty">父目录有未提交修改，未带入这棵工作树。</string>
     <string name="subagent_comm_enabled">允许子代理互相对话</string>
     <string name="subagent_comm_enabled_desc">同一批次的子代理可以互相查看队友、发消息（team / tell）；关闭后它们只能向上汇报，主代理对子代理的收发不受影响。</string>
     <string name="settings_teams">团队预设</string>

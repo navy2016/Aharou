@@ -2,6 +2,9 @@ package com.aharou.feature.agent.domain.container
 
 import com.aharou.core.util.BoundedLineReader
 import com.aharou.core.util.FileLogger
+import com.aharou.feature.agent.domain.execution.ExecutionBinding
+import com.aharou.feature.agent.domain.execution.executionMounts
+import com.aharou.feature.agent.domain.execution.executionGitEnvironment
 import com.aharou.core.util.LINE_TRUNCATED_NOTE
 import com.aharou.core.util.ProcessIdentity
 import com.aharou.R
@@ -211,17 +214,17 @@ class LinuxContainerEngine @Inject constructor(
     override fun runCommandStream(
         command: String,
         projectPath: String?,
-        timeoutMs: Long
+        timeoutMs: Long, execution: ExecutionBinding?
     ): Flow<CommandEvent> = flow {
         // 本次执行用的容器：按工作区覆盖解析（没配覆盖即全局默认）。
-        val profile = profileResolver.forWorkspace(projectPath)
+        val profile = execution?.let(profileResolver::forExecution) ?: profileResolver.forWorkspace(projectPath)
         // 未就绪（rootfs 未解压或基础包未配置）时不自动初始化，直接提示用户去终端页完成初始化。
         notReadyHintFor(profile)?.let {
             emit(CommandEvent.Line(it))
             emit(CommandEvent.Exit(null))
             return@flow
         }
-        emitAll(streamExecNoInstall(command, projectPath, timeoutMs, profile))
+        emitAll(streamExecNoInstall(command, execution?.executionRoot ?: projectPath, timeoutMs, profile, execution))
     }.flowOn(Dispatchers.IO)
     /**
      * 在容器内流式执行命令的「裸」实现：每读到一行就 emit [CommandEvent.Line]，命令结束 emit
@@ -239,13 +242,13 @@ class LinuxContainerEngine @Inject constructor(
         command: String,
         projectPath: String?,
         timeoutMs: Long,
-        profile: ContainerProfile
+        profile: ContainerProfile, execution: ExecutionBinding? = null
     ): Flow<CommandEvent> = flow {
         val effectiveTimeout = timeoutMs.coerceIn(1L, MAX_TIMEOUT_MS)
         FileLogger.d(TAG, "执行命令(流式) cwd=$projectPath profile=${profile.id} timeout=${effectiveTimeout}ms: ${sanitizeCommandForLog(command)}")
         // 先记下当前已有的子进程，启动后取差集：这是不依赖 Process.pid() 的兜底定位手段
         val childrenBefore = ProcessIdentity.childPids()
-        val process = startContainerProcess(command, projectPath, profile)
+        val process = startContainerProcess(command, projectPath, profile, execution)
         val identity = ProcessIdentity.capture(process)
             ?: ProcessIdentity.childPids().minus(childrenBefore).minOrNull()?.let { ProcessIdentity.Handle(it, null) }
         identity?.let { runtimeProcessStore.record(it.pid, it.startTimeTicks, command) }
@@ -322,12 +325,12 @@ class LinuxContainerEngine @Inject constructor(
     override suspend fun runCommandSync(
         command: String,
         projectPath: String?,
-        timeoutMs: Long
+        timeoutMs: Long, execution: ExecutionBinding?
     ): String = withContext(Dispatchers.IO) {
-        val profile = profileResolver.forWorkspace(projectPath)
+        val profile = execution?.let(profileResolver::forExecution) ?: profileResolver.forWorkspace(projectPath)
         // 未就绪时不自动初始化，直接返回引导文案，由用户去终端页完成初始化。
         notReadyHintFor(profile)?.let { return@withContext it }
-        execCaptured(command, projectPath, timeoutMs, profile).output
+        execCaptured(command, execution?.executionRoot ?: projectPath, timeoutMs, profile, execution = execution).output
     }
 
     /**
@@ -337,12 +340,12 @@ class LinuxContainerEngine @Inject constructor(
     override suspend fun runCommandSyncWithExit(
         command: String,
         projectPath: String?,
-        timeoutMs: Long
+        timeoutMs: Long, execution: ExecutionBinding?
     ): CommandResult = withContext(Dispatchers.IO) {
-        val profile = profileResolver.forWorkspace(projectPath)
+        val profile = execution?.let(profileResolver::forExecution) ?: profileResolver.forWorkspace(projectPath)
         // 未就绪时不自动初始化，直接返回引导文案，由用户去终端页完成初始化。
         notReadyHintFor(profile)?.let { return@withContext CommandResult(it, null) }
-        val r = execCaptured(command, projectPath, timeoutMs, profile)
+        val r = execCaptured(command, execution?.executionRoot ?: projectPath, timeoutMs, profile, execution = execution)
         CommandResult(r.output, r.exitCode, r.truncated)
     }
 
@@ -358,22 +361,22 @@ class LinuxContainerEngine @Inject constructor(
     override suspend fun runCommandSyncIfReady(
         command: String,
         projectPath: String?,
-        timeoutMs: Long
+        timeoutMs: Long, execution: ExecutionBinding?
     ): CommandResult? {
-        val profile = profileResolver.forWorkspace(projectPath)
+        val profile = execution?.let(profileResolver::forExecution) ?: profileResolver.forWorkspace(projectPath)
         if (!containerInstaller.isInstalledFor(profile)) return null
-        val result = execCaptured(command, projectPath, timeoutMs, profile)
+        val result = execCaptured(command, execution?.executionRoot ?: projectPath, timeoutMs, profile, execution = execution)
         return CommandResult(result.output, result.exitCode, result.truncated)
     }
 
     override suspend fun runCommandSyncUnbounded(
         command: String,
         projectPath: String?,
-        timeoutMs: Long
+        timeoutMs: Long, execution: ExecutionBinding?
     ): CommandResult = withContext(Dispatchers.IO) {
-        val profile = profileResolver.forWorkspace(projectPath)
+        val profile = execution?.let(profileResolver::forExecution) ?: profileResolver.forWorkspace(projectPath)
         notReadyHintFor(profile)?.let { return@withContext CommandResult(it, null) }
-        val r = execCaptured(command, projectPath, timeoutMs, profile, unbounded = true)
+        val r = execCaptured(command, execution?.executionRoot ?: projectPath, timeoutMs, profile, unbounded = true, execution = execution)
         CommandResult(r.output, r.exitCode, r.truncated)
     }
 
@@ -390,13 +393,13 @@ class LinuxContainerEngine @Inject constructor(
         projectPath: String?,
         timeoutMs: Long,
         profile: ContainerProfile,
-        unbounded: Boolean = false
+        unbounded: Boolean = false, execution: ExecutionBinding? = null
     ): ExecResult = withContext(Dispatchers.IO) {
         try {
             val effectiveTimeout = timeoutMs.coerceIn(1L, MAX_TIMEOUT_MS)
             FileLogger.d(TAG, "执行命令(同步) cwd=$projectPath profile=${profile.id} timeout=${effectiveTimeout}ms: ${sanitizeCommandForLog(command)}")
             val childrenBefore = ProcessIdentity.childPids()
-            val process = startContainerProcess(command, projectPath, profile)
+            val process = startContainerProcess(command, projectPath, profile, execution)
             val identity = ProcessIdentity.capture(process)
                 ?: ProcessIdentity.childPids().minus(childrenBefore).minOrNull()?.let { ProcessIdentity.Handle(it, null) }
             identity?.let { runtimeProcessStore.record(it.pid, it.startTimeTicks, command) }
@@ -535,12 +538,13 @@ class LinuxContainerEngine @Inject constructor(
      * 启动进程。rootfs/proot 安装就绪则用 PRoot 进入容器；
      * 否则回退到 Android 原生 shell（rootfs 缺失时的兜底）。
      */
-    private fun startContainerProcess(command: String, projectPath: String?, profile: ContainerProfile): Process {
+    private fun startContainerProcess(command: String, projectPath: String?, profile: ContainerProfile, execution: ExecutionBinding? = null): Process {
         ensureHostsForCommand(command, profile)
         val useProot = containerInstaller.isInstalledFor(profile)
+        if (execution?.isWorktree == true && !useProot) throw java.io.IOException("Isolated container is not installed")
 
         val processBuilder = if (useProot) {
-            buildProcessBuilder(buildProotInvocation(command, projectPath, profile))
+            buildProcessBuilder(buildProotInvocation(command, projectPath, profile, execution))
         } else {
             FileLogger.w(TAG, "PRoot 未安装，回退到原生 shell")
             buildNativeProcess(command, projectPath)
@@ -562,7 +566,8 @@ class LinuxContainerEngine @Inject constructor(
      * 终端 PTY 该用哪个容器：与 [buildProotInvocation] 同源（工作区覆盖优先）。
      * 供 [com.aharou.feature.terminal.domain.TerminalSessionManager] 先按它安装、再按它选 shell。
      */
-    fun profileForTerminal(projectPath: String?): ContainerProfile = profileResolver.forWorkspace(projectPath)
+    fun profileForTerminal(projectPath: String?, execution: ExecutionBinding? = null): ContainerProfile =
+        execution?.let(profileResolver::forExecution) ?: profileResolver.forWorkspace(projectPath)
 
     /**
      * 基础包是否已配置完成（按全局默认 profile 的标记）。首次进入终端时由初始化菜单
@@ -812,27 +817,28 @@ class LinuxContainerEngine @Inject constructor(
      * 构造进入容器执行 [command] 的完整 PRoot 调用（argv + env）。
      * 暴露给终端会话：Termux TerminalSession 需要把可执行文件与参数分开传入。
      */
-    fun buildProotInvocation(command: String, projectPath: String?): ProotInvocation =
-        buildProotInvocation(command, projectPath, profileResolver.forTerminal(projectPath))
+    fun buildProotInvocation(command: String, projectPath: String?, execution: ExecutionBinding? = null): ProotInvocation =
+        buildProotInvocation(command, execution?.executionRoot ?: projectPath,
+            execution?.let(profileResolver::forExecution) ?: profileResolver.forTerminal(projectPath), execution)
 
     private fun buildProotInvocation(
         command: String,
         projectPath: String?,
-        profile: ContainerProfile
+        profile: ContainerProfile, execution: ExecutionBinding? = null
     ): ProotInvocation {
-        val argv = buildBaseProotArgv(projectPath, profile)
+        val argv = buildBaseProotArgv(projectPath, profile, execution = execution)
         // 用同一 profile 的 shell：bash 装好后 AI 命令与终端会话都走 bash；装机期间/失败回退 /bin/sh。
         argv.add(defaultShellFor(profile))
         argv.add("-c")
         argv.add(command)
-        return ProotInvocation(argv, buildContainerEnv(profile) + profile.env)
+        return ProotInvocation(argv, executionGitEnvironment(buildContainerEnv(profile) + profile.env, execution ?: profileResolver.executionFor(projectPath)))
     }
 
     /**
      * 构造 PRoot 调用的公共前缀 argv：proot 二进制 + rootfs + 标准绑定 + 伪 root + 工作区绑定，
      * 但**不含**最终的客户机命令（由各调用方自行追加 `/bin/sh -c …` 或 `exec` 形式）。
      */
-    private fun buildBaseProotArgv(projectPath: String?, profile: ContainerProfile, inheritUserConfig: Boolean = true): MutableList<String> {
+    private fun buildBaseProotArgv(projectPath: String?, profile: ContainerProfile, inheritUserConfig: Boolean = true, execution: ExecutionBinding? = null): MutableList<String> {
         val rootfs = containerInstaller.rootfsDirFor(profile).absolutePath
         val prootBin = containerInstaller.prootBin.absolutePath
         if (!containerInstaller.prootBin.exists()) {
@@ -858,6 +864,7 @@ class LinuxContainerEngine @Inject constructor(
             argv.add("/root/workspace")
         }
 
+        argv.addAll(executionMounts(execution ?: profileResolver.executionFor(projectPath), profile))
         if (inheritUserConfig) argv.addAll(containerUserBindings(context, containerInstaller))
 
         // profile 的额外绑定与参数：内置与导入容器默认也在此注入（见 ContainerProfile.DEFAULT_PROOT_ARGS），

@@ -2,6 +2,7 @@ package com.aharou.feature.agent.domain.container
 
 import com.aharou.core.util.FileLogger
 import com.aharou.core.util.shellQuote
+import com.aharou.feature.agent.domain.execution.executionIdentity
 import com.aharou.feature.workspace.domain.remote.RemoteAuth
 import com.aharou.feature.credentials.domain.model.GitCredential
 import com.aharou.feature.settings.data.repository.ExecutionMode
@@ -298,6 +299,16 @@ class RemoteSshConnection @Inject constructor(
 
     fun isConnected(): Boolean =
         sshClient?.isConnected == true && sshClient?.isAuthenticated == true
+
+    suspend fun startBoundExecSession(command: String, expectedIdentity: String?): Session.Command = mutex.withLock {
+        if (expectedIdentity != null && config?.executionIdentity() != expectedIdentity) throw java.io.IOException("SSH execution identity changed")
+        startExecSession(command)
+    }
+
+    suspend fun startBoundShellSession(expectedIdentity: String?): Session = mutex.withLock {
+        if (expectedIdentity != null && config?.executionIdentity() != expectedIdentity) throw java.io.IOException("SSH execution identity changed")
+        startShellSession()
+    }
 
     /** 开一个 exec session 执行命令。调用方负责关闭返回的 Command。 */
     fun startExecSession(command: String): Session.Command {

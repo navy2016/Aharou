@@ -40,7 +40,8 @@ data class ChatSessionEntity(
     val goalStatus: String? = null,
     val goalTurnCount: Int = 0,
     val goalStartInputTokens: Int = 0,
-    val goalStartOutputTokens: Int = 0
+    val goalStartOutputTokens: Int = 0,
+    @androidx.room.ColumnInfo(defaultValue = "0") val executionBindingRequired: Boolean = false
 ) {
     fun toDomain(): ChatSession = ChatSession(
         id = id,
@@ -59,7 +60,8 @@ data class ChatSessionEntity(
         isPinned = isPinned,
         parentId = parentId,
         subagentType = subagentType,
-        ghostMode = ghostMode
+        ghostMode = ghostMode,
+        executionBindingRequired = executionBindingRequired
     )
 
     companion object {
@@ -80,7 +82,8 @@ data class ChatSessionEntity(
             isPinned = session.isPinned,
             parentId = session.parentId,
             subagentType = session.subagentType,
-            ghostMode = session.ghostMode
+            ghostMode = session.ghostMode,
+            executionBindingRequired = session.executionBindingRequired
         )
     }
 }

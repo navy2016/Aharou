@@ -172,7 +172,7 @@ class ImSendMessageTool @Inject constructor(
 
         val file = if (filePath.isNotEmpty()) {
             val candidate = try {
-                resolveFile(filePath, context.projectRoot)
+                resolveFile(filePath, context.executionRoot)
             } catch (e: IllegalArgumentException) {
                 return ToolResult.Error(e.message.orEmpty(), "PATH_NOT_ALLOWED")
             } catch (e: IOException) {

@@ -47,7 +47,8 @@ internal fun WorkbenchPaneContent(
     onOpenFile: ((String) -> Unit)? = null,
     onTakeoverAgent: () -> Unit = {},
     editorLeaveGuard: EditorLeaveGuard? = null,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    executionBinding: com.aharou.feature.agent.domain.execution.ExecutionBinding? = null
 ) {
     Box(modifier = modifier) {
         when (kind) {
@@ -65,9 +66,10 @@ internal fun WorkbenchPaneContent(
             )
 
             WorkbenchPaneKind.TERMINAL -> {
-                val terminalViewModel: TerminalViewModel = hiltViewModel()
+                val terminalViewModel: TerminalViewModel = hiltViewModel(key = "terminal:${executionBinding?.id}")
                 TerminalScreen(
                     viewModel = terminalViewModel,
+                    executionBinding = executionBinding,
                     onNavigateBack = onClose,
                     embedded = true
                 )
@@ -83,9 +85,10 @@ internal fun WorkbenchPaneContent(
                         onNavigateBack = { showCredentials = false }
                     )
                 } else {
-                    val gitViewModel: GitViewModel = hiltViewModel()
+                    val gitViewModel: GitViewModel = hiltViewModel(key = "git:${executionBinding?.id}")
                     GitScreen(
                         viewModel = gitViewModel,
+                        executionBinding = executionBinding,
                         onNavigateToCredentials = { showCredentials = true },
                         onNavigateBack = onClose,
                         onOpenFile = onOpenFile,

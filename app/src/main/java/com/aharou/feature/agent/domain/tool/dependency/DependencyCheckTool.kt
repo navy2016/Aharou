@@ -73,7 +73,7 @@ class DependencyCheckTool @Inject constructor(
         val includeUpToDate = args["include_up_to_date"]?.jsonPrimitive?.booleanOrNull ?: false
 
         return try {
-            val report = checker.check(context.projectRoot, subPath, refresh)
+            val report = checker.check(context.executionRoot, subPath, refresh)
             val visible = if (includeUpToDate) report.results
                 else report.results.filter { it.status != UpdateStatus.UP_TO_DATE }
 

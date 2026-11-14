@@ -193,6 +193,10 @@ interface FileAccessProvider {
      */
     fun forWorkspace(workspacePath: String): FileAccessProvider = this
 
+    fun forExecution(binding: com.aharou.feature.agent.domain.execution.ExecutionBinding,
+        profile: com.aharou.feature.agent.domain.container.ContainerProfile? = null): FileAccessProvider =
+        forWorkspace(binding.executionRoot)
+
     /** 显式文件读取需要报告失败，不能把不可读的目录或文件当成空内容。 */
     fun forStrictRead(): FileAccessProvider = this
 }

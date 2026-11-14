@@ -57,7 +57,8 @@ class CodeEditorViewModel @Inject constructor(
     private val editorLspManager: EditorLspManager,
     private val versions: FileVersionRegistry,
     private val workspaceIdentity: EditorWorkspaceIdentity,
-    private val fileObserver: EditorFileObserver
+    private val fileObserver: EditorFileObserver,
+    private val resourceLocks: com.aharou.feature.agent.domain.tool.WorkspaceFileLock
 ) : ViewModel() {
     private data class DocumentKey(val root: String, val path: String)
     private data class Binding(val root: String, val identity: String, val generation: Long, val access: FileAccessProvider)
@@ -310,6 +311,9 @@ class CodeEditorViewModel @Inject constructor(
                     val baseline = loadedFingerprints[key]
                     val result = withContext(Dispatchers.IO) {
                         try {
+                            val resource = bound.access.resourceKey(request.path)
+                            resourceLocks.withLock(resource) {
+                            check(bound.access.resourceKey(request.path) == resource) { "File target changed" }
                             check(workspaceIdentity.matches(bound.root, bound.identity))
                             val current = bound.access.fingerprint(request.path)
                             if (!force && baseline != null && current != baseline) {
@@ -322,6 +326,7 @@ class CodeEditorViewModel @Inject constructor(
                                 bound.access.writeFile(request.path, request.content)
                                 versions.recordExternal(key, fingerprint)
                                 SaveResult.Success(request) to fingerprint
+                            }
                             }
                         } catch (e: CancellationException) {
                             throw e

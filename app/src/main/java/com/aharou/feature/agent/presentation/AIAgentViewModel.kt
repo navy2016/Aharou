@@ -190,6 +190,8 @@ class AIAgentViewModel @Inject constructor(
     private val askUserQuestionManager: AskUserQuestionManager,
     private val containerEngine: LinuxContainerEngine,
     private val sessionUseCase: SessionUseCase,
+    private val executions: com.aharou.feature.agent.domain.execution.SessionExecutionRepository,
+    private val editorIdentity: com.aharou.feature.editor.presentation.EditorWorkspaceIdentity,
     private val messagePersistenceUseCase: MessagePersistenceUseCase,
     private val messageArchiveStore: MessageArchiveStore,
     private val messageRegenerator: MessageRegenerator,
@@ -918,6 +920,14 @@ class AIAgentViewModel @Inject constructor(
     ) { sessionPath, selected ->
         sessionPath.ifBlank { selected }
     }.stateIn(viewModelScope, SharingStarted.Eagerly, "")
+
+    val currentSessionExecution = _currentSessionId.flatMapLatest { id ->
+        if (id == null) flowOf(null to null) else executions.observe(id).map { id to it }
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, null to null)
+
+    fun editorIdentity(root: String): String = editorIdentity.key(root)
+    fun currentExecution(): com.aharou.feature.agent.domain.execution.ExecutionBinding? =
+        currentSessionExecution.value.takeIf { it.first == _currentSessionId.value }?.second
 
     val sessions: StateFlow<List<ChatSession>> = _currentWorkspace
         .flatMapLatest { path ->
@@ -1669,7 +1679,7 @@ class AIAgentViewModel @Inject constructor(
 
         executeAgentRequestStream(
             request = event.detail,
-            projectRoot = parentSession.workspacePath,
+            projectRoot = sessionUseCase.getSessionById(event.subSessionId)?.workspacePath.orEmpty(),
             targetSessionId = event.subSessionId,
             skipTitleUpdate = true, expectedSubAgentRunId = event.runId
         )
@@ -3263,6 +3273,7 @@ class AIAgentViewModel @Inject constructor(
             // 隐身会话的消息只在内存、不落库；分叉必然把内容写进磁盘，等于给隐身内容留痕。
             // 界面已隐藏该入口，这里再兜一层，防切换会话期间的竞态。
             if (source.ghostMode) return@launch
+            val forkExecution = executions.get(sourceId)
             val all = agentMessageDao.getMessagesBySessionOnce(sourceId)
             val cut = all.indexOfFirst { it.id == messageId }
             if (cut < 0) return@launch
@@ -3294,12 +3305,14 @@ class AIAgentViewModel @Inject constructor(
                 fork.copy(
                     title = context.getString(R.string.chat_fork_title, source.title),
                     modeBeforePlan = source.modeBeforePlan,
+                    executionBindingRequired = forkExecution != null,
                     totalInputTokens = entities.sumOf { it.inputTokens },
                     totalOutputTokens = entities.sumOf { it.outputTokens },
                     lastInputTokens = entities.lastOrNull { it.role == MessageRole.ASSISTANT.name }
                         ?.inputTokens ?: 0
                 )
             )
+            forkExecution?.let { executions.attach(fork.id, it) }
             agentMessageDao.insertAll(entities.map { messagePersistenceUseCase.prepareForStorage(it) })
             messagePersistenceUseCase.invalidateHistory(fork.id)
             selectSession(fork.id)

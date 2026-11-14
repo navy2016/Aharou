@@ -396,16 +396,14 @@ class SystemPromptProvider @Inject constructor(
             // 子代理不读信箱（它的提示词走 buildForSubAgent），也就不给它这行以免指错文件。
             val inboxPath = if (ctx.agentDefinition == null) sharedInbox.containerPath(ctx.projectRoot) else null
             return buildString {
-                append("当前上下文:\n- 项目根目录: ${if (hasWorkspace) "~/workspace" else "（未选择工作区）"}")
+                append("当前上下文:\n- 项目根目录: ${if (hasWorkspace) (if (ctx.executionBinding?.mode == "REMOTE_SSH") ctx.executionRoot else "~/workspace") else "（未选择工作区）"}")
                 if (hasWorkspace) {
                     // `~/workspace` 是容器内固定别名，每个工作区都叫这个名字；不点名不报真实路径，
                     // 模型切区后只能靠旧上下文里的路径猜，容易把改动落到别的仓库。
                     ctx.workspaceName?.takeIf { it.isNotBlank() }?.let {
                         append("\n- 当前工作区: ").append(it)
                     }
-                    append("\n- 工作区实际路径: ").append(ctx.projectRoot)
-                    append("\n说明：`~/workspace` 只是指向上述路径的别名，不同会话、不同时间可能指向不同仓库；")
-                    append("涉及 git、绝对路径、跨会话引用时以「工作区实际路径」为准，不要假定它还是上下文里提到的那个仓库。")
+                    append(executionContextPrompt(ctx, if (ctx.executionBinding?.isWorktree == true) resolvePrompt("agent/worktree-isolation.md") else ""))
                 }
                 if (inboxPath != null) {
                     append("\n- 共享区信箱: $inboxPath（其他工作区留给你的消息写在这里；留话格式见工具约定）")
@@ -574,7 +572,7 @@ class SystemPromptProvider @Inject constructor(
      */
     private inner class RemoteModeSource : PromptSource {
         override fun build(ctx: AgentContext): String? {
-            val profile = runCatching { containerProfileResolver.forWorkspace(ctx.projectRoot) }.getOrNull()
+            val profile = runCatching { ctx.executionBinding?.let(containerProfileResolver::forExecution) ?: containerProfileResolver.forWorkspace(ctx.projectRoot) }.getOrNull()
                 ?: return null
             if (profile.mode != com.aharou.feature.settings.data.repository.ExecutionMode.REMOTE_SSH) return null
             return """
@@ -728,7 +726,7 @@ class SystemPromptProvider @Inject constructor(
                 workspace = effectiveWorkspaceContent,
                 rules = rulesContent,
                 workspaceType = workspaceTypeContent,
-                projectIndex = projectIndex.build(agentContext.projectRoot),
+                projectIndex = projectIndex.build(agentContext.executionRoot),
                 modelIdentity = modelIdentityContent,
                 remoteMode = remoteModeSource.build(agentContext),
                 inbox = inboxContent,
@@ -800,7 +798,7 @@ class SystemPromptProvider @Inject constructor(
                 workspace = workspaceContent,
                 rules = rulesContent,
                 workspaceType = workspaceTypeContent,
-                projectIndex = projectIndex.build(ctx.projectRoot),
+                projectIndex = projectIndex.build(ctx.executionRoot),
                 modelIdentity = modelIdentityContent,
                 remoteMode = remoteModeSource.build(ctx),
                 inbox = inboxContent,

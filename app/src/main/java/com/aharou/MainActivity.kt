@@ -673,12 +673,12 @@ fun AppNavigation(
         if (sidebarVisible) agentViewModel.refreshBrowse()
     }
 
-    // 右栏工作台：大屏下编辑器 / 终端 / Git 与聊天并排，窄窗仍走全屏路由。
+    val execution by agentViewModel.currentSessionExecution.collectAsStateWithLifecycle()
     var paneKind by rememberSaveable { mutableStateOf(WorkbenchPaneKind.NONE) }
     var paneEditorPath by rememberSaveable { mutableStateOf("") }
     var paneEditorRoot by rememberSaveable { mutableStateOf("") }
     var paneEditorIdentity by rememberSaveable { mutableStateOf("") }
-    val currentEditorIdentity by androidx.compose.runtime.rememberUpdatedState(rememberEditorWorkspaceIdentity(currentWorkspace?.path.orEmpty()))
+    val currentEditorIdentity by androidx.compose.runtime.rememberUpdatedState(rememberEditorWorkspaceIdentity(paneEditorRoot.ifBlank { currentWorkspace?.path.orEmpty() }))
     LaunchedEffect(currentEditorIdentity) { if (paneEditorIdentity != currentEditorIdentity && paneKind == WorkbenchPaneKind.EDITOR) paneKind = WorkbenchPaneKind.NONE }
     var paneEditorLine by rememberSaveable { mutableIntStateOf(0) }
     var paneSplit by rememberSaveable { mutableFloatStateOf(DEFAULT_PANE_SPLIT) }
@@ -690,7 +690,6 @@ fun AppNavigation(
     var browserSheetOpen by remember { mutableStateOf(false) }
     var terminalInitCommand by rememberSaveable { mutableStateOf<String?>(null) }
 
-    // 右栏打开时返回键先收起它。限定聊天页：其他页面右栏不渲染，不能在那里吞掉返回事件。
     BackHandler(
         enabled = expanded && currentRoute == "chat" &&
             paneKind != WorkbenchPaneKind.NONE && !drawerState.isOpen
@@ -699,11 +698,12 @@ fun AppNavigation(
     }
 
     val openFile: (String, Int, Boolean) -> Unit = openFile@{ filePath, line, fromDrawer ->
-        val root = currentWorkspace?.path?.takeIf { it.isNotBlank() } ?: return@openFile
-        val identity = currentEditorIdentity
+        if (!fromDrawer && (execution.first != agentViewModel.currentSessionId.value || (execution.first != null && execution.second == null) || execution.second?.ready == false)) return@openFile
+        val root = (if (fromDrawer) currentWorkspace?.path else execution.second?.executionRoot ?: currentWorkspace?.path)?.takeIf { it.isNotBlank() } ?: return@openFile
+        val identity = agentViewModel.editorIdentity(root)
         if (expanded) {
             val apply = {
-                if (currentEditorIdentity == identity) {
+                if (agentViewModel.editorIdentity(root) == identity) {
                     paneEditorRoot = root
                     paneEditorIdentity = identity
                     paneEditorPath = filePath
@@ -903,7 +903,7 @@ fun AppNavigation(
                     FileAwareUriHandler(
                         delegate = defaultUriHandler,
                         onOpenUrl = browserOpener,
-                        workspaceRoot = { currentWorkspace?.path },
+                        workspaceRoot = { execution.second?.executionRoot ?: currentWorkspace?.path },
                         toFileUrl = { path ->
                             runCatching {
                                 val f = agentViewModel.fileAccess.copyToLocal(path)
@@ -921,12 +921,12 @@ fun AppNavigation(
                     maxSplit = MAX_PANE_SPLIT,
                     onSplitChange = { paneSplit = it },
                     rightPane = {
-                        WorkbenchPaneContent(
+                        if (execution.first == agentViewModel.currentSessionId.value && (execution.first == null || execution.second != null)) WorkbenchPaneContent(
                             kind = paneKind,
                             editorPath = paneEditorPath,
                             editorLine = paneEditorLine,
                             editorRoot = paneEditorRoot, editorIdentity = paneEditorIdentity, currentEditorIdentity = currentEditorIdentity,
-                            onClose = { paneKind = WorkbenchPaneKind.NONE },
+                            onClose = { paneKind = WorkbenchPaneKind.NONE }, executionBinding = agentViewModel.currentExecution(),
                             onOpenFile = { path -> openFile(path, 0, false) },
                             editorLeaveGuard = editorLeaveGuard,
                             onAddSelectionToInput = { text ->
@@ -1026,9 +1026,9 @@ fun AppNavigation(
                 )
             }
             composable("terminal") { entry ->
-                val terminalViewModel: TerminalViewModel = hiltViewModel()
-                TerminalScreen(
-                    viewModel = terminalViewModel,
+                val terminalViewModel: TerminalViewModel = hiltViewModel(key = "terminal:${agentViewModel.currentExecution()?.id}")
+                if (execution.first == agentViewModel.currentSessionId.value && (execution.first == null || execution.second != null)) TerminalScreen(
+                    viewModel = terminalViewModel, executionBinding = agentViewModel.currentExecution(),
                     onNavigateBack = {
                         // 退场期间仍可能收到点击，不能弹出已经成为当前页的聊天首页。
                         if (navController.currentBackStackEntry === entry) {
@@ -1109,9 +1109,9 @@ fun AppNavigation(
                 }
             }
             composable("git") {
-                val gitViewModel: GitViewModel = hiltViewModel()
-                GitScreen(
-                    viewModel = gitViewModel,
+                val gitViewModel: GitViewModel = hiltViewModel(key = "git:${agentViewModel.currentExecution()?.id}")
+                if (execution.first == agentViewModel.currentSessionId.value && (execution.first == null || execution.second != null)) GitScreen(
+                    viewModel = gitViewModel, executionBinding = agentViewModel.currentExecution(),
                     onNavigateToCredentials = { navController.navigate("credentials") },
                     onNavigateBack = { navController.popBackStack() },
                     onOpenFile = { path -> openFile(path, 0, false) },
@@ -1146,7 +1146,7 @@ fun AppNavigation(
                 val openDrawerOnBack = entry.arguments?.getBoolean("drawer") ?: false
                 val root = entry.arguments?.getString("root").orEmpty()
                 val identity = entry.arguments?.getString("identity").orEmpty()
-                if (root.isBlank() || identity != currentEditorIdentity) { LaunchedEffect(entry) { navController.popBackStack() } } else CodeEditorScreen(
+                if (root.isBlank() || identity != agentViewModel.editorIdentity(root)) { LaunchedEffect(entry) { navController.popBackStack() } } else CodeEditorScreen(
                     path = entry.arguments?.getString("path").orEmpty(),
                     workspaceRoot = root, workspaceIdentity = identity,
                     initialLine = entry.arguments?.getInt("line") ?: 0,
