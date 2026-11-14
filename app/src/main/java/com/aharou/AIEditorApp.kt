@@ -458,7 +458,7 @@ class AIEditorApp : Application(), Configuration.Provider, coil.ImageLoaderFacto
         // 灵动岛 / 流体云：启动即接管一条实时进度通知（不依赖小染开关）。
         liveUpdateCoordinator.start()
         // 启动凭据请求监听：容器内 credential helper 写来的 cred-req-* → 全局弹窗回填 → 回喂 git 续跑。
-        credentialRequestBridge.start()
+        credentialRequestBridge.start(appScope)
         // 启动即把最新的内置指南手册提取到私有配置目录
         appScope.launch {
             ContainerInstaller.extractDocs(this@AIEditorApp)

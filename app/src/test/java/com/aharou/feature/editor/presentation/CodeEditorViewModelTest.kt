@@ -48,6 +48,7 @@ class CodeEditorViewModelTest {
     private val first = mockk<FileAccessProvider>(relaxed = true)
     private val second = mockk<FileAccessProvider>(relaxed = true)
     private val identity = mockk<EditorWorkspaceIdentity>(relaxed = true)
+    private val versions = FileVersionRegistry()
     private val settings = mockk<EditorSettingsRepository>()
     private lateinit var model: CodeEditorViewModel
 
@@ -60,13 +61,15 @@ class CodeEditorViewModelTest {
         every { second.forStrictRead() } returns second
         every { first.fingerprint(any()) } returns "first"
         every { second.fingerprint(any()) } returns "second"
+        every { first.toDisplayPath(any()) } answers { arg(0) }
+        every { second.toDisplayPath(any()) } answers { arg(0) }
         every { identity.matches(any(), any()) } returns true
         every { settings.settingsFlow } returns MutableStateFlow(EditorSettings())
         mockkObject(TextMateSetup)
         every { TextMateSetup.ensureInitialized(any()) } returns Unit
         every { TextMateSetup.scopeNameFor(any()) } returns null
         model = CodeEditorViewModel(mockk<Context>(relaxed = true), files, settings,
-            mockk<EditorLspManager>(relaxed = true), mockk<FileVersionRegistry>(relaxed = true), identity)
+            mockk<EditorLspManager>(relaxed = true), versions, identity)
     }
 
     @After
@@ -78,6 +81,47 @@ class CodeEditorViewModelTest {
         every { first.isFile(any()) } returns true
         every { first.fileSize(any()) } returns size
         every { first.copyToLocal(any(), any()) } returns file
+    }
+
+    @Test
+    fun openingEditorDoesNotRefreshAgentBaselineOrChangeLastWriter() = runTest(dispatcher) {
+        val path = "~/workspace/a.txt"
+        readableFile(12)
+        versions.record("agent", path, "old")
+        versions.recordWriter(path, "other-agent")
+        model.bindWorkspace("/one", "version-read")
+        model.load(path)
+        model.uiState.first { it is EditorUiState.Success }
+        assertEquals("old", versions.get("agent", path))
+        assertEquals("other-agent", versions.lastWriter(path))
+    }
+
+    @Test
+    fun savePreservesAgentBaselineAndRecordsExternalWriter() = runTest(dispatcher) {
+        val path = "~/workspace/a.txt"
+        versions.record("agent", path, "old")
+        model.bindWorkspace("/one", "version-save")
+        val request = model.createSaveRequest(path, "user content")!!
+        val event = async(UnconfinedTestDispatcher(testScheduler)) { model.saveEvents.first() }
+        model.save(request)
+        assertEquals(SaveResult.Success(request), event.await())
+        assertEquals("old", versions.get("agent", path))
+        assertEquals("用户/编辑器", versions.lastWriter(path))
+    }
+
+    @Test
+    fun failedSavePreservesVersionAndWriter() = runTest(dispatcher) {
+        val path = "~/workspace/a.txt"
+        versions.record("agent", path, "old")
+        versions.recordWriter(path, "other-agent")
+        every { first.writeFile(any(), any(), any(), any()) } throws java.io.IOException("fixture")
+        model.bindWorkspace("/one", "version-save-error")
+        val request = model.createSaveRequest(path, "user content")!!
+        val event = async(UnconfinedTestDispatcher(testScheduler)) { model.saveEvents.first() }
+        model.save(request)
+        assertTrue(event.await() is SaveResult.Error)
+        assertEquals("old", versions.get("agent", path))
+        assertEquals("other-agent", versions.lastWriter(path))
     }
 
     @Test fun twentyMiBOpensWithoutConfirmation() = runTest(dispatcher) {

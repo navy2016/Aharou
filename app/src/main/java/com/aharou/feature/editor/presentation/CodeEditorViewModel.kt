@@ -195,7 +195,6 @@ class CodeEditorViewModel @Inject constructor(
             if (state is EditorUiState.Success) {
                 val draft = EditorSessionManager.forWorkspace(bound.identity).snapshot(path)?.takeIf { it.dirty }
                 loadedFingerprints[key] = draft?.let { sha256Fingerprint(it.baselineContent.toByteArray(Charsets.UTF_8)) } ?: fingerprint
-                fingerprint?.let { versions.recordExternal(bound.access.toDisplayPath(path), it) }
             }
             if (currentPath == path) {
                 _uiState.value = state
@@ -256,7 +255,7 @@ class CodeEditorViewModel @Inject constructor(
                             (loadedStates[key] as? EditorUiState.Success)?.scopeName)
                         loadedFingerprints[key] = result.second
                         if (binding === bound) {
-                            result.second?.let { versions.recordExternal(bound.access.toDisplayPath(request.path), it) }
+                            versions.recordExternal(bound.access.toDisplayPath(request.path))
                             markSaved(key, request.content)
                         }
                     }

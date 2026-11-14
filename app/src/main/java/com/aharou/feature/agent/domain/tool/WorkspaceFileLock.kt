@@ -2,9 +2,6 @@ package com.aharou.feature.agent.domain.tool
 
 import com.aharou.core.util.FileLogger
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicInteger
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -48,11 +45,10 @@ private const val TAG = "WorkspaceFileLock"
 @Singleton
 class WorkspaceFileLock @Inject constructor() {
 
-    /** 逻辑路径 → 该路径的锁。仅有持锁者或等待者时存在。 */
-    private val locks = ConcurrentHashMap<String, Mutex>()
+    private class LockEntry(val mutex: Mutex = Mutex(), var users: Int = 0)
 
-    /** 逻辑路径 → 正在持有或等待该锁的协程数。归零即回收 [locks] 中的条目。 */
-    private val waiters = ConcurrentHashMap<String, AtomicInteger>()
+    private val registryLock = Any()
+    private val locks = mutableMapOf<String, LockEntry>()
 
     /**
      * 在指定逻辑路径的互斥保护下执行 [block]。
@@ -71,21 +67,24 @@ class WorkspaceFileLock @Inject constructor() {
 
         if (ordered.isEmpty()) return block()
 
-        val acquired = ArrayList<Mutex>(ordered.size)
+        val acquired = ArrayList<LockEntry>(ordered.size)
         try {
             for (key in ordered) {
-                val mutex = acquireRef(key)
-                mutex.lock()
-                acquired.add(mutex)
+                val entry = acquireRef(key)
+                try {
+                    entry.mutex.lock()
+                } catch (error: Throwable) {
+                    releaseRef(key, entry)
+                    throw error
+                }
+                acquired.add(entry)
             }
             logIfSuspicious()
             return block()
         } finally {
-            // 逆序释放，与获取顺序对称。无论 block 正常返回、抛异常还是协程被取消，这里都会执行——
-            // 这是本实现不需要租约的前提。
             for (i in acquired.indices.reversed()) {
-                acquired[i].unlock()
-                releaseRef(ordered[i])
+                acquired[i].mutex.unlock()
+                releaseRef(ordered[i], acquired[i])
             }
         }
     }
@@ -94,20 +93,16 @@ class WorkspaceFileLock @Inject constructor() {
     suspend fun <T> withLock(key: String?, block: suspend () -> T): T = withLock(listOf(key), block)
 
     /** 当前活跃的锁条目数，供测试与诊断使用。 */
-    fun trackedKeyCount(): Int = locks.size
+    fun trackedKeyCount(): Int = synchronized(registryLock) { locks.size }
 
-    private fun acquireRef(key: String): Mutex {
-        waiters.computeIfAbsent(key) { AtomicInteger(0) }.incrementAndGet()
-        return locks.computeIfAbsent(key) { Mutex() }
+    private fun acquireRef(key: String): LockEntry = synchronized(registryLock) {
+        locks.getOrPut(key) { LockEntry() }.also { it.users++ }
     }
 
-    private fun releaseRef(key: String) {
-        val counter = waiters[key] ?: return
-        if (counter.decrementAndGet() <= 0) {
-            // 计数归零：无人持有也无人等待，移除条目避免无界增长。先清 waiters 再清 locks，且只在
-            // 计数仍为 0 时移除——若此刻有新的 acquireRef 插入，它会重新建立条目，不会拿到被移除的旧 Mutex。
-            waiters.remove(key, counter)
-            if (counter.get() <= 0) locks.remove(key)
+    private fun releaseRef(key: String, entry: LockEntry) {
+        synchronized(registryLock) {
+            entry.users--
+            if (entry.users == 0) locks.remove(key)
         }
     }
 
@@ -117,7 +112,7 @@ class WorkspaceFileLock @Inject constructor() {
      * 排查后者的唯一线索，因此保留但用 `w` 级别避免刷屏。
      */
     private fun logIfSuspicious() {
-        val size = locks.size
+        val size = trackedKeyCount()
         if (size >= SUSPICIOUS_KEY_COUNT) {
             FileLogger.w(TAG, "路径锁条目数偏高: $size（等待者计数回收可能失效，请检查 releaseRef）")
         }

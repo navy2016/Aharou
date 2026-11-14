@@ -64,17 +64,8 @@ class FileVersionRegistry @Inject constructor() {
         synchronized(map) { return map[key] }
     }
 
-    /**
-     * 登记一次**不属于任何 AI 会话**的写入（典型是编辑器保存）。
-     *
-     * 这里刻意不按会话分桶：编辑器是用户本人的操作，用户改完文件后，**所有**会话手上的版本都已过期，
-     * 因此每个已存在的会话桶都要更新。只记在"通配桶"里会漏判——写前校验查的是自己会话的桶。
-     */
-    fun recordExternal(key: String, fingerprint: String) {
-        if (key.isEmpty()) return
-        for (map in sessions.values) {
-            synchronized(map) { map[key] = fingerprint }
-        }
+    /** 外部写入只登记来源；会话读到的版本只能由该会话重新读取或成功写入后更新。 */
+    fun recordExternal(key: String) {
         recordWriter(key, "用户/编辑器")
     }
 

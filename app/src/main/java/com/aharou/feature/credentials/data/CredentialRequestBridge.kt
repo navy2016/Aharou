@@ -8,9 +8,8 @@ import com.aharou.feature.agent.domain.container.LinuxContainerEngine
 import com.aharou.feature.credentials.domain.model.GitCredential
 import com.aharou.feature.credentials.domain.repository.CredentialRepository
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -20,6 +19,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -58,8 +58,8 @@ class CredentialRequestBridge @Inject constructor(
         const val RESP_PREFIX = "cred-resp-"
         /** 兜底轮询间隔：中心服务的 inotify 不灵时也能在 ~1s 内捕获请求。 */
         const val FALLBACK_POLL_MS = 1000L
-        /** seen 去重集容量上限，超过淘汰最旧。 */
-        const val SEEN_CAP = 64
+        /** helper 等待约 25 分钟、命令 watchdog 上限 30 分钟；保留期间内的请求供重启后继续处理。 */
+        const val STALE_FILE_AGE_MS = 30L * 60L * 1000L
     }
 
     /** 当前待弹凭据请求（host 来自 git credential 协议的 host 字段）。null 表示无待处理。 */
@@ -71,14 +71,11 @@ class CredentialRequestBridge @Inject constructor(
     private val _request = MutableStateFlow<CredentialRequest?>(null)
     val request: StateFlow<CredentialRequest?> = _request.asStateFlow()
 
-    /** 已处理/在途的 requestId 去重集，防事件订阅与兜底轮询双触发同一条。 */
-    private val seen = LinkedHashSetWithCap(SEEN_CAP)
-
-    private val seenMutex = Mutex()
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-
-    private var started = false
-    private var aharouDir: File? = null
+    private val queue = CredentialRequestQueue()
+    private val requestMutex = Mutex()
+    private val started = AtomicBoolean()
+    private lateinit var scope: CoroutineScope
+    private lateinit var aharouDir: File
 
     /**
      * 启动监听：订阅中心服务的 aharou 目录事件捕获请求，并起兜底轮询协程。幂等可重复调。
@@ -86,53 +83,63 @@ class CredentialRequestBridge @Inject constructor(
      * 目录必须是 filesDir/aharou（容器内的 /root/.aharou）：helper 写在那儿，
      * 而 PRoot 绑定的是同一个宿主目录，写旧名 filesDir/aicode 会永远收不到请求。
      */
-    fun start() {
+    fun start(scope: CoroutineScope) {
+        if (!started.compareAndSet(false, true)) return
+        this.scope = scope
         val dir = File(context.filesDir, "aharou").apply { mkdirs() }
         aharouDir = dir
-        if (!started) {
-            started = true
-            // 请求文件落在 ~/.aharou 根下，由中心服务统一监听；本桥只做业务侧过滤、去重与弹窗。
-            scope.launch {
-                fileChangeHub.watchAicode().collect { batch ->
-                    for (change in batch.changes) {
-                        val name = File(change.hostPath).name
-                        if (!name.startsWith(REQ_PREFIX) || name.endsWith(".tmp")) continue
-                        handleRequest(File(dir, name), name)
+        scope.launch {
+            cleanupStale(dir)
+            launch {
+                try {
+                    fileChangeHub.watchAicode().collect { batch ->
+                        for (change in batch.changes) {
+                            val name = File(change.hostPath).name
+                            if (!name.startsWith(REQ_PREFIX) || name.endsWith(".tmp")) continue
+                            handleRequest(File(dir, name), name)
+                        }
+                        reclaimMissingRequests(dir)
                     }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    FileLogger.w(TAG, "凭据目录监听失败，继续轮询请求", error)
                 }
             }
             FileLogger.i(TAG, "已订阅 aicode 目录事件，监听 ${dir.absolutePath}")
+            fallbackPollLoop(dir)
         }
-        // 兜底轮询：个别机型 -b 目录 inotify 失效时仍能取到请求；并清理上次会话残留。
-        scope.launch { cleanupStale(dir); fallbackPollLoop(dir) }
     }
 
-    /** 兜底轮询：扫未在 seen 里的 cred-req-* 文件，补中心服务漏报。App 常驻，永不退出。 */
     private suspend fun fallbackPollLoop(dir: File) {
         while (true) {
-            delay(FALLBACK_POLL_MS)
             runCatching {
                 dir.listFiles { f -> f.name.startsWith(REQ_PREFIX) && !f.name.endsWith(".tmp") }
                     ?.forEach { f -> handleRequest(f, f.name) }
-            }
+                reclaimMissingRequests(dir)
+            }.onFailure { FileLogger.w(TAG, "扫描凭据请求失败", it) }
+            delay(FALLBACK_POLL_MS)
         }
     }
 
-    /** 启动时清理上次会话残留的 cred-req/cred-resp，避免误触发弹窗。 */
     private fun cleanupStale(dir: File) {
+        val now = System.currentTimeMillis()
         runCatching {
             dir.listFiles { f -> f.name.startsWith(REQ_PREFIX) || f.name.startsWith(RESP_PREFIX) }
+                ?.filter { now - it.lastModified() > STALE_FILE_AGE_MS }
                 ?.forEach { it.delete() }
         }
     }
 
-    /** 解析请求文件 → 置 [request]，并 inc 在途。事件订阅与轮询都走这里，靠 seen 去重。 */
+    private suspend fun reclaimMissingRequests(dir: File) = requestMutex.withLock {
+        val existing = queue.requestIds.filter { File(dir, REQ_PREFIX + it).exists() }.toSet()
+        repeat(queue.retain(existing)) { containerEngine.decPromptInFlight() }
+        _request.value = queue.current
+    }
+
     private suspend fun handleRequest(file: File, name: String) {
         val requestId = name.removePrefix(REQ_PREFIX)
-        val fresh = seenMutex.withLock { seen.addCapped(requestId) }
-        if (!fresh) return   // 已处理过，跳过
-        // 文件已被 helper 删了或为空（启动残留已 cleanup，正常不该到这里），跳过。
-        if (!file.exists() || file.length() == 0L) return
+        if (!file.isFile || file.length() == 0L) return
         val text = runCatching { file.readText() }.getOrNull() ?: return
         val host = text.lineSequence()
             .firstOrNull { it.startsWith("host=") }
@@ -141,69 +148,59 @@ class CredentialRequestBridge @Inject constructor(
             ?.lowercase()
             ?: ""
         if (host.isBlank()) return
-        containerEngine.incPromptInFlight()
-        FileLogger.i(TAG, "收到凭据请求 host=$host id=$requestId")
-        _request.value = CredentialRequest(requestId, host)
-    }
-
-    /**
-     * 用户填完凭据确认：写响应明文 KV + 存凭据文件（每主机一条，后续免填）+ dec 在途 + 清 [request]。
-     * [host] 取自 [CredentialRequest]（Git 进程在收到 resp 前不会删 req，但 host 已在请求里，直接传更稳）。
-     */
-    fun respond(requestId: String, host: String, username: String, token: String) {
-        val dir = aharouDir ?: File(context.filesDir, "aharou")
-        scope.launch {
-            writeRespAtomically(dir, requestId, "username=$username\npassword=$token\n")
-            runCatching {
-                val h = host.trim().lowercase()
-                credentialRepository.save(
-                    GitCredential(id = h, host = h, username = username.trim(), token = token)
-                )
-            }.onFailure { FileLogger.e(TAG, "保存回填凭据失败", it) }
-            containerEngine.decPromptInFlight()
-            clearIfCurrent(requestId)
-            FileLogger.i(TAG, "已回填凭据 id=$requestId host=$host")
+        requestMutex.withLock {
+            if (!file.exists() || File(file.parentFile, RESP_PREFIX + requestId).exists()) return@withLock
+            if (!queue.enqueue(CredentialRequest(requestId, host))) return@withLock
+            containerEngine.incPromptInFlight()
+            _request.value = queue.current
+            FileLogger.i(TAG, "收到凭据请求 host=$host id=$requestId")
         }
     }
 
-    /** 用户取消弹窗：写 cancel 响应（helper 退出非零让 git 报认证失败）+ dec 在途 + 清状态。 */
-    fun cancel(requestId: String) {
-        val dir = aharouDir ?: File(context.filesDir, "aharou")
+    fun respond(requestId: String, username: String, token: String) {
         scope.launch {
-            writeRespAtomically(dir, requestId, "cancel=1\n")
-            containerEngine.decPromptInFlight()
-            clearIfCurrent(requestId)
+            val request = requestMutex.withLock { queue.claim(requestId) } ?: return@launch
+            if (!writeRespAtomically(aharouDir, requestId, "username=$username\npassword=$token\n")) {
+                requestMutex.withLock { queue.retry(request) }
+                return@launch
+            }
+            runCatching {
+                credentialRepository.save(
+                    GitCredential(id = request.host, host = request.host, username = username.trim(), token = token)
+                )
+            }.onFailure { FileLogger.e(TAG, "保存回填凭据失败", it) }
+            completeRequest(request)
+            FileLogger.i(TAG, "已回填凭据 id=$requestId host=${request.host}")
+        }
+    }
+
+    fun cancel(requestId: String) {
+        scope.launch {
+            val request = requestMutex.withLock { queue.claim(requestId) } ?: return@launch
+            if (!writeRespAtomically(aharouDir, requestId, "cancel=1\n")) {
+                requestMutex.withLock { queue.retry(request) }
+                return@launch
+            }
+            completeRequest(request)
             FileLogger.i(TAG, "用户取消凭据弹窗 id=$requestId")
         }
     }
 
-    private fun clearIfCurrent(requestId: String) {
-        if (_request.value?.requestId == requestId) _request.value = null
+    private suspend fun completeRequest(request: CredentialRequest) = requestMutex.withLock {
+        if (queue.complete(request)) containerEngine.decPromptInFlight()
+        _request.value = queue.current
     }
 
-    /** 先写 .tmp 再 rename 原子写，避免 helper 轮询读到半截文件。 */
-    private fun writeRespAtomically(dir: File, requestId: String, content: String) {
+    private fun writeRespAtomically(dir: File, requestId: String, content: String): Boolean {
         val target = File(dir, RESP_PREFIX + requestId)
         val tmp = File(dir, "$RESP_PREFIX${requestId}.tmp")
-        runCatching {
-            tmp.writeTextSafely(content, TAG)
-            if (target.exists()) target.delete()
-            if (!tmp.renameTo(target)) {
-                target.writeTextSafely(content, TAG)
-                tmp.delete()
-            }
-        }.onFailure { FileLogger.e(TAG, "写凭据响应文件失败", it) }
-    }
-}
-
-/** 带容量上限的 [LinkedHashSet]，超过 [cap] 自动淘汰最旧条目。供 [CredentialRequestBridge.seen] 去重。 */
-private class LinkedHashSetWithCap(private val cap: Int) : LinkedHashSet<String>() {
-    fun addCapped(id: String): Boolean {
-        if (contains(id)) return false
-        add(id)
-        if (size > cap) {
-            iterator().next().let { remove(it) }
+        return try {
+            runCatching {
+                check(tmp.writeTextSafely(content, TAG)) { "无法写入凭据响应临时文件" }
+                check(tmp.renameTo(target)) { "无法发布凭据响应文件" }
+            }.onFailure { FileLogger.e(TAG, "写凭据响应文件失败", it) }.isSuccess
+        } finally {
+            tmp.delete()
         }
-        return true
     }
 }
