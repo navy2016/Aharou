@@ -93,6 +93,7 @@ data class AgentTurnRequest(
  */
 @Singleton
 class AgentTurnRunner @Inject constructor(
+    private val agentNotificationCenter: com.aharou.feature.agent.domain.notification.AgentNotificationCenter,
     private val agentWorkflow: AgentWorkflow,
     private val toolRegistry: ToolRegistry,
     private val chatSessionDao: ChatSessionDao,
@@ -234,6 +235,15 @@ class AgentTurnRunner @Inject constructor(
 
         // 进程死掉后才作答的提问先补回会话，否则模型看不到用户的选择。
         flushAnsweredQuestions(sessionId)
+        val fileChanges = agentNotificationCenter.peek(sessionId)
+            .filter { it.kind == com.aharou.feature.agent.domain.notification.AgentNotificationKind.FILE_CHANGE }
+        if (fileChanges.isNotEmpty()) {
+            messagePersistenceUseCase.persist(sessionId, MessageRole.USER,
+                com.aharou.feature.agent.domain.notification.AgentNotificationFormatter.buildMessage(fileChanges),
+                id = UUID.randomUUID().toString())
+            agentNotificationCenter.ack(sessionId, fileChanges.map { it.seq })
+            messagePersistenceUseCase.invalidateHistory(sessionId)
+        }
         // 必须在插入本次用户消息之前取历史：workflow 会自己把 userRequest 加进去，避免重复。
         val history = messagePersistenceUseCase.buildHistory(sessionId, SessionUseCase.PENDING_TOOL_MARKER)
             .filterNot { it is com.aharou.feature.agent.domain.model.AgentMessage.UserMessage && it.id == turn.existingUserMessageId }

@@ -1,9 +1,14 @@
 package com.aharou.feature.workspace.domain
 
+import com.aharou.core.util.BoundedLineReader
+import com.aharou.core.util.LINE_TRUNCATED_NOTE
 import java.io.File
 import java.io.FilterInputStream
 import java.io.IOException
 import java.io.InputStream
+import java.io.InputStreamReader
+import java.security.DigestInputStream
+import java.security.MessageDigest
 import java.nio.charset.Charset
 
 /** 目录条目信息，供 [FileAccessProvider.listFiles] 返回。 */
@@ -49,6 +54,12 @@ interface FileAccessProvider {
      * 序列可重复迭代（每次迭代重新打开底层读取）；调用方需在 IO 线程上迭代；文件不存在时抛 [NoSuchFileException]。
      */
     fun readLines(path: String): Sequence<String>
+
+    /** 从同一原始字节流逐行读取并计算指纹；consumeLine 返回 false 时停止，且不返回完整指纹。 */
+    fun readLinesWithFingerprint(path: String, consumeLine: (String) -> Boolean): String?
+
+    /** 实际文件资源的身份，供锁与读取基线使用；不能用显示路径代替。 */
+    fun resourceKey(path: String): String
 
     /**
      * 写入文件全文。父目录不存在则自动创建。[overwrite] 为 false 且文件已存在时抛 [FileAlreadyExistsException]。
@@ -234,6 +245,19 @@ internal fun formatSha256(digest: ByteArray): String =
     }
 
 private const val HEX_CHARS = "0123456789abcdef"
+
+internal fun readLinesAndFingerprint(input: InputStream, consumeLine: (String) -> Boolean): String? {
+    val digest = MessageDigest.getInstance("SHA-256")
+    val stream = DigestInputStream(input, digest)
+    BoundedLineReader(InputStreamReader(stream, Charsets.UTF_8)).use { reader ->
+        while (true) {
+            val line = reader.readLine() ?: break
+            val text = if (line.truncated) line.text + LINE_TRUNCATED_NOTE else line.text
+            if (!consumeLine(text)) return null
+        }
+    }
+    return formatSha256(digest.digest())
+}
 
 /**
  * 单个目录条目名是否合法：非空、不含路径分隔符、不是 `.` 或 `..`。

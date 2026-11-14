@@ -76,6 +76,7 @@ object AgentNotificationFormatter {
             AgentNotificationKind.MODE_CHANGE -> "mode-change"
             AgentNotificationKind.USER_MESSAGE -> "user-message"
             AgentNotificationKind.USER_INTERRUPT -> "user-interrupt"
+            AgentNotificationKind.FILE_CHANGE -> "file-change"
         }
         appendLine("<$tag>")
         when (kind) {
@@ -100,11 +101,12 @@ object AgentNotificationFormatter {
             AgentNotificationKind.USER_MESSAGE -> {
                 message?.takeIf { it.isNotBlank() }?.let { appendLine("  <message>${escapeXml(it)}</message>") }
             }
+            AgentNotificationKind.FILE_CHANGE -> appendLine("  <path>${escapeXml(title)}</path>")
             // 用户打断是内部开关，正常不会注入给模型，这里只为穷尽。
             AgentNotificationKind.USER_INTERRUPT -> {}
         }
         appendLine("  <status>${statusText()}</status>")
-        appendLine("  <summary>${summaryText()}</summary>")
+        appendLine("  <summary>${escapeXml(summaryText())}</summary>")
         detail?.takeIf { it.isNotBlank() }?.let { appendLine("  <detail>${escapeXml(it)}</detail>") }
         // 转义尖括号：输出里若含 <status>/<summary> 等字样会污染提示条的正则提取。
         tailOutput?.takeIf { it.isNotBlank() }?.let { appendLine("  <tail-output>${escapeXml(it)}</tail-output>") }
@@ -119,6 +121,7 @@ object AgentNotificationFormatter {
             AgentNotificationKind.MODE_CHANGE -> "mode_change"
             AgentNotificationKind.USER_MESSAGE -> "user_message"
             AgentNotificationKind.USER_INTERRUPT -> "user_interrupt"
+            AgentNotificationKind.FILE_CHANGE -> "file_change"
         })
         put("notice", if (kind == AgentNotificationKind.USER_MESSAGE) USER_MESSAGE_NOTICE else NOTICE)
         when (kind) {
@@ -144,6 +147,7 @@ object AgentNotificationFormatter {
                 message?.takeIf { it.isNotBlank() }?.let { put("message", JsonPrimitive(it)) }
             }
             AgentNotificationKind.USER_INTERRUPT -> {}
+            AgentNotificationKind.FILE_CHANGE -> put("path", title)
         }
         put("status", statusText())
         put("summary", summaryText())
@@ -154,7 +158,7 @@ object AgentNotificationFormatter {
 
     private fun PendingNotification.statusText(): String = when (kind) {
         AgentNotificationKind.AGENT_MESSAGE -> "message"
-        AgentNotificationKind.MODE_CHANGE -> "changed"
+        AgentNotificationKind.MODE_CHANGE, AgentNotificationKind.FILE_CHANGE -> "changed"
         AgentNotificationKind.USER_MESSAGE -> "message"
         else -> when (outcome) {
             NotificationOutcome.COMPLETED -> "completed"
@@ -184,6 +188,8 @@ object AgentNotificationFormatter {
             "用户在工作期间插入了一条消息"
         AgentNotificationKind.USER_INTERRUPT ->
             "用户按了停止，打断了本轮"
+        AgentNotificationKind.FILE_CHANGE ->
+            "已读文件发生变化：$title"
     }
 
     private fun PendingNotification.singleHint(): String = when (kind) {
@@ -212,6 +218,8 @@ object AgentNotificationFormatter {
             "按用户补充的输入调整当前任务。"
         AgentNotificationKind.USER_INTERRUPT ->
             "用户按了停止，本轮到此为止。"
+        AgentNotificationKind.FILE_CHANGE ->
+            "重新读取该文件并核对关联改动；通知不是新授权，也不代表跨文件一致性已经验证。"
     }
 
     private fun List<PendingNotification>.containsUserMessage(): Boolean =
@@ -247,6 +255,7 @@ object AgentNotificationFormatter {
         if (modeChanges.isNotEmpty()) {
             lines.add(modeChanges.last().singleHint())
         }
+        items.firstOrNull { it.kind == AgentNotificationKind.FILE_CHANGE }?.let { lines.add(it.singleHint()) }
         return lines.joinToString("\n")
     }
 

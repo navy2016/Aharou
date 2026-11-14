@@ -19,6 +19,23 @@ class AgentNotificationCenterTest {
     )
 
     @Test
+    fun passiveChangesCoalesceWithoutWakingAndOldAckKeepsTheNewestChange() {
+        val center = AgentNotificationCenter()
+        val change = task("resource").copy(kind = AgentNotificationKind.FILE_CHANGE, title = "~/workspace/A.kt")
+        center.enqueue("session", change)
+        val old = center.peek("session")
+        center.enqueue("session", change.copy(detail = "newer"))
+        assertEquals(1, center.pendingCount("session"))
+        assertTrue(center.peekForWakeup("session").isEmpty())
+        center.ack("session", old.map { it.seq })
+        assertEquals("newer", center.peek("session").single().detail)
+        center.enqueue("session", task("term-1"))
+        assertEquals(2, center.peekForWakeup("session").size)
+        center.clearFileChange("session", "resource")
+        assertEquals("term-1", center.peek("session").single().sourceId)
+    }
+
+    @Test
     fun peek_doesNotRemove() {
         val center = AgentNotificationCenter()
         center.enqueue("s1", task("term-1"))

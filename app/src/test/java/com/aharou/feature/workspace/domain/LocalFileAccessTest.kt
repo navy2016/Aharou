@@ -102,6 +102,34 @@ class LocalFileAccessTest {
         }
     }
 
+    @Test
+    fun snapshotKeepsTheOpenedFileAndRawCrLfFingerprintAfterReplacement() {
+        val access = newAccess()
+        val original = "old\r\nsecond\r\n"
+        access.writeFile("snapshot.txt", original)
+        val lines = mutableListOf<String>()
+        val fingerprint = access.readLinesWithFingerprint("snapshot.txt") { line ->
+            lines += line
+            if (lines.size == 1) access.writeFile("snapshot.txt", "new")
+            true
+        }
+        assertEquals(listOf("old", "second"), lines)
+        assertEquals(sha256Fingerprint(original.toByteArray()), fingerprint)
+        assertEquals("new", access.readFile("snapshot.txt"))
+    }
+
+    @Test
+    fun resourceIdentityResolvesAliasesButSeparatesDifferentFiles() {
+        val access = newAccess()
+        File(tmp.root, "one").mkdirs()
+        File(tmp.root, "two").mkdirs()
+        access.writeFile("one/file", "one")
+        access.writeFile("two/file", "two")
+        java.nio.file.Files.createSymbolicLink(File(tmp.root, "alias").toPath(), File(tmp.root, "one/file").toPath())
+        assertEquals(access.resourceKey("one/file"), access.resourceKey("alias"))
+        assertFalse(access.resourceKey("one/file") == access.resourceKey("two/file"))
+    }
+
     // ---------- 元数据：exists / isDirectory / isFile / fileSize / lastModified ----------
 
     @Test

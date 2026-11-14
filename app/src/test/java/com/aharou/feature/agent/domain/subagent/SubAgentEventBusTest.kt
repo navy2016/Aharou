@@ -24,6 +24,31 @@ class SubAgentEventBusTest {
     )
 
     @Test
+    fun zeroLimitRejectsNewAndReservedRunsWithoutStoppingAnActiveRun() {
+        var limit = 2
+        val bus = SubAgentEventBus(MaxRunningSource { limit }, CommunicationEnabledSource { true })
+        val active = requireNotNull(bus.beginRun("active", "parent", 1))
+        spawn(bus, "reserved")
+        val reserved = requireNotNull(bus.currentRun("reserved"))
+        limit = 0
+        assertFalse(bus.enabled)
+        assertTrue(bus.isFull)
+        for ((id, expected) in listOf("new" to null, "reserved" to reserved.runId)) {
+            val error = runCatching { bus.beginRun(id, "parent", 2, expected) }.exceptionOrNull()
+            assertEquals(SUBAGENTS_DISABLED_CODE, (error as? SubAgentRunRejectedException)?.reasonCode)
+        }
+        assertTrue(bus.isCurrentRun(active))
+        assertTrue(bus.finishRun(active, SubAgentEvent("active", "parent", SubAgentEventType.COMPLETED, runId = active.runId)))
+        assertTrue(bus.releaseReserved(reserved))
+        assertEquals(0, bus.activeCount)
+        val closed = runCatching { bus.beginRun("active", "parent", 3) }.exceptionOrNull()
+        assertEquals(SUBAGENTS_DISABLED_CODE, (closed as? SubAgentRunRejectedException)?.reasonCode)
+        limit = 1
+        assertTrue(bus.enabled)
+        assertNotNull(bus.beginRun("active", "parent", 4))
+    }
+
+    @Test
     fun spawn_marksActive() {
         val bus = busWith()
         spawn(bus, "sub-1")

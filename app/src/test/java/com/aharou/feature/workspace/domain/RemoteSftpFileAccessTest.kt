@@ -200,6 +200,42 @@ class RemoteSftpFileAccessTest {
         verify(exactly = 1) { file.close() }
     }
 
+    @Test fun snapshotUsesOneRemoteHandleForLinesAndFingerprint() {
+        val a = access().forWorkspace("/remote/a")
+        val original = "old\r\nsecond\n".toByteArray()
+        val attributes = mockk<FileAttributes>()
+        every { attributes.type } returns FileMode.Type.REGULAR
+        every { sftp.statExistence("/remote/a/file") } returns attributes
+        val file = mockk<RemoteFile>(relaxed = true)
+        every { sftp.open("/remote/a/file") } returns file
+        every { file.read(any(), any(), any(), any()) } answers {
+            val offset = firstArg<Long>().toInt()
+            val count = minOf(arg<Int>(3), original.size - offset)
+            if (count <= 0) -1 else {
+                original.copyInto(secondArg(), thirdArg(), offset, offset + count)
+                count
+            }
+        }
+        val lines = mutableListOf<String>()
+        assertEquals(sha256Fingerprint(original), a.readLinesWithFingerprint("~/workspace/file") { lines += it; true })
+        assertEquals(listOf("old", "second"), lines)
+        verify(exactly = 1) { sftp.open("/remote/a/file") }
+        verify(exactly = 1) { file.close() }
+    }
+
+    @Test fun resourceIdentitySeparatesWorkspacesAndUsesTheResolvedRemoteTarget() {
+        val root = access()
+        every { sftp.canonicalize("/") } returns "/"
+        val first = root.forWorkspace("/remote/a")
+        val second = root.forWorkspace("/remote/b")
+        val firstKey = first.resourceKey("~/workspace/file")
+        assertFalse(firstKey == second.resourceKey("~/workspace/file"))
+        val attributes = mockk<FileAttributes>()
+        every { sftp.statExistence("/alias") } returns attributes
+        every { sftp.canonicalize("/alias") } returns "/remote/a/file"
+        assertEquals(firstKey, second.resourceKey("/alias"))
+    }
+
     @Test fun boundedDownloadRejectsOversizeBeforeOpeningRemoteFile() {
         val a = access().forWorkspace("/remote/a")
         val attributes = mockk<FileAttributes>()

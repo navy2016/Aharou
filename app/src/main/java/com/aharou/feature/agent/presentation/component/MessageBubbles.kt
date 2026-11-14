@@ -708,11 +708,11 @@ private fun BackgroundNotificationBar(message: AgentUIMessage) {
     val statuses = BG_STATUS_REGEX
         .findAll(content).map { it.groupValues.getOrNull(1)?.trim()?.lowercase() }.filterNotNull().toList()
     val summaries = BG_SUMMARY_REGEX
-        .findAll(content).map { it.groupValues.getOrNull(1)?.trim() }.filterNotNull().toList()
+        .findAll(content).map { it.groupValues.getOrNull(1)?.trim()
+            ?.replace("&lt;", "<")?.replace("&gt;", ">")?.replace("&amp;", "&") }.filterNotNull().toList()
     val dotColor = when {
-        // status 为 message 的是代理间消息（非失败），用主色；其余非 completed 视为失败。
-        statuses.any { it != "completed" && it != "message" } -> MaterialTheme.colorScheme.error
-        statuses.any { it == "message" } -> MaterialTheme.colorScheme.primary
+        statuses.any { it != "completed" && it != "message" && it != "changed" } -> MaterialTheme.colorScheme.error
+        statuses.any { it == "message" || it == "changed" } -> MaterialTheme.colorScheme.primary
         else -> MaterialTheme.semanticColors.success
     }
     val label = when {
@@ -720,9 +720,11 @@ private fun BackgroundNotificationBar(message: AgentUIMessage) {
         else -> {
             // 摘要原文由 domain 层生成（同一份还要喂给 AI），这里不按中文标记切字符串取任务名——
             // 换文案或切到英文界面这段解析就废了。多条时只报数量与失败数。
-            val failedCount = statuses.count { it != "completed" }
+            val failedCount = statuses.count { it != "completed" && it != "message" && it != "changed" }
             if (failedCount > 0) {
                 stringResource(R.string.chat_bg_commands_partial_failed, summaries.size, failedCount)
+            } else if (statuses.any { it == "changed" }) {
+                stringResource(R.string.chat_notifications_updated, summaries.size)
             } else {
                 stringResource(R.string.chat_bg_commands_done, summaries.size)
             }

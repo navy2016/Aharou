@@ -2,6 +2,7 @@ package com.aharou.feature.credentials.presentation.component
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.aharou.feature.credentials.data.CredentialRequestBridge
 
@@ -16,12 +17,14 @@ import com.aharou.feature.credentials.data.CredentialRequestBridge
 fun GlobalCredentialDialogHost(bridge: CredentialRequestBridge) {
     val request by bridge.request.collectAsStateWithLifecycle()
     request?.let { req ->
-        CredentialPromptDialog(
-            host = req.host,
-            onConfirm = { username, token ->
-                bridge.respond(req.requestId, req.host, username, token)
-            },
-            onDismiss = { bridge.cancel(req.requestId) }
-        )
+        key(req.requestId) {
+            CredentialPromptDialog(
+                host = req.host,
+                onConfirm = { username, token ->
+                    bridge.respond(req.requestId, username, token)
+                },
+                onDismiss = { bridge.cancel(req.requestId) }
+            )
+        }
     }
 }

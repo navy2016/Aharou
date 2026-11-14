@@ -57,6 +57,12 @@ object EditorSessionManager {
             _snapshots.value = _snapshots.value - path
         }
 
+        fun refreshClean(path: String, content: String, current: Snapshot? = _snapshots.value[path]): Boolean {
+            if (current?.dirty == true) return false
+            if (current != null) _snapshots.value = _snapshots.value + (path to current.copy(content = content, baselineContent = content))
+            return true
+        }
+
         fun markSaved(path: String, content: String) {
             val snapshot = _snapshots.value[path] ?: return
             _snapshots.value = _snapshots.value + (path to snapshot.copy(

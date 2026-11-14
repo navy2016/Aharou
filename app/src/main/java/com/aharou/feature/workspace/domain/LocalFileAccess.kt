@@ -86,6 +86,11 @@ class LocalFileAccess @Inject constructor(
         return boundedLines { file.bufferedReader() }
     }
 
+    override fun readLinesWithFingerprint(path: String, consumeLine: (String) -> Boolean): String? =
+        readLinesAndFingerprint(resolve(path).inputStream(), consumeLine)
+
+    override fun resourceKey(path: String): String = "local\u0000${resolve(path).canonicalPath}"
+
     override fun writeFile(path: String, content: String, overwrite: Boolean, encoding: Charset) {
         val file = resolve(path)
         if (file.exists() && !overwrite) throw FileAlreadyExistsException(file)

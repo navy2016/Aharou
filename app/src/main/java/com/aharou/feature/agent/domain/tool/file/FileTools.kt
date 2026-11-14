@@ -19,6 +19,8 @@ import com.aharou.feature.agent.domain.tool.staleFileMessage
 import com.aharou.core.util.FileLogger
 import com.aharou.core.util.LineDiff
 import com.aharou.feature.workspace.domain.FileAccessProvider
+import com.aharou.feature.workspace.domain.sha256Fingerprint
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withTimeoutOrNull
@@ -97,30 +99,11 @@ class ReadFileTool @Inject constructor(
         context: AgentContext
     ): ToolResult {
         // 会话绑定的工作区：本会话的文件操作只落在自己的工作区，不跟着全局切换走
-        val access = fileAccess.forWorkspace(context.projectRoot)
-        val result = performRead(access, args)
-        // 只有成功读取才登记版本；读失败（文件不存在/过大）时没有可信基线，登记反而会让后续写入被误判为过期。
-        if (result is ToolResult.Success) {
-            args["path"]?.jsonPrimitive?.contentOrNull?.let { path ->
-                recordVersion(access, path, context.sessionId)
-            }
-        }
-        return result
+        val access = fileAccess.forWorkspace(context.projectRoot).forStrictRead()
+        return performRead(access, args, context.sessionId)
     }
 
-    /**
-     * 登记读到的版本。失败一律忽略——这里只是为后续写入建立基线，登记不上最多退化成「没读过就写」的
-     * 放行语义，不应让一次成功的读取因为登记失败而报错。
-     */
-    private suspend fun recordVersion(access: FileAccessProvider, path: String, sessionId: String?) {
-        runCatching { runFileOpWithTimeout { access.fingerprint(path) } }
-            .onFailure { FileLogger.w(TAG, "read_file 登记版本失败: $path", it) }
-            .getOrNull()
-            ?.let { versions.record(sessionId, access.toDisplayPath(path), it) }
-    }
-
-    /** 真正的读取逻辑（不涉及版本登记）；成功时由调用方登记版本来建立后续写入的基线。 */
-    private suspend fun performRead(access: FileAccessProvider, args: Map<String, JsonElement>): ToolResult {
+    private suspend fun performRead(access: FileAccessProvider, args: Map<String, JsonElement>, sessionId: String?): ToolResult {
         return try {
             val path = args["path"]?.jsonPrimitive?.contentOrNull ?: run {
                 FileLogger.w(TAG, "read_file 缺少 path 参数")
@@ -153,17 +136,20 @@ class ReadFileTool @Inject constructor(
             // 靠这个截止时间让循环在读完当前行后主动收手，不至于把整文件读完才返回。
             val deadline = System.currentTimeMillis() + FILE_TOOL_TIMEOUT_MS
             var timedOut = false
-            val readFinished = runFileOpWithTimeout {
-                for (line in access.readLines(path)) {
+            lateinit var key: String
+            val readRevision = versions.currentRevision()
+            val fingerprint = runFileOpWithTimeout {
+                key = access.resourceKey(path)
+                access.readLinesWithFingerprint(path) { line ->
                     if (System.currentTimeMillis() > deadline) {
                         timedOut = true
-                        break
+                        return@readLinesWithFingerprint false
                     }
                     lineNo++
                     totalLines = lineNo
-                    if (lineNo < startLine) continue
-                    // 已越过窗口，但仍需继续计数以得到准确 total_lines。
-                    if (lineNo > endCap) continue
+                    if (lineNo < startLine) return@readLinesWithFingerprint true
+                    // 窗口之外仍消费原始流，保证 total_lines 和指纹都覆盖整份文件。
+                    if (lineNo > endCap) return@readLinesWithFingerprint true
                     if (!truncatedByBytes) {
                         val lineBytes = line.toByteArray(Charsets.UTF_8).size + 1
                         if (byteCount + lineBytes > MAX_BYTES) {
@@ -183,9 +169,10 @@ class ReadFileTool @Inject constructor(
                             emittedLines++
                         }
                     }
+                    true
                 }
             }
-            if (readFinished == null || timedOut) {
+            if (fingerprint == null || timedOut) {
                 FileLogger.w(TAG, "read_file 超时（>${FILE_TOOL_TIMEOUT_MS}ms）: $path")
                 return ToolResult.Error(
                     "读取文件超时（超过 ${FILE_TOOL_TIMEOUT_MS / 1000} 秒仍未返回），请缩小读取范围或改用 Bash 工具",
@@ -215,7 +202,10 @@ class ReadFileTool @Inject constructor(
                 "truncated" to JsonPrimitive(truncated)
             )
             if (note != null) resultMap["note"] = JsonPrimitive(note)
+            versions.record(sessionId, key, fingerprint, access.toDisplayPath(path), readRevision)
             ToolResult.Success(JsonObject(resultMap))
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             FileLogger.e(TAG, "read_file 异常", e)
             ToolResult.Error(e.message ?: "读取文件失败", "READ_ERROR")
@@ -294,13 +284,13 @@ class WriteFileTool @Inject constructor(
             FileLogger.w(TAG, "write_file 缺少 path 参数")
             return ToolResult.Error("路径参数缺失", "MISSING_PATH")
         }
-        val result = withWriteGuards(access, path, context.sessionId) {
+        val result = withWriteGuards(access, path, context.sessionId) { key ->
             // 实时查租约：grant 可能在本轮中途追加过路径，而 context.writePaths 是轮首快照，
             // 读快照会让主会话的 grant 对正在跑的轮次不生效。未登记时退回快照（主会话为 null）。
             performWrite(
                 access, path, args,
                 writeLease.pathsFor(context.sessionId) ?: context.writePaths,
-                context.sessionId, context.projectRoot
+                context.sessionId, context.projectRoot, key
             )
         }
         if (result is ToolResult.Success && SharedInbox.isInboxPath(path)) inboxEvents.notifyChanged()
@@ -315,20 +305,16 @@ class WriteFileTool @Inject constructor(
         access: FileAccessProvider,
         path: String,
         sessionId: String?,
-        block: suspend () -> ToolResult
+        block: suspend (String) -> ToolResult
     ): ToolResult {
-        val key = access.toDisplayPath(path)
+        val key = runFileOpWithTimeout { access.resourceKey(path) }
+            ?: return ToolResult.Error("解析文件路径超时：$path", "TIMEOUT")
         val existedBefore = access.exists(path)
         checkVersion(access, path, key, sessionId, existedBefore)?.let { return it }
 
         return fileLock.withLock(key) {
-            checkVersion(access, path, key, sessionId, existedBefore)?.let { return@withLock it }
-            val result = block()
-            // 写成功后登记新版本；登记失败不能把已成功的写入报成失败（写已落盘，最坏只是退化成未登记）。
-            if (result is ToolResult.Success) {
-                recordVersion(access, path, key, sessionId)
-            }
-            result
+            checkVersion(access, path, key, sessionId, access.exists(path))?.let { return@withLock it }
+            block(key)
         }
     }
 
@@ -348,25 +334,14 @@ class WriteFileTool @Inject constructor(
         if (!existed) return null
         val recorded = versions.get(sessionId, key) ?: return null
         val current = runCatching { runFileOpWithTimeout { access.fingerprint(path) } }
-            .onFailure { FileLogger.w(TAG, "write_file 无法计算当前指纹，跳过版本校验: $key", it) }
+            .onFailure { FileLogger.w(TAG, "write_file 无法计算当前指纹，跳过版本校验: $path", it) }
             .getOrNull() ?: return null
         if (recorded == current) return null
-        FileLogger.w(TAG, "write_file 拒绝过期写: $key（记录版本与当前不一致）")
+        FileLogger.w(TAG, "write_file 拒绝过期写: $path（记录版本与当前不一致）")
         // 带上冲突来源：模型不用把整文件重读一遍才知道是谁改的、改完多少行。
         val writer = versions.lastWriter(key)
         val currentLines = runCatching { runFileOpWithTimeout { access.readLines(path).count() } }.getOrNull()
-        return ToolResult.Error(staleFileMessage(key, writer, currentLines), STALE_FILE_CODE)
-    }
-
-    /** 写成功后登记新指纹。登记失败只记日志，不改变写入结果。 */
-    private suspend fun recordVersion(access: FileAccessProvider, path: String, key: String, sessionId: String?) {
-        runCatching { runFileOpWithTimeout { access.fingerprint(path) } }
-            .onFailure { FileLogger.w(TAG, "write_file 写后登记版本失败: $key", it) }
-            .getOrNull()
-            ?.let {
-                versions.record(sessionId, key, it)
-                versions.recordWriter(key, sessionId?.takeIf { id -> id.isNotBlank() } ?: "未知会话")
-            }
+        return ToolResult.Error(staleFileMessage(access.toDisplayPath(path), writer, currentLines), STALE_FILE_CODE)
     }
 
     /** 真正的写入逻辑：不涉及锁与版本，纯粹按 [args] 完成一次整文件写。 */
@@ -376,7 +351,8 @@ class WriteFileTool @Inject constructor(
         args: Map<String, JsonElement>,
         writePaths: Set<String>?,
         sessionId: String?,
-        workspaceRoot: String?
+        workspaceRoot: String?,
+        key: String
     ): ToolResult {
         return try {
             WriteLease.denialReason(writePaths, path, sessionId, workspaceRoot)?.let { reason ->
@@ -417,6 +393,8 @@ class WriteFileTool @Inject constructor(
                 ""
             }
 
+            val fingerprint = sha256Fingerprint(content.toByteArray(Charsets.UTF_8))
+            val displayPath = access.toDisplayPath(path)
             val writeFinished = runFileOpWithTimeout { access.writeFile(path, content, overwrite = true) }
             if (writeFinished == null) {
                 FileLogger.w(TAG, "write_file 超时（>${FILE_TOOL_TIMEOUT_MS}ms）: $path")
@@ -425,6 +403,8 @@ class WriteFileTool @Inject constructor(
                     "TIMEOUT"
                 )
             }
+
+            versions.recordWrite(sessionId, key, fingerprint, displayPath)
 
             // 生成统一差异文本：新建文件按「整体新增」呈现（旧内容视为空，避免一行伪删除）；
             // 覆盖写则计算旧→新的行级增删。LineDiff 为 O(n·m) 内存，超大文件重写时跳过 LCS、

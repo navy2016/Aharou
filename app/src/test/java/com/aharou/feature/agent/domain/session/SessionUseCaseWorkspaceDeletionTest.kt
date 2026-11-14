@@ -32,7 +32,7 @@ class SessionUseCaseWorkspaceDeletionTest {
         )
 
         val archives = mockk<MessageArchiveStore>(relaxed = true)
-        val useCase = SessionUseCase(chatDao, messageDao, archives)
+        val useCase = SessionUseCase(chatDao, messageDao, archives, mockk(relaxed = true))
         val deleted = useCase.deleteSessionsByWorkspace("/ws/a")
 
         assertEquals(2, deleted)
@@ -50,7 +50,7 @@ class SessionUseCaseWorkspaceDeletionTest {
         coEvery { chatDao.getAllSessionsByWorkspaceOnce("/ws/empty") } returns emptyList()
 
         val archives = mockk<MessageArchiveStore>(relaxed = true)
-        val useCase = SessionUseCase(chatDao, messageDao, archives)
+        val useCase = SessionUseCase(chatDao, messageDao, archives, mockk(relaxed = true))
         val deleted = useCase.deleteSessionsByWorkspace("/ws/empty")
 
         assertEquals(0, deleted)

@@ -183,6 +183,26 @@ class SubAgentTaskTrackerTest {
     }
 
     @Test
+    fun disablingAfterReservationRejectsLaunchAndReclaimsItsSlot() = runTest {
+        var limit = 1
+        val limitedBus = SubAgentEventBus(MaxRunningSource { limit }, CommunicationEnabledSource { true })
+        val limitedTracker = SubAgentTaskTracker(tasks, messages, limitedBus, sessions)
+        limitedTracker.start(backgroundScope)
+        runCurrent()
+        limitedBus.emit(SubAgentEvent("sub", "parent", SubAgentEventType.SPAWNED, "original"))
+        val reserved = requireNotNull(limitedBus.currentRun("sub"))
+        limit = 0
+        val error = runCatching { limitedTracker.beginRun("sub", "parent", reserved.runId) }.exceptionOrNull()
+        assertEquals("SUBAGENTS_DISABLED", (error as? SubAgentRunRejectedException)?.reasonCode)
+        assertEquals("FAILED", tasks.rows["sub"]?.status)
+        assertEquals(0, limitedBus.activeCount)
+        assertNull(limitedBus.currentRun("sub"))
+        assertEquals(SubAgentEventType.FAILED, limitedBus.terminalEvent("sub")?.type)
+        limit = 1
+        assertNotNull(limitedTracker.beginRun("sub", "parent"))
+    }
+
+    @Test
     fun sameMillisecondVersionsAndOldCasCannotOverwriteNewRun() = runTest {
         assertEquals(101L, tracker.nextVersion(100, 100))
         assertEquals(101L, tracker.nextVersion(100, 99))

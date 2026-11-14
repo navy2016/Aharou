@@ -197,6 +197,9 @@ class CheckpointManagerSessionIsolationTest {
 
     private class LocalFileAccess : FileAccessProvider {
         override fun readFile(path: String): String = File(path).readText()
+        override fun readLinesWithFingerprint(path: String, consumeLine: (String) -> Boolean): String? =
+            com.aharou.feature.workspace.domain.readLinesAndFingerprint(File(path).inputStream(), consumeLine)
+        override fun resourceKey(path: String): String = "local\u0000${File(path).canonicalPath}"
         override fun writeFile(path: String, content: String, overwrite: Boolean, encoding: Charset) {
             File(path).parentFile?.mkdirs()
             File(path).writeText(content, encoding)

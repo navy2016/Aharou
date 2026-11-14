@@ -61,6 +61,11 @@ class DelegatingFileAccess private constructor(
 
     override fun readLines(path: String): Sequence<String> = delegate().readLines(path)
 
+    override fun readLinesWithFingerprint(path: String, consumeLine: (String) -> Boolean): String? =
+        delegate().readLinesWithFingerprint(path, consumeLine)
+
+    override fun resourceKey(path: String): String = delegate().resourceKey(path)
+
     override fun writeFile(path: String, content: String, overwrite: Boolean, encoding: Charset) =
         delegate().writeFile(path, content, overwrite, encoding)
 
