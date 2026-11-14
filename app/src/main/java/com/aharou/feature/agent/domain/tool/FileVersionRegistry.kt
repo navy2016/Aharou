@@ -6,6 +6,9 @@ import com.aharou.feature.agent.domain.notification.NotificationOutcome
 import com.aharou.feature.agent.domain.notification.PendingNotification
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 
 /** 读取基线只属于实际读取或写入的会话；其它会话只收到变化提醒。 */
 @Singleton
@@ -16,6 +19,8 @@ class FileVersionRegistry @Inject constructor(
     private data class Writer(val name: String, val fingerprint: String?, val revision: Long)
 
     private val lock = Any()
+    private val _changes = MutableSharedFlow<String>(extraBufferCapacity = 64, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+    val changes = _changes.asSharedFlow()
     private val sessions = mutableMapOf<String, MutableMap<String, ReadVersion>>()
     private val writers = object : LinkedHashMap<String, Writer>(16, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Writer>): Boolean =
@@ -77,6 +82,7 @@ class FileVersionRegistry @Inject constructor(
                 }
             }
         }
+        _changes.tryEmit(key)
     }
 
     private fun notifyChanged(sessionId: String, key: String, displayPath: String, writer: String) {

@@ -862,6 +862,8 @@
     <string name="editor_redo">Redo</string>
     <string name="editor_save_success">Saved</string>
     <string name="editor_save_failed">Save failed</string>
+    <string name="editor_external_change">The file changed externally. Your unsaved content is preserved. Save to compare and resolve the conflict.</string>
+    <string name="editor_external_unavailable">Unable to refresh the file. Your current content is preserved. Check the file and connection, then return to the editor.</string>
     <string name="editor_unsaved_title">Unsaved changes</string>
     <string name="editor_unsaved_message">This file has unsaved changes. Save them?</string>
     <string name="editor_save_and_exit">Save and exit</string>

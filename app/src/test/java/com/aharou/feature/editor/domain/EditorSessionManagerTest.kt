@@ -65,6 +65,32 @@ class EditorSessionManagerTest {
         assertEquals(false, session.snapshot("/a")?.dirty)
     }
 
+    @Test
+    fun refreshCleanUpdatesContentAndBaselineButPreservesViewport() {
+        val original = snapshot("old").copy(cursorLine = 4, cursorColumn = 8, scrollY = 120)
+        session.saveSnapshot("/a", original)
+        assertTrue(session.refreshClean("/a", "new"))
+        assertEquals(original.copy(content = "new", baselineContent = "new"), session.snapshot("/a"))
+    }
+
+    @Test
+    fun refreshCleanDoesNotReplaceDirtySnapshot() {
+        val original = snapshot("draft").copy(dirty = true, baselineContent = "disk")
+        session.saveSnapshot("/a", original)
+        assertEquals(false, session.refreshClean("/a", "new"))
+        assertEquals(original, session.snapshot("/a"))
+    }
+
+    @Test
+    fun currentBufferOverridesAnOlderSnapshotWhenCheckingDirtyState() {
+        session.saveSnapshot("/a", snapshot("draft").copy(dirty = true, baselineContent = "disk"))
+        assertTrue(session.refreshClean("/a", "new", snapshot("disk")))
+        assertEquals("new", session.snapshot("/a")?.content)
+        assertEquals(false, session.snapshot("/a")?.dirty)
+        assertEquals(false, session.refreshClean("/a", "later", snapshot("typing").copy(dirty = true)))
+        assertEquals("new", session.snapshot("/a")?.content)
+    }
+
     // ---------- open ----------
 
     @Test

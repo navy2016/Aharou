@@ -23,7 +23,9 @@ import io.github.rosemoe.sora.widget.CodeEditor
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -45,6 +47,8 @@ sealed interface EditorUiState {
     data class Error(val detail: String?) : EditorUiState
 }
 
+enum class EditorExternalChange { CHANGED, UNAVAILABLE }
+
 @HiltViewModel
 class CodeEditorViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
@@ -52,7 +56,8 @@ class CodeEditorViewModel @Inject constructor(
     private val editorSettings: EditorSettingsRepository,
     private val editorLspManager: EditorLspManager,
     private val versions: FileVersionRegistry,
-    private val workspaceIdentity: EditorWorkspaceIdentity
+    private val workspaceIdentity: EditorWorkspaceIdentity,
+    private val fileObserver: EditorFileObserver
 ) : ViewModel() {
     private data class DocumentKey(val root: String, val path: String)
     private data class Binding(val root: String, val identity: String, val generation: Long, val access: FileAccessProvider)
@@ -65,6 +70,8 @@ class CodeEditorViewModel @Inject constructor(
     val saveEvents = _saveEvents.receiveAsFlow()
     private val _saving = MutableStateFlow(false)
     val saving: StateFlow<Boolean> = _saving.asStateFlow()
+    private val _externalChange = MutableStateFlow<EditorExternalChange?>(null)
+    val externalChange: StateFlow<EditorExternalChange?> = _externalChange.asStateFlow()
     val settings: StateFlow<EditorSettings> = editorSettings.settingsFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), EditorSettings())
 
@@ -72,9 +79,12 @@ class CodeEditorViewModel @Inject constructor(
     private var generation = 0L
     private var requestId = 0L
     private var loadId = 0L
+    private var refreshId = 0L
+    private var writeRevision = 0L
     private var currentPath: String? = null
     private val loadedStates = DocumentCache()
     private val loadedFingerprints = mutableMapOf<DocumentKey, String?>()
+    private val loadedLimits = mutableMapOf<DocumentKey, Long>()
     private val pendingSaves = mutableSetOf<EditorSaveRequest>()
     private val writeMutex = Mutex()
 
@@ -85,6 +95,7 @@ class CodeEditorViewModel @Inject constructor(
         currentPath = null
         loadId++
         _uiState.value = EditorUiState.Loading
+        _externalChange.value = null
         _saving.value = false
         return generation
     }
@@ -95,6 +106,7 @@ class CodeEditorViewModel @Inject constructor(
         currentPath = null
         loadId++
         _uiState.value = EditorUiState.Loading
+        _externalChange.value = null
         _saving.value = false
     }
 
@@ -163,6 +175,7 @@ class CodeEditorViewModel @Inject constructor(
     private fun loadDocument(path: String, allowLargeFile: Boolean) {
         val bound = binding ?: return
         currentPath = path
+        _externalChange.value = null
         val key = DocumentKey(bound.identity, path)
         val loading = ++loadId
         loadedStates[key]?.let { cached ->
@@ -172,7 +185,7 @@ class CodeEditorViewModel @Inject constructor(
         }
         _uiState.value = EditorUiState.Loading
         viewModelScope.launch {
-            val (state, fingerprint) = withContext(Dispatchers.IO) {
+            val (readState, fingerprint) = withContext(Dispatchers.IO) {
                 try {
                     check(workspaceIdentity.matches(bound.root, bound.identity))
                     readDocument(bound.access, path, allowLargeFile, loading)
@@ -191,10 +204,14 @@ class CodeEditorViewModel @Inject constructor(
                 }
             }
             if (binding !== bound || loading != loadId) return@launch
+            val session = EditorSessionManager.forWorkspace(bound.identity)
+            val draft = session.snapshot(path)?.takeIf { it.dirty }
+            val state = if (readState is EditorUiState.Success && draft != null) readState.copy(content = draft.baselineContent) else readState
             if (state is EditorUiState.Success || state is EditorUiState.Error || state is EditorUiState.Binary) loadedStates[key] = state
             if (state is EditorUiState.Success) {
-                val draft = EditorSessionManager.forWorkspace(bound.identity).snapshot(path)?.takeIf { it.dirty }
+                session.refreshClean(path, state.content)
                 loadedFingerprints[key] = draft?.let { sha256Fingerprint(it.baselineContent.toByteArray(Charsets.UTF_8)) } ?: fingerprint
+                loadedLimits[key] = if (allowLargeFile) EDITOR_MAX_FILE_BYTES else EDITOR_LARGE_FILE_WARNING_BYTES
             }
             if (currentPath == path) {
                 _uiState.value = state
@@ -216,6 +233,67 @@ class CodeEditorViewModel @Inject constructor(
         return EditorUiState.Success(document.text, scope) to document.fingerprint
     }
 
+    fun fileChanges(path: String): Flow<Unit> {
+        val bound = binding ?: return emptyFlow()
+        return fileObserver.changes(bound.root, path, bound.access)
+    }
+
+    suspend fun refresh(
+        path: String,
+        documentVersion: Int,
+        currentSnapshot: () -> EditorSessionManager.Snapshot?,
+        onReload: (String) -> Unit
+    ) {
+        val bound = binding ?: return
+        if (currentPath != path || documentVersion != _documentVersion.value ||
+            _uiState.value !is EditorUiState.Success || _saving.value) return
+        val key = DocumentKey(bound.identity, path)
+        val baseline = loadedFingerprints[key] ?: return
+        val loading = loadId
+        val writing = writeRevision
+        val refreshing = ++refreshId
+        val limit = loadedLimits[key] ?: EDITOR_LARGE_FILE_WARNING_BYTES
+        val result = withContext(Dispatchers.IO) {
+            try {
+                check(workspaceIdentity.matches(bound.root, bound.identity))
+                Result.success(readEditorFile(bound.access, path, limit)
+                    ?: throw IOException(context.getString(R.string.editor_binary_unsupported)))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: OutOfMemoryError) {
+                Result.failure(e)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+        if (binding !== bound || currentPath != path || loading != loadId || writing != writeRevision ||
+            refreshing != refreshId || _saving.value || !workspaceIdentity.matches(bound.root, bound.identity)) return
+        val document = result.getOrElse {
+            FileLogger.w(TAG, "刷新文件失败，保留编辑内容: $path", it)
+            _externalChange.value = EditorExternalChange.UNAVAILABLE
+            return
+        }
+        if (document.fingerprint == baseline) {
+            _externalChange.value = null
+            return
+        }
+        // IO 期间仍可输入；应用结果前取实际缓冲内容，不能使用启动检查时的脏标记。
+        val snapshot = currentSnapshot() ?: return
+        val saved = _uiState.value as EditorUiState.Success
+        val session = EditorSessionManager.forWorkspace(bound.identity)
+        // 保存回执可能尚未更新界面的基线，不能把按旧基线撤销后的内容当成已保存。
+        if (snapshot.content != saved.content || !session.refreshClean(path, document.text, snapshot)) {
+            _externalChange.value = EditorExternalChange.CHANGED
+            return
+        }
+        loadedFingerprints[key] = document.fingerprint
+        val state = EditorUiState.Success(document.text, saved.scopeName)
+        loadedStates[key] = state
+        onReload(document.text)
+        _uiState.value = state
+        _externalChange.value = null
+    }
+
     fun save(request: EditorSaveRequest) = submitSave(request, force = false)
 
     fun saveForce(request: EditorSaveRequest) = submitSave(request, force = true)
@@ -223,6 +301,7 @@ class CodeEditorViewModel @Inject constructor(
     private fun submitSave(request: EditorSaveRequest, force: Boolean) {
         val bound = binding?.takeIf { accepts(request) } ?: return
         if (!pendingSaves.add(request)) return
+        writeRevision++
         _saving.value = true
         viewModelScope.launch {
             try {
@@ -274,6 +353,7 @@ class CodeEditorViewModel @Inject constructor(
         val key = DocumentKey(bound.identity, path)
         loadedStates.remove(key)
         loadedFingerprints.remove(key)
+        loadedLimits.remove(key)
         if (currentPath == path) {
             currentPath = null
             load(path)

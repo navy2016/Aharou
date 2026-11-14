@@ -5,11 +5,28 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.take
+import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.runTest
 
 class FileVersionRegistryTest {
     private val notifications = AgentNotificationCenter()
     private val versions = FileVersionRegistry(notifications)
     private val path = "~/workspace/file.kt"
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun fileObserversReceiveWritesButNotReadsWithoutWakingAgentSessions() = runTest {
+        val events = async(UnconfinedTestDispatcher(testScheduler)) { versions.changes.take(2).toList() }
+        versions.record("reader", path, "old")
+        versions.recordWrite("writer", path, "new", path)
+        versions.recordExternal("another-resource", "external")
+        assertEquals(listOf(path, "another-resource"), events.await())
+        assertEquals("old", versions.get("reader", path))
+        assertTrue(notifications.peekForWakeup("reader").isEmpty())
+    }
 
     @Test
     fun externalWritePreservesEverySessionsLastReadVersion() {

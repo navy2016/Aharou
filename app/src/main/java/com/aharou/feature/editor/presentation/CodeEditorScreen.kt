@@ -142,7 +142,7 @@ fun CodeEditorScreen(
     var dirty by dirtyState
     // 已保存（或刚加载）的内容。脏标记按与它的差异判定，撤销回原样时才能自行复位。
     val baselineText = remember(documentVersion) {
-        mutableStateOf(snapshots[activePath]?.baselineContent ?: (state as? EditorUiState.Success)?.content.orEmpty())
+        mutableStateOf(snapshots[activePath]?.takeIf { it.dirty }?.baselineContent ?: (state as? EditorUiState.Success)?.content.orEmpty())
     }
     val saveState = remember { EditorSaveState() }
     LaunchedEffect(documentVersion) {
@@ -260,17 +260,7 @@ fun CodeEditorScreen(
     /** 把当前编辑器的内容/光标/滚动存进会话，供切走后再切回来恢复。 */
     fun persistCurrentTab() {
         val editor = editorRef.value ?: return
-        session.saveSnapshot(
-            activePath,
-            EditorSessionManager.Snapshot(
-                content = editor.text.toString(),
-                dirty = dirty,
-                cursorLine = cursorLine,
-                cursorColumn = cursorColumn,
-                scrollY = editor.scrollY,
-                baselineContent = baselineText.value
-            )
-        )
+        session.saveSnapshot(activePath, editor.snapshot(baselineText.value))
     }
 
     fun switchTab(target: String) {
@@ -426,6 +416,7 @@ fun CodeEditorScreen(
                     line = cursorLine,
                     column = cursorColumn
                 )
+                if (state is EditorUiState.Success) EditorExternalChangeNotice(viewModel)
                 if (tabs.size > 1) {
                     HorizontalDivider(thickness = 0.5.dp)
                     EditorTabBar(
@@ -459,8 +450,8 @@ fun CodeEditorScreen(
             is EditorUiState.Loading -> CenterBox(content) { CircularProgressIndicator() }
             is EditorUiState.Success -> Box(modifier = content) {
                 // 有未保存快照时用快照文本而不是磁盘内容——切走再切回来，改动不能消失。
-                val surfaceState = remember(activePath, s.content) {
-                    snapshots[activePath]?.let { s.copy(content = it.content) } ?: s
+                val surfaceState = remember(activePath, documentVersion) {
+                    snapshots[activePath]?.takeIf { it.dirty }?.let { s.copy(content = it.content) } ?: s
                 }
                 // 按「文档」重建编辑器：大屏右栏常驻在聊天页里，切文件时这个组合位置不变，
                 // AndroidView 的 factory 不会重跑，而内容与语法语言只在 factory 里设，
@@ -479,9 +470,8 @@ fun CodeEditorScreen(
                     onBackgroundResolved = { editorBackground = it },
                     onSnapshot = { editor ->
                         val baseline = viewModel.savedContent(workspaceIdentity, activePath) ?: baselineText.value
-                        if (activePath in session.tabs.value && saveState.retainSnapshot(activePath)) session.saveSnapshot(activePath,
-                            EditorSessionManager.Snapshot(editor.text.toString(), editor.text.toString() != baseline,
-                                editor.cursor.leftLine + 1, editor.cursor.leftColumn + 1, editor.scrollY, baseline))
+                        if (activePath in session.tabs.value && saveState.retainSnapshot(activePath))
+                            session.saveSnapshot(activePath, editor.snapshot(baseline))
                     },
                     onCursorChanged = { l, c ->
                         cursorLine = l
@@ -501,6 +491,8 @@ fun CodeEditorScreen(
                 // 有语言服务器（Lua 等）时换上挂着 LSP 的编辑器语言，TextMate 继续负责着色；
                 // 没装服务器 / 非收录语言则不上，保持原语言。
                 val lspEditor = editorRef.value
+                ObserveEditorFileChanges(viewModel, workspaceIdentity, activePath, documentVersion,
+                    lspEditor, baselineText, dirty, saving)
                 LaunchedEffect(lspEditor, activePath, surfaceState.scopeName) {
                     val editor = lspEditor ?: return@LaunchedEffect
                     val scope = surfaceState.scopeName ?: return@LaunchedEffect
@@ -522,7 +514,7 @@ fun CodeEditorScreen(
                 if (previewMode) {
                     // 预览覆盖在编辑器上方（编辑器保留在组合中不销毁，切回源码不丢状态）。
                     // 进入预览时快照编辑器当前文本，确保反映未保存的编辑。
-                    val previewText = remember(previewMode) {
+                    val previewText = remember(previewMode, s.content) {
                         editorRef.value?.text?.toString() ?: surfaceState.content
                     }
                     MarkdownPreviewWebView(
