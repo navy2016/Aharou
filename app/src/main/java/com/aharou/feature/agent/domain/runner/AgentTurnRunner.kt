@@ -76,6 +76,7 @@ data class AgentTurnRequest(
     val persistUserMessage: Boolean = true,
     val expectedSubAgentRunId: String? = null,
     val existingUserMessageId: String? = null,
+    val newUserMessageId: String? = null,
 )
 
 /**
@@ -275,7 +276,7 @@ class AgentTurnRunner @Inject constructor(
             .filterNot { it is com.aharou.feature.agent.domain.model.AgentMessage.UserMessage && it.id == turn.existingUserMessageId }
         val isFirst = history.isEmpty()
 
-        val userMsgId = turn.existingUserMessageId ?: UUID.randomUUID().toString()
+        val userMsgId = turn.existingUserMessageId ?: turn.newUserMessageId ?: UUID.randomUUID().toString()
         // 隐身会话不建检查点、不动标题：检查点会存下用户提问片段、标题会写进会话行，都属内容外泄。
         val ghost = messagePersistenceUseCase.isGhost(sessionId)
         if (ghost) checkpointManager.setActiveCheckpointId(sessionId, null)

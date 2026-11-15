@@ -15,6 +15,8 @@ import com.aharou.feature.agent.domain.execution.SessionExecutionRepository
 import com.aharou.feature.agent.domain.tool.WorkspaceFileLock
 import com.aharou.feature.agent.domain.tool.FileVersionRegistry
 import com.aharou.feature.agent.domain.notification.AgentNotificationCenter
+import com.aharou.feature.agent.presentation.component.CodeRewindRequest
+import com.aharou.feature.agent.presentation.component.RewindOption
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -108,6 +110,51 @@ class CheckpointManagerSessionIsolationTest {
         assertEquals(2, restored.restoredCount)
         assertEquals("original", File(modified).readText())
         assertFalse(File(created).exists())
+    }
+
+    @Test
+    fun confirmedTargetRestoresBothFilesAndCanUndoAfterTheMenuCloses() = runTest {
+        val modified = File(workspace, "confirmed-state.txt").apply { writeText("EDITOR_SAVED\n") }
+        val created = File(workspace, "confirmed-new.txt")
+        val cp = manager.createCheckpoint("sessionA", "input", "restore", binding("executionA"))
+        manager.beforeFileModified("sessionA", modified.path)
+        fileAccess.writeFile(modified.path, "CHECKPOINT_OK\n", true)
+        manager.afterFileModified("sessionA", modified.path)
+        manager.beforeFileModified("sessionA", created.path)
+        fileAccess.writeFile(created.path, "NEW_OK\n", true)
+        manager.afterFileModified("sessionA", created.path)
+        var menuTarget: String? = "input"
+        val confirmed = CodeRewindRequest("sessionA", requireNotNull(menuTarget), cp.createdAt, RewindOption.RESTORE_CODE, 2)
+        menuTarget = null
+        assertEquals(null, menuTarget)
+        val target = requireNotNull(dao.getCheckpointBySessionAndMessage(confirmed.sessionId, confirmed.messageId))
+        assertEquals(2, manager.restoreCodeToCheckpoint(confirmed.sessionId, target.id).restoredCount)
+        assertEquals("EDITOR_SAVED\n", modified.readText())
+        assertFalse(created.exists())
+        assertTrue(manager.listUndoRecords("sessionA").isNotEmpty())
+        assertEquals(2, manager.undoLastRestore("sessionA"))
+        assertEquals("CHECKPOINT_OK\n", modified.readText())
+        assertEquals("NEW_OK\n", created.readText())
+    }
+
+    @Test
+    fun confirmedRestoreSkipsBothManuallyChangedFiles() = runTest {
+        val modified = File(workspace, "protected-state.txt").apply { writeText("before") }
+        val created = File(workspace, "protected-new.txt")
+        val cp = manager.createCheckpoint("sessionA", "input", "restore", binding("executionA"))
+        for (file in listOf(modified, created)) {
+            manager.beforeFileModified("sessionA", file.path)
+            fileAccess.writeFile(file.path, "agent", true)
+            manager.afterFileModified("sessionA", file.path)
+            fileAccess.writeFile(file.path, "manual", true)
+        }
+        val confirmed = CodeRewindRequest("sessionA", "input", cp.createdAt, RewindOption.RESTORE_CODE, 2)
+        val target = requireNotNull(dao.getCheckpointBySessionAndMessage(confirmed.sessionId, confirmed.messageId))
+        val result = manager.restoreCodeToCheckpoint(confirmed.sessionId, target.id)
+        assertEquals(0, result.restoredCount)
+        assertEquals(setOf(modified.path, created.path), result.conflicts.toSet())
+        assertEquals("manual", modified.readText())
+        assertEquals("manual", created.readText())
     }
 
     @Test

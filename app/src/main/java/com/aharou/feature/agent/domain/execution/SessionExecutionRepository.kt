@@ -79,25 +79,28 @@ class SessionExecutionRepository @Inject constructor(
             if (remote.executionIdentity() != binding.sshIdentity) throw IOException("SSH execution identity changed; start a new task")
             if (!remoteConnection.isConnected() || remoteConnection.config != remote) remoteConnection.connect(remote)
         }
-        if (!files.get().forExecution(binding).forStrictRead().isDirectory("~/workspace")) throw IOException("Execution workspace was removed")
+        if (!files.get().forExecution(binding).forStrictRead().isDirectory("~/workspace")) throw IOException("Execution workspace is not a directory: ${binding.executionRoot}")
         if (binding.isWorktree) validateWorktree(binding)
         return binding
     }
 
     private fun validateWorktree(binding: ExecutionBinding) {
         val access = files.get().forExecution(binding).forStrictRead()
-        if (!access.isDirectory(binding.executionRoot)) throw IOException("Execution worktree was removed")
+        if (!access.isDirectory(binding.executionRoot)) throw IOException("Execution worktree is not a directory: ${binding.executionRoot}")
         val pointer = access.readFile(binding.executionRoot.trimEnd('/') + "/.git").trim()
         if (!pointer.startsWith("gitdir: ")) throw IOException("Execution worktree Git metadata changed")
         val root = java.nio.file.Paths.get(binding.executionRoot)
         val gitDir = root.resolve(pointer.removePrefix("gitdir: ")).normalize()
         val common = binding.gitCommonDir ?: throw IOException("Execution worktree Git metadata is missing")
-        if (!gitDir.toString().startsWith(common.trimEnd('/') + "/worktrees/")) throw IOException("Execution worktree belongs to another repository")
-        if (access.readFile(gitDir.resolve("HEAD").toString()).trim() != "ref: refs/heads/${binding.branch}")
-            throw IOException("Execution worktree branch changed")
+        if (!gitDir.toString().startsWith(common.trimEnd('/') + "/worktrees/"))
+            throw IOException("Execution worktree repository mismatch: gitDir=$gitDir expectedCommon=$common")
+        val head = access.readFile(gitDir.resolve("HEAD").toString()).trim()
+        if (head != "ref: refs/heads/${binding.branch}")
+            throw IOException("Execution worktree branch mismatch: actual=$head expected=${binding.branch}")
         val relative = access.readFile(gitDir.resolve("commondir").toString()).trim()
-        if (access.resourceKey(gitDir.resolve(relative).normalize().toString()) != access.resourceKey(common))
-            throw IOException("Execution worktree common directory changed")
+        val actualCommon = gitDir.resolve(relative).normalize().toString()
+        if (access.resourceKey(actualCommon) != access.resourceKey(common))
+            throw IOException("Execution worktree common directory mismatch: actual=$actualCommon expected=$common")
     }
 
     suspend fun attach(sessionId: String, binding: ExecutionBinding, state: String = SessionExecutionEntity.READY) = lock.withLock {

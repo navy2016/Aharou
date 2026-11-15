@@ -27,6 +27,12 @@ class MessageRegenerationInputTest {
         assertTrue(canRegenerateMessage(input, listOf(first, firstReply, input)))
     }
 
+    @Test fun acceptedButNotStartedMessageDoesNotTargetAnOlderTurn() {
+        val pending = last.copy(isPending = true)
+        assertFalse(canRegenerateMessage(pending, listOf(first, firstReply, pending)))
+        assertFalse(canRegenerateMessage(firstReply, listOf(first, firstReply, pending)))
+    }
+
     @Test fun messageFromPreviousSessionHasNoRegenerateAction() {
         val stale = AgentUIMessage("stale", MessageRole.ASSISTANT, "old", 5)
         assertFalse(canRegenerateMessage(stale, listOf(last)))

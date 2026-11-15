@@ -1655,7 +1655,7 @@ fun AIChatPanel(
             val rewindUndoRecords by viewModel.rewindUndoRecords.collectAsStateWithLifecycle()
             var showUndoTimeline by remember { mutableStateOf(false) }
             // 涉及代码还原的选项先过一道确认：回退点对应哪一天、会动到几个文件，都得先看清楚。
-            var pendingCodeRewind by remember { mutableStateOf<RewindOption?>(null) }
+            var pendingCodeRewind by remember(currentSessionId) { mutableStateOf<CodeRewindRequest?>(null) }
 
             targetRewindMessageId?.let { targetId ->
                 val targetMsg = messages.find { it.id == targetId }
@@ -1665,7 +1665,10 @@ fun AIChatPanel(
                     onShowTimeline = { showUndoTimeline = true },
                     onOptionSelected = { option ->
                         if (option == RewindOption.RESTORE_CODE || option == RewindOption.RESTORE_CODE_AND_CONVERSATION) {
-                            pendingCodeRewind = option
+                            val sid = currentSessionId
+                            if (sid != null && targetMsg != null) {
+                                pendingCodeRewind = CodeRewindRequest(sid, targetId, targetMsg.timestamp, option, rewindPreviewFiles)
+                            } else viewModel.invalidRewindTarget()
                         } else {
                             viewModel.executeRewindOption(targetId, option) { text, attachments ->
                                 viewModel.updateInputDraft(text)
@@ -1677,40 +1680,17 @@ fun AIChatPanel(
                 )
             }
 
-            pendingCodeRewind?.let { option ->
-                AlertDialog(
-                    onDismissRequest = { pendingCodeRewind = null },
-                    title = { Text(stringResource(R.string.checkpoint_confirm_rewind_title)) },
-                    text = {
-                        val targetTime = targetRewindMessageId
-                            ?.let { id -> messages.find { it.id == id }?.timestamp }
-                            ?: 0L
-                        Text(
-                            stringResource(
-                                R.string.checkpoint_confirm_rewind_body,
-                                formatRewindTime(targetTime),
-                                rewindPreviewFiles
-                            )
-                        )
-                    },
-                    confirmButton = {
-                        TextButton(onClick = {
-                            val targetId = targetRewindMessageId
-                            pendingCodeRewind = null
-                            if (targetId != null) {
-                                viewModel.executeRewindOption(targetId, option) { text, attachments ->
-                                    viewModel.updateInputDraft(text)
-                                    scope.launch { viewModel.setPendingAttachments(withContext(Dispatchers.IO) { attachments.map { it.toPendingAttachment() } }) }
-                                }
-                            }
-                        }) { Text(stringResource(R.string.checkpoint_confirm_rewind_action)) }
-                    },
-                    dismissButton = {
-                        TextButton(onClick = { pendingCodeRewind = null }) {
-                            Text(stringResource(R.string.common_cancel))
+            pendingCodeRewind?.takeIf { it.belongsTo(currentSessionId) }?.let { request ->
+                CodeRewindConfirmation(request, onDismiss = { pendingCodeRewind = null }) { confirmed ->
+                    pendingCodeRewind = null
+                    viewModel.executeRewindOption(confirmed.messageId, confirmed.option, confirmed.sessionId) { text, attachments ->
+                        viewModel.updateInputDraft(text)
+                        scope.launch {
+                            val pending = withContext(Dispatchers.IO) { attachments.map { it.toPendingAttachment() } }
+                            if (viewModel.currentSessionId.value == confirmed.sessionId) viewModel.setPendingAttachments(pending)
                         }
                     }
-                )
+                }
             }
 
             if (showUndoTimeline) {

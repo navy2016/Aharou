@@ -1,6 +1,7 @@
 package com.aharou.feature.agent.domain.execution
 
 import android.content.Context
+import com.aharou.core.util.FileLogger
 import com.aharou.core.util.shellQuote
 import com.aharou.feature.agent.data.local.entity.SessionExecutionEntity
 import com.aharou.feature.agent.domain.container.CommandEngine
@@ -30,6 +31,9 @@ class WorktreeManager @Inject constructor(
 ) {
     data class Prepared(val binding: ExecutionBinding, val parentDirty: Boolean)
 
+    class PreparationException(val stage: String, cause: Throwable) : IOException(
+        "Worktree preparation failed at $stage; the original workspace was not used. ${cause.javaClass.simpleName}: ${cause.message.orEmpty()}", cause)
+
     suspend fun prepare(ownerId: String, parent: ExecutionBinding): Prepared = withContext(Dispatchers.IO) {
         val id = UUID.randomUUID().toString()
         val isLocal = parent.mode != ExecutionMode.REMOTE_SSH.name
@@ -39,13 +43,17 @@ class WorktreeManager @Inject constructor(
         var binding = parent.copy(id = id, executionRoot = "$provisionalPool/$id", isolation = ExecutionBinding.WORKTREE,
             branch = branch, baseCommit = null, gitRepositoryRoot = null, gitCommonDir = null,
             mountRoot = if (isLocal) provisionalPool else null)
-        executions.attach(ownerId, binding, SessionExecutionEntity.PREPARING)
+        var stage = "record_preparing"
         try {
+            executions.attach(ownerId, binding, SessionExecutionEntity.PREPARING)
+            stage = "validate_parent"
             executions.validate(parent)
+            stage = "resolve_repository"
             val profile = profiles.forExecution(parent)
             val metadata = command("git rev-parse --show-toplevel && git rev-parse --path-format=absolute --git-common-dir && git rev-parse HEAD", parent)
                 .lineSequence().filter { it.isNotBlank() }.toList()
             if (metadata.size != 3 || !metadata[2].matches(Regex("[0-9a-fA-F]{40,64}"))) throw IOException("Cannot resolve repository HEAD")
+            stage = "resolve_paths"
             val mapper = if (isLocal) paths.forExecution(parent, profile) else null
             val repo = mapper?.resolveFile(metadata[0], parent.executionRoot)?.canonicalPath ?: metadata[0]
             val common = mapper?.resolveFile(metadata[1], parent.executionRoot)?.canonicalPath ?: metadata[1]
@@ -54,22 +62,32 @@ class WorktreeManager @Inject constructor(
             val destination = "$pool/$id"
             binding = binding.copy(executionRoot = destination, baseCommit = metadata[2], gitRepositoryRoot = repo,
                 gitCommonDir = common, mountRoot = if (isLocal) pool else null)
+            stage = "record_paths"
             executions.updatePreparation(ownerId, binding)
             val preparing = binding.copy(executionRoot = parent.executionRoot)
             val dirty = locks.withLock("git\u0000${parent.sshIdentity.orEmpty()}\u0000$common") {
+                stage = "parent_status"
                 val dirty = command("git status --porcelain", parent).isNotBlank()
+                stage = "create_worktree"
                 command("git -C ${shellQuote(repo)} worktree add -b ${shellQuote(branch)} ${shellQuote(destination)} ${shellQuote(metadata[2])}", preparing)
+                stage = "verify_head"
                 val actual = command("git -C ${shellQuote(destination)} rev-parse HEAD", preparing).trim()
                 if (actual != metadata[2]) throw IOException("Prepared worktree does not match the selected commit")
                 dirty
             }
+            stage = "validate_execution"
             executions.validate(binding)
+            stage = "record_ready"
             executions.ready(ownerId, binding)
+            FileLogger.i("WorktreeManager", "ready owner=$ownerId execution=$id root=${binding.executionRoot} branch=$branch")
             Prepared(binding, dirty)
         } catch (error: Throwable) {
-            withContext(NonCancellable) { executions.failed(ownerId, binding) }
+            withContext(NonCancellable) {
+                try { executions.failed(ownerId, binding) } catch (recordError: Exception) { error.addSuppressed(recordError) }
+            }
             if (error is CancellationException) throw error
-            throw IOException("Worktree preparation failed; the original workspace was not used", error)
+            FileLogger.e("WorktreeManager", "failed stage=$stage owner=$ownerId execution=$id mode=${binding.mode} profile=${binding.profileId} root=${binding.executionRoot} repository=${binding.gitRepositoryRoot} common=${binding.gitCommonDir} branch=$branch base=${binding.baseCommit}", error)
+            throw PreparationException(stage, error)
         }
     }
 

@@ -522,6 +522,10 @@ internal fun AgentMessageItem(
                         // 用户消息：时间戳排在复制按钮之前（对齐参考图里气泡下方的「17:55 ⧉」）
                         if (isUser) {
                             ChatMetaText(text = formatClockTime(message.timestamp))
+                            if (message.isPending) {
+                                Spacer(Modifier.width(Spacing.xs))
+                                ChatMetaText(text = message.error ?: stringResource(R.string.agent_request_waiting))
+                            }
                             emitted = true
                         }
                         val copyButton: @Composable () -> Unit = {
@@ -543,7 +547,7 @@ internal fun AgentMessageItem(
                         if (isUser && actionsVisible) {
                             if (emitted) Spacer(Modifier.width(Spacing.xs))
                             if (hasContent) copyButton()
-                            if (onRewindClick != null) {
+                            if (onRewindClick != null && !message.isPending) {
                                 MessageActionIconButton(
                                     icon = FeatherIcons.RotateCcw,
                                     contentDescription = stringResource(R.string.checkpoint_rewind_title),
@@ -604,7 +608,7 @@ internal fun AgentMessageItem(
                         }
                         // 「更多选项」排在这一行的**最后**：助手消息里它跟在复制按钮后面（先给信息，
                         // 再给操作入口）；用户消息没有统计项，它自然接着回退按钮，间距与按钮组一致。
-                        if (actionsVisible && onMoreClick != null) {
+                        if (actionsVisible && onMoreClick != null && !message.isPending) {
                             if (emitted) Spacer(Modifier.width(Spacing.xs))
                             MessageActionIconButton(
                                 icon = FeatherIcons.MoreHorizontal,

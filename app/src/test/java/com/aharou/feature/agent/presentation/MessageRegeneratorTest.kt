@@ -74,6 +74,48 @@ class MessageRegeneratorTest {
         assertEquals(0, selections.single().second)
     }
 
+    @Test fun assistantEntryReusesTheSameUserAndKeepsItsPriorVersion() = runTest {
+        records += listOf(user(), reply())
+        var cancellations = 0
+        regenerator.regenerate("session", "reply", { cancellations++ }, { input ->
+            assertEquals("user", input.id)
+            records += reply("new", 3)
+        }, { group, position -> selections += group to position })
+        assertEquals(1, cancellations)
+        assertEquals(1, records.count { it.role == "USER" })
+        assertTrue(records.single { it.id == "reply" }.isContextExcluded)
+        assertEquals("reply" to 1, selections.single())
+    }
+
+    @Test fun userEntryWaitsForSoftStopAndIncludesTheLateAnswer() = runTest {
+        records += user()
+        val old = CompletableDeferred<Unit>()
+        val stopped = CompletableDeferred<Unit>()
+        val jobs = mutableMapOf<String, kotlinx.coroutines.Job>("session" to old)
+        val stops = mutableMapOf("session" to stopped)
+        val handoff = SessionTurnHandoff(jobs, stops)
+        var restarts = 0
+        val request = async(start = CoroutineStart.UNDISPATCHED) {
+            handoff.withRestart("session") {
+                regenerator.regenerate("session", "user", { assertTrue(handoff.settleForRestart("session")) }, {
+                    restarts++
+                    assertTrue(records.single { it.id == "late" }.isContextExcluded)
+                    records += reply("new", 3)
+                }, { group, position -> selections += group to position })
+            }
+        }
+        assertEquals(0, restarts)
+        assertTrue(old.isActive)
+        records += reply("late", 2)
+        old.complete(Unit)
+        stops.remove("session")
+        stopped.complete(Unit)
+        request.await()
+        assertEquals(1, restarts)
+        assertFalse(old.isCancelled)
+        assertEquals("late" to 1, selections.single())
+    }
+
     @Test fun oldTurnAndSystemMessagesAreNotRegenerated() = runTest {
         records += listOf(user("first", 1), reply("old", 2), user("last", 3))
         var called = false

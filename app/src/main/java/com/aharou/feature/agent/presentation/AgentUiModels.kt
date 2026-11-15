@@ -182,7 +182,8 @@ data class AgentUIMessage(
     // variantIndex 为当前展示版本在组内的序号（0 起）。
     val variantGroupId: String? = null,
     val variantIndex: Int = 0,
-    val variantCount: Int = 1
+    val variantCount: Int = 1,
+    val isPending: Boolean = false
 )
 
 @Immutable

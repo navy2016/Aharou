@@ -106,6 +106,43 @@ class WorktreeManagerTest {
     }
 
     @Test
+    fun validationFailureAfterSuccessfulGitReportsTheStageAndCause() = runTest {
+        val manager = manager()
+        val cause = java.io.IOException("Execution worktree branch mismatch")
+        coEvery { executions.validate(match { it.isWorktree }) } throws cause
+        coEvery { engine.runCommandSyncUnbounded(any(), any(), any(), any()) } answers {
+            val command = arg<String>(0)
+            CommandResult(if (command.contains("--show-toplevel")) "/project\n/project/.git\n$commit"
+                else if (command.contains("rev-parse HEAD")) commit else "", 0)
+        }
+        val failure = runCatching { manager.prepare("child", parent) }.exceptionOrNull()
+        assertTrue(failure is WorktreeManager.PreparationException)
+        assertEquals("validate_execution", (failure as WorktreeManager.PreparationException).stage)
+        assertTrue(failure.cause === cause)
+        assertTrue(failure.message.orEmpty().contains(cause.message.orEmpty()))
+        coVerify(exactly = 0) { executions.ready(any(), any()) }
+        coVerify(exactly = 1) { executions.failed("child", any()) }
+    }
+
+    @Test
+    fun readyFailureKeepsItsCauseEvenWhenFailureRecordingAlsoFails() = runTest {
+        val manager = manager()
+        val cause = IllegalStateException("READY update affected no rows")
+        val recordError = java.io.IOException("failure record unavailable")
+        coEvery { executions.ready(any(), any()) } throws cause
+        coEvery { executions.failed(any(), any()) } throws recordError
+        coEvery { engine.runCommandSyncUnbounded(any(), any(), any(), any()) } answers {
+            val command = arg<String>(0)
+            CommandResult(if (command.contains("--show-toplevel")) "/project\n/project/.git\n$commit"
+                else if (command.contains("rev-parse HEAD")) commit else "", 0)
+        }
+        val failure = runCatching { manager.prepare("child", parent) }.exceptionOrNull() as WorktreeManager.PreparationException
+        assertEquals("record_ready", failure.stage)
+        assertTrue(failure.cause === cause)
+        assertEquals(listOf(recordError), cause.suppressed.toList())
+    }
+
+    @Test
     fun mismatchedCheckoutCannotBecomeReady() = runTest {
         val manager = manager()
         coEvery { engine.runCommandSyncUnbounded(any(), any(), any(), any()) } answers {

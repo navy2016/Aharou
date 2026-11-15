@@ -672,6 +672,8 @@
 
     <!-- Agent Status -->
     <string name="agent_stopped_by_user">Stopped by user</string>
+    <string name="agent_request_waiting">Received, waiting to run</string>
+    <string name="agent_request_not_started">Not started. Please send again.</string>
     <string name="agent_tool_executing">%1$s running…</string>
     <string name="agent_stop_refusal">The model declined to answer under its content safety policy.</string>
     <string name="agent_stop_context_exceeded">This request exceeds the model\'s context window. Compact the context or start a new session.</string>
@@ -3345,6 +3347,8 @@
     <string name="checkpoint_conflict_title">Some files were not restored</string>
     <string name="checkpoint_conflict_message">%1$d file(s) were changed outside the checkpoint and were skipped to avoid overwriting your edits:</string>
     <string name="checkpoint_undo_last_restore">Undo last restore</string>
+    <string name="checkpoint_target_unavailable">The rewind target is no longer available. Reopen the checkpoint menu in its conversation.</string>
+    <string name="checkpoint_restore_busy">This conversation is regenerating or restoring. Try again when it finishes.</string>
     <string name="checkpoint_confirm_rewind_title">Confirm rewind</string>
     <string name="checkpoint_confirm_rewind_body">Rewind to %1$s and restore %2$d files. Code changes made after that point will be discarded; files modified outside the checkpoint are skipped automatically.</string>
     <string name="checkpoint_confirm_rewind_action">Rewind</string>
