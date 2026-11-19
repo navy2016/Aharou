@@ -1,8 +1,11 @@
 package com.aharou.feature.agent.domain.workflow
 
 import com.aharou.core.util.FileLogger
+import com.aharou.feature.agent.data.local.dao.AgentMessageDao
 import com.aharou.feature.agent.data.local.dao.LlmCallRecordDao
+import com.aharou.feature.agent.data.local.entity.AgentMessageEntity
 import com.aharou.feature.agent.data.local.entity.ChatSessionEntity
+import com.aharou.feature.agent.data.local.entity.LlmCallRecordEntity
 import com.aharou.feature.agent.domain.memory.MemoryCompactor
 import com.aharou.feature.agent.domain.model.AgentContext
 import dagger.Lazy
@@ -16,6 +19,8 @@ import com.aharou.feature.agent.domain.provider.AIProvider
 import com.aharou.feature.agent.domain.provider.AIResponse
 import com.aharou.feature.agent.domain.provider.AIStreamChunk
 import com.aharou.feature.agent.domain.provider.ProviderFailoverCoordinator
+import com.aharou.feature.agent.domain.provider.RetryErrorInfo
+import com.aharou.feature.agent.domain.provider.RetryErrorKind
 import com.aharou.feature.agent.domain.session.MessagePersistenceUseCase
 import com.aharou.feature.agent.domain.session.SessionUseCase
 import com.aharou.feature.agent.domain.subagent.AgentDefinition
@@ -30,7 +35,9 @@ import com.aharou.feature.agent.domain.workflow.GeneratedImagePersister
 import com.aharou.feature.agent.domain.workflow.StatefulAgentWorkflow.Companion.hasSnapshotData
 import com.aharou.feature.agent.domain.workflow.StatefulAgentWorkflow.Companion.persistenceConfirmed
 import com.aharou.feature.agent.presentation.AgentAttachment
+import com.aharou.feature.agent.presentation.MessageRegenerator
 import com.aharou.feature.agent.presentation.MessageRole
+import com.aharou.feature.agent.presentation.SessionTurnHandoff
 import com.aharou.feature.settings.data.remote.ModelMetadataService
 import com.aharou.feature.settings.data.repository.CompactionModelSettingsRepository
 import com.aharou.feature.settings.domain.repository.AIProviderRepository
@@ -38,6 +45,9 @@ import com.aharou.feature.settings.domain.model.AIProviderConfig
 import com.aharou.feature.settings.domain.model.ModelMetadata
 import com.aharou.feature.settings.domain.model.ProviderType
 import com.aharou.feature.agent.domain.notification.AgentNotificationCenter
+import com.aharou.feature.agent.domain.notification.AgentNotificationKind
+import com.aharou.feature.agent.domain.notification.NotificationOutcome
+import com.aharou.feature.agent.domain.notification.PendingNotification
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
@@ -49,6 +59,8 @@ import io.mockk.unmockkObject
 import io.mockk.verify
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.Flow
@@ -68,6 +80,7 @@ class StatefulAgentWorkflowTest {
     private val prompts = mockk<SystemPromptProvider>()
     private val sessions = mockk<SessionUseCase>()
     private val persistence = mockk<MessagePersistenceUseCase>(relaxed = true)
+    private val callRecords = mockk<LlmCallRecordDao>(relaxed = true)
     private val compactor = mockk<ContextCompactor>()
     private val metadata = mockk<ModelMetadataService>()
     private val compactionSettings = mockk<CompactionModelSettingsRepository>()
@@ -111,7 +124,7 @@ class StatefulAgentWorkflowTest {
         providerRequestSettings = mockk(relaxed = true),
         sessionUseCase = sessions,
         messagePersistenceUseCase = persistence,
-        llmCallRecordDao = mockk<LlmCallRecordDao>(relaxed = true),
+        llmCallRecordDao = callRecords,
         keyRotator = mockk(),
         generatedImagePersister = imagePersister,
         failoverCoordinator = failoverCoordinator,
@@ -210,6 +223,225 @@ class StatefulAgentWorkflowTest {
         }
         verifySaved(requireNotNull(snapshot).messageId)
         assertTrue(requireNotNull(snapshot).persistenceConfirmed())
+    }
+
+    @Test
+    fun directUserRegenerationBeforeFirstByteFinishesTheOldCallBeforeRestarting() = runTest {
+        val user = AgentMessageEntity(context.inputMessageId, "session", "USER", "request", 1L)
+        val messages = mockk<AgentMessageDao>(relaxed = true)
+        val rows = mutableListOf(user)
+        coEvery { messages.getMessagesBySessionOnce("session") } answers { rows.toList() }
+        coEvery { persistence.restore(user) } returns user
+        val regenerator = MessageRegenerator(messages, persistence)
+        val entered = CompletableDeferred<Unit>()
+        val records = mutableListOf<LlmCallRecordEntity>()
+        coEvery { callRecords.insert(capture(records)) } returns Unit
+        var requests = 0
+        prepare(flow {
+            if (++requests == 1) {
+                entered.complete(Unit)
+                awaitCancellation()
+            }
+            emit(AIStreamChunk.Final(AIResponse("new answer")))
+        })
+        val oldEvents = mutableListOf<AgentEvent>()
+        val old = launch { workflow.executeEvents(user.content, context, emptyList()).collect { oldEvents.add(it) } }
+        val handoff = SessionTurnHandoff(mutableMapOf("session" to old), mutableMapOf())
+        entered.await()
+        assertTrue(old.isActive)
+        handoff.withRestart("session") { ticket ->
+            regenerator.regenerate("session", user.id, cancelTurn = {
+                assertTrue(handoff.settleForRestart("session"))
+            }, restart = { input ->
+                assertTrue(old.isCancelled && old.isCompleted)
+                val stopped = records.single()
+                assertEquals("cancelled", stopped.status)
+                assertNull(stopped.ttfbMillis)
+                assertEquals(user.id, input.id)
+                handoff.awaitIdle("session", requireNotNull(currentCoroutineContext()[Job]), ticket)
+                workflow.executeEvents(input.content, context, emptyList()).collect { event ->
+                    if (event is AgentEvent.AssistantText) {
+                        rows += AgentMessageEntity(event.messageId, "session", "ASSISTANT", event.content, 2L)
+                        event.persisted!!.complete(Unit)
+                    }
+                }
+            }, selectVariant = { _, _ -> })
+        }
+        assertEquals(2, requests)
+        assertEquals(listOf("request", "new answer"), rows.map { it.content })
+        coVerify(exactly = 1) { messages.assignVariant(listOf(rows.last().id), any(), 0, excluded = false) }
+        assertTrue(oldEvents.none { it is AgentEvent.AssistantText || it is AgentEvent.Failed || it is AgentEvent.Completed })
+        assertEquals(listOf("cancelled", "success"), records.map { it.status })
+        coVerify(exactly = 0) { persistence.persist(any(), any(), any(), any(), any(), any(), any(), any(), any(),
+            any(), any(), any(), any(), any(), any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun cancellingAfterRetryPersistsOnlyCurrentTextAndReasoningOnce() = runTest {
+        val received = CompletableDeferred<Unit>()
+        prepare(flow {
+            emit(AIStreamChunk.TextDelta("discarded text"))
+            emit(AIStreamChunk.ReasoningDelta("discarded reasoning"))
+            emit(AIStreamChunk.Retrying(1, 3, RetryErrorInfo(RetryErrorKind.TIMEOUT)))
+            emit(AIStreamChunk.TextDelta("current text"))
+            emit(AIStreamChunk.ReasoningDelta("current reasoning"))
+            received.complete(Unit)
+            awaitCancellation()
+        })
+        val job = launch { workflow.executeEvents("request", context, emptyList()).collect {} }
+        received.await()
+        job.cancelAndJoin()
+        val id = slot<String>()
+        coVerify(exactly = 1) { persistence.persist("session", MessageRole.ASSISTANT, "current text", id = capture(id),
+            reasoning = "current reasoning", toolCalls = emptyList(), signature = "", thinkingBlocksJson = "",
+            attachments = emptyList(), inputTokens = 0, outputTokens = 0, cachedInputTokens = 0) }
+        assertTrue(id.captured.isNotBlank())
+        coVerify(exactly = 1) { persistence.persist(any(), any(), any(), any(), any(), any(), any(), any(), any(),
+            any(), any(), any(), any(), any(), any(), any(), any(), any()) }
+        coVerify(exactly = 1) { callRecords.insert(match { it.status == "cancelled" && it.retryCount == 1 && it.ttfbMillis != null }) }
+    }
+
+    @Test
+    fun failedCallRecordDoesNotReplaceProviderCancellation() = runTest {
+        val original = CancellationException("old provider request")
+        prepare(flow { throw original })
+        coEvery { callRecords.insert(any()) } throws IllegalStateException("record unavailable")
+        val events = mutableListOf<AgentEvent>()
+        val failure = runCatching { workflow.executeEvents("request", context, emptyList()).collect { events.add(it) } }.exceptionOrNull()
+        assertTrue(failure is CancellationException)
+        assertEquals(original.message, failure?.message)
+        assertTrue(events.none { it is AgentEvent.AssistantText || it is AgentEvent.Failed || it is AgentEvent.Completed })
+        coVerify(exactly = 1) { callRecords.insert(match { it.status == "cancelled" && it.ttfbMillis == null }) }
+        coVerify(exactly = 0) { failoverCoordinator.activate(any(), any()) }
+    }
+
+    @Test
+    fun acknowledgedFinalRecordsUsageOnceWithoutPersistingAnotherSnapshot() = runTest {
+        val final = response.copy(toolCalls = emptyList(), cacheCreationTokens = 7, stopReason = "stop")
+        prepare(flow { emit(AIStreamChunk.Final(final)) })
+        val records = mutableListOf<LlmCallRecordEntity>()
+        coEvery { callRecords.insert(capture(records)) } returns Unit
+        val snapshots = mutableListOf<AgentEvent.AssistantText>()
+        workflow.executeEvents("request", context.copy(reasoningEffort = "high"), emptyList()).collect { event ->
+            if (event is AgentEvent.AssistantText) { snapshots += event; event.persisted!!.complete(Unit) }
+        }
+        assertEquals(listOf(attachment), snapshots.single().attachments)
+        val record = records.single()
+        assertEquals("success", record.status)
+        assertEquals("provider", record.providerId)
+        assertEquals("model", record.model)
+        assertEquals("high", record.reasoningEffort)
+        assertEquals("stop", record.stopReason)
+        assertEquals(listOf(100, 20, 40, 7), listOf(record.inputTokens, record.outputTokens, record.cachedInputTokens, record.cacheCreationTokens))
+        coVerify(exactly = 1) { imagePersister.persist(listOf(image)) }
+        coVerify(exactly = 0) { persistence.persist(any(), any(), any(), any(), any(), any(), any(), any(), any(),
+            any(), any(), any(), any(), any(), any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun recoveredOverflowFinishesItsCallBeforeTheRetriedRequest() = runTest {
+        var requests = 0
+        val records = mutableListOf<LlmCallRecordEntity>()
+        coEvery { callRecords.insert(capture(records)) } returns Unit
+        prepare(flow {
+            if (++requests == 1) error("context_length_exceeded")
+            assertEquals("context_length_exceeded", records.single().errorMessage)
+            emit(AIStreamChunk.Final(AIResponse("retried")))
+        })
+        coEvery { compactor.compactIfNeeded(any(), any(), any(), any(), any(), any(), any(), any(), any()) } answers {
+            CompactionResult(firstArg(), compacted = arg<Boolean>(3))
+        }
+        val answers = mutableListOf<String>()
+        workflow.executeEvents("request", context, emptyList()).collect { event ->
+            if (event is AgentEvent.AssistantText) { answers += event.content; event.persisted!!.complete(Unit) }
+        }
+        assertEquals(2, requests)
+        assertEquals(listOf("retried"), answers)
+        assertEquals(listOf("error", "success"), records.map { it.status })
+    }
+
+    @Test
+    fun nestedProviderFallbackKeepsTheTwoCallRecordsSeparate() = runTest {
+        prepare(flow { error("HTTP 429") })
+        val target = config.copy(id = "fallback")
+        val fallback = mockk<AIProvider>(relaxed = true)
+        coEvery { providers.getProviderById(target.id) } returns target
+        coEvery { failoverCoordinator.activate("session", config) } returns target
+        coEvery { workflow["createStandaloneProvider"](target, "session") } returns fallback
+        every { fallback.providerId } returns target.id
+        every { fallback.model } returns "fallback-model"
+        every { fallback.completeStream(any(), any(), any(), any()) } returns flow {
+            emit(AIStreamChunk.Final(AIResponse("fallback answer", outputTokens = 9)))
+        }
+        val records = mutableListOf<LlmCallRecordEntity>()
+        coEvery { callRecords.insert(capture(records)) } returns Unit
+        val answers = mutableListOf<String>()
+        workflow.executeEvents("request", context, emptyList()).collect { event ->
+            if (event is AgentEvent.AssistantText) { answers += event.content; event.persisted!!.complete(Unit) }
+        }
+        assertEquals(listOf("fallback answer"), answers)
+        assertEquals(listOf(target.id, config.id), records.map { it.providerId })
+        assertEquals(listOf(9, 0), records.map { it.outputTokens })
+        assertEquals(listOf("success", "error"), records.map { it.status })
+        assertEquals("HTTP 429", records.last().errorMessage)
+        coVerify(exactly = 1) { failoverCoordinator.activate("session", config) }
+    }
+
+    private fun queueStop(queue: AgentNotificationCenter) {
+        queue.enqueue("session", PendingNotification(AgentNotificationKind.USER_INTERRUPT, "user", "stop", NotificationOutcome.STOPPED))
+    }
+
+    private fun useInterruptQueue(queue: AgentNotificationCenter) {
+        every { notifications.peek("session") } answers { queue.peek("session") }
+        every { notifications.ack("session", any()) } answers { queue.ack("session", secondArg()) }
+    }
+
+    @Test fun softStopOnToolFinalKeepsTheAnswerWithoutDispatchingOrPersistingToolCalls() = runTest {
+        val queue = AgentNotificationCenter()
+        prepare(flow { queueStop(queue); emit(AIStreamChunk.Final(response)) })
+        useInterruptQueue(queue)
+        val events = mutableListOf<AgentEvent>()
+        workflow.executeEvents("request", context, emptyList()).collect { event ->
+            events += event
+            if (event is AgentEvent.AssistantText) event.persisted!!.complete(Unit)
+        }
+        val answer = events.filterIsInstance<AgentEvent.AssistantText>().single()
+        assertEquals(response.content, answer.content)
+        assertEquals(response.reasoning, answer.reasoning)
+        assertEquals(listOf(attachment), answer.attachments)
+        assertTrue(answer.toolCalls.isEmpty() && answer.thinkingBlocksJson.isEmpty())
+        assertTrue(events.none { it is AgentEvent.ToolCallStarted || it is AgentEvent.ToolCallFinished || it is AgentEvent.Failed })
+        assertTrue(events.last() is AgentEvent.Completed && queue.peek("session").isEmpty())
+        verify(exactly = 1) { provider.completeStream(any(), any(), any(), any()) }
+    }
+
+    @Test fun softStopOnTruncatedFinalCannotStartAContinuationOrStopTheNextTurn() = runTest {
+        val queue = AgentNotificationCenter()
+        var requests = 0
+        prepare(flow {
+            if (++requests == 1) { queueStop(queue); emit(AIStreamChunk.Final(AIResponse("partial", stopReason = "length"))) }
+            else emit(AIStreamChunk.Final(AIResponse("next answer")))
+        })
+        useInterruptQueue(queue)
+        val answers = mutableListOf<String>()
+        for (request in listOf("first", "next")) {
+            workflow.executeEvents(request, context, emptyList()).collect { event ->
+                if (event is AgentEvent.AssistantText) { answers.add(event.content); event.persisted!!.complete(Unit) }
+            }
+            assertEquals(if (request == "first") 1 else 2, requests)
+        }
+        assertEquals(listOf("partial", "next answer"), answers)
+    }
+
+    @Test fun softStopBeforeQuotaFailureDoesNotStartFallback() = runTest {
+        val queue = AgentNotificationCenter()
+        prepare(flow { queueStop(queue); error("HTTP 429") })
+        useInterruptQueue(queue)
+        val events = mutableListOf<AgentEvent>()
+        workflow.executeEvents("request", context, emptyList()).collect { events += it }
+        assertTrue(events.last() is AgentEvent.Completed && events.none { it is AgentEvent.Failed })
+        coVerify(exactly = 0) { failoverCoordinator.activate(any(), any()) }
+        verify(exactly = 1) { provider.completeStream(any(), any(), any(), any()) }
     }
 
     @Test

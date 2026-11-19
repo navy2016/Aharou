@@ -43,6 +43,7 @@ class WorktreeFileIntegrationTest {
     private lateinit var manager: WorktreeManager
     private val profile = ContainerProfile.BUILTIN_ALPINE
     private val rows = mutableMapOf<String, SessionExecutionEntity>()
+    private var keepParentAliasInPointer = false
 
     private fun command(command: String, directory: File): CommandResult {
         val process = ProcessBuilder("sh", "-c", command).directory(directory).redirectErrorStream(true).start()
@@ -96,9 +97,22 @@ class WorktreeFileIntegrationTest {
         val engine = mockk<CommandEngine>()
         coEvery { engine.runCommandSyncUnbounded(any(), any(), any(), any()) } coAnswers {
             val script = firstArg<String>()
-            val result = command(script, File(arg<ExecutionBinding>(3).executionRoot))
-            if (script.contains("--show-toplevel") && result.exitCode == 0) {
-                result.copy(output = result.output.replace(project.canonicalPath, "/root/workspace"))
+            val binding = arg<ExecutionBinding>(3)
+            val root = File(binding.executionRoot)
+            val result = command(script, root)
+            if (result.exitCode != 0) return@coAnswers result
+            val aliasIsMounted = "${binding.executionRoot}:/root/workspace" in workspaceProotArgs(binding.executionRoot, binding, profile)
+            if (script.contains("worktree add -b") && (aliasIsMounted || keepParentAliasInPointer)) {
+                // 普通 Linux 单一命名空间的 Git 不会自行写入只在创建期间有效的父挂载别名。
+                val pointer = File(File(requireNotNull(binding.mountRoot), binding.id), ".git")
+                val admin = pointer.parentFile.toPath().resolve(pointer.readText().trim().removePrefix("gitdir: ")).normalize()
+                pointer.writeText("gitdir: /root/workspace/${root.toPath().relativize(admin)}\n")
+            }
+            if (aliasIsMounted && script.contains("--show-toplevel")) {
+                result.copy(output = result.output.lineSequence().joinToString("\n") { line ->
+                    if (line == root.canonicalPath || line.startsWith(root.canonicalPath + "/"))
+                        "/root/workspace" + line.removePrefix(root.canonicalPath) else line
+                })
             } else result
         }
         manager = WorktreeManager(object : ContextWrapper(null) { override fun getFilesDir() = temporary.root },
@@ -118,7 +132,34 @@ class WorktreeFileIntegrationTest {
         access.writeFile("~/workspace/state.txt", "WORKTREE\n")
         assertEquals("PARENT_DIRTY\n", File(project, "state.txt").readText())
         assertEquals("WORKTREE\n", command("cat state.txt", File(binding.executionRoot)).output)
-        assertTrue(File(binding.executionRoot, ".git").isFile)
+        val directory = File(binding.executionRoot)
+        val admin = File(File(requireNotNull(binding.gitCommonDir), "worktrees"), binding.id)
+        val pointer = File(directory, ".git")
+        assertEquals(admin.toPath(), directory.toPath().resolve(pointer.readText().trim().removePrefix("gitdir: ")).normalize())
+        assertEquals(pointer.toPath(), admin.toPath().resolve(File(admin, "gitdir").readText().trim()).normalize())
+        assertEquals(binding.baseCommit, command("git rev-parse HEAD", directory).output.trim())
+        assertEquals("refs/heads/${binding.branch}", command("git symbolic-ref HEAD", directory).output.trim())
+    }
+
+    @Test fun parentWorkspaceAliasInTheGitfileFailsBeforeReadyAndPreservesTheParent() = runTest {
+        keepParentAliasInPointer = true
+        File(project, "state.txt").writeText("PARENT_DIRTY\n")
+        val failure = runCatching { manager.prepare("child", parent) }.exceptionOrNull() as WorktreeManager.PreparationException
+        assertEquals("verify_head", failure.stage)
+        val row = rows.getValue("child")
+        assertEquals(SessionExecutionEntity.FAILED, row.state)
+        assertTrue(File(row.executionRoot, ".git").readText().startsWith("gitdir: /root/workspace/.git/worktrees/"))
+        assertEquals("PARENT_DIRTY\n", File(project, "state.txt").readText())
+    }
+
+    @Test fun reopeningRejectsRegistrationPointingAtAnotherWorktree() = runTest {
+        val binding = manager.prepare("child", parent).binding
+        val other = manager.prepare("other", parent).binding
+        val admin = File(File(requireNotNull(binding.gitCommonDir), "worktrees"), binding.id)
+        File(admin, "gitdir").writeText(File(other.executionRoot, ".git").path + "\n")
+        val failure = runCatching { repository.validate(binding) }.exceptionOrNull()
+        assertTrue(failure is java.io.IOException && failure.message.orEmpty().contains("registration mismatch"))
+        assertEquals(other, repository.validate(other))
     }
 
     @Test fun independentTreesMayUseTheSameRelativeFileName() = runTest {

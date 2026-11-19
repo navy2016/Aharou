@@ -87,9 +87,10 @@ class SessionExecutionRepository @Inject constructor(
     private fun validateWorktree(binding: ExecutionBinding) {
         val access = files.get().forExecution(binding).forStrictRead()
         if (!access.isDirectory(binding.executionRoot)) throw IOException("Execution worktree is not a directory: ${binding.executionRoot}")
-        val pointer = access.readFile(binding.executionRoot.trimEnd('/') + "/.git").trim()
-        if (!pointer.startsWith("gitdir: ")) throw IOException("Execution worktree Git metadata changed")
         val root = java.nio.file.Paths.get(binding.executionRoot)
+        val gitFile = root.resolve(".git")
+        val pointer = access.readFile(gitFile.toString()).trim()
+        if (!pointer.startsWith("gitdir: ")) throw IOException("Execution worktree Git metadata changed")
         val gitDir = root.resolve(pointer.removePrefix("gitdir: ")).normalize()
         val common = binding.gitCommonDir ?: throw IOException("Execution worktree Git metadata is missing")
         if (!gitDir.toString().startsWith(common.trimEnd('/') + "/worktrees/"))
@@ -101,6 +102,10 @@ class SessionExecutionRepository @Inject constructor(
         val actualCommon = gitDir.resolve(relative).normalize().toString()
         if (access.resourceKey(actualCommon) != access.resourceKey(common))
             throw IOException("Execution worktree common directory mismatch: actual=$actualCommon expected=$common")
+        if (binding.mode == ExecutionMode.LOCAL_PROOT.name) {
+            val registered = gitDir.resolve(access.readFile(gitDir.resolve("gitdir").toString()).trim()).normalize()
+            if (registered != gitFile) throw IOException("Execution worktree registration mismatch: actual=$registered expected=$gitFile")
+        }
     }
 
     suspend fun attach(sessionId: String, binding: ExecutionBinding, state: String = SessionExecutionEntity.READY) = lock.withLock {

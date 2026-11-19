@@ -1,5 +1,6 @@
 package com.aharou.feature.agent.domain.execution
 
+import com.aharou.feature.agent.data.local.entity.SessionExecutionEntity
 import com.aharou.feature.agent.domain.container.ContainerProfile
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -26,15 +27,30 @@ class ExecutionBindingTest {
     }
 
     @Test fun stableMountsIncludeGitCommonDirectoryAndWorktreePool() {
-        val mounts = executionMounts(binding, ContainerProfile.BUILTIN_ALPINE)
+        val mounts = workspaceProotArgs(binding.executionRoot, binding, ContainerProfile.BUILTIN_ALPINE)
+        assertEquals(listOf("-b", "/worktrees/id:/root/workspace", "-w", "/root/workspace"), mounts.take(4))
         assertTrue(mounts.contains("/project/.git:/project/.git"))
         assertTrue(mounts.contains("/worktrees:/worktrees"))
         assertTrue(mounts.contains("/worktrees/id:/worktrees/id"))
     }
 
+    @Test fun preparingGitSeesOnlyStableWorkspaceMounts() {
+        val preparing = binding.copy(executionRoot = "/project", ready = false, preparationState = SessionExecutionEntity.PREPARING)
+        assertEquals(listOf("-w", "/project", "-b", "/worktrees:/worktrees", "-b", "/project:/project",
+            "-b", "/project/.git:/project/.git"), workspaceProotArgs("/project", preparing, ContainerProfile.BUILTIN_ALPINE))
+    }
+
+    @Test fun ordinaryCommandsStillStartInTheWorkspaceAlias() {
+        val profile = ContainerProfile.BUILTIN_ALPINE
+        val args = listOf("-b", "/project:/root/workspace", "-w", "/root/workspace")
+        assertEquals(args, workspaceProotArgs("/project", null, profile))
+        assertEquals(args, workspaceProotArgs("/project", binding.copy(isolation = ExecutionBinding.SHARED), profile))
+        assertTrue(workspaceProotArgs(null, null, profile).isEmpty())
+    }
+
     @Test(expected = java.io.IOException::class)
     fun aProfileCannotOverrideTheIsolatedWorkspaceMount() {
-        executionMounts(binding, ContainerProfile.BUILTIN_ALPINE.copy(extraBindings = listOf("/other:/root/workspace")))
+        workspaceProotArgs(binding.executionRoot, binding, ContainerProfile.BUILTIN_ALPINE.copy(extraBindings = listOf("/other:/root/workspace")))
     }
 
     @Test fun worktreeGitEnvironmentKeepsExistingConfigurationAndAddsScopedCredentials() {

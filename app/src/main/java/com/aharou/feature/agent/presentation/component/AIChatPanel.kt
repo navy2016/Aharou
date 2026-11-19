@@ -100,6 +100,8 @@ import com.aharou.feature.agent.presentation.AgentUIState
 import com.aharou.feature.agent.presentation.AIAgentViewModel
 import com.aharou.feature.agent.presentation.MessageRole
 import com.aharou.feature.agent.presentation.QueuedRequest
+import com.aharou.feature.agent.presentation.RewindMenuTarget
+import com.aharou.feature.agent.presentation.AgentAttachment
 import com.aharou.feature.agent.presentation.WorkflowStatus
 import com.aharou.feature.agent.presentation.REASONING_CONTENT_TYPE
 import com.aharou.feature.agent.presentation.hasVisibleContent
@@ -256,7 +258,7 @@ fun AIChatPanel(
     val pendingQuestion by viewModel.pendingUserQuestion.collectAsStateWithLifecycle()
     val currentTodoItems by viewModel.currentSessionTodoItems.collectAsStateWithLifecycle()
     val queuedRequests by viewModel.queuedRequests.collectAsStateWithLifecycle()
-    val targetRewindMessageId by viewModel.targetRewindMessageId.collectAsStateWithLifecycle()
+    val rewindTarget by viewModel.rewind.target.collectAsStateWithLifecycle()
     val providers = (settingsViewModel?.providers?.collectAsStateWithLifecycle()?.value ?: emptyList()).filter { it.isEnabled }
     val modelMetadata = settingsViewModel?.modelMetadata?.collectAsStateWithLifecycle()?.value.orEmpty()
     val sessionProviderModel by viewModel.currentSessionProviderModel.collectAsStateWithLifecycle()
@@ -1651,51 +1653,47 @@ fun AIChatPanel(
                 )
             }
 
-            val rewindPreviewFiles by viewModel.rewindPreviewFiles.collectAsStateWithLifecycle()
-            val rewindUndoRecords by viewModel.rewindUndoRecords.collectAsStateWithLifecycle()
-            var showUndoTimeline by remember { mutableStateOf(false) }
-            // 涉及代码还原的选项先过一道确认：回退点对应哪一天、会动到几个文件，都得先看清楚。
+            val rewindUndoRecords by viewModel.rewind.records.collectAsStateWithLifecycle()
+            var timelineSession by remember(currentSessionId) { mutableStateOf<String?>(null) }
             var pendingCodeRewind by remember(currentSessionId) { mutableStateOf<CodeRewindRequest?>(null) }
+            fun fillRewindDraft(sid: String, text: String, attachments: List<AgentAttachment>) {
+                if (viewModel.currentSessionId.value != sid) return
+                viewModel.updateInputDraft(text)
+                scope.launch {
+                    val pending = withContext(Dispatchers.IO) { attachments.map { it.toPendingAttachment() } }
+                    if (viewModel.currentSessionId.value == sid) viewModel.setPendingAttachments(pending)
+                }
+            }
 
-            targetRewindMessageId?.let { targetId ->
-                val targetMsg = messages.find { it.id == targetId }
+            rewindTarget?.takeIf { it.sessionId == currentSessionId }?.let { owner ->
+                val message = messages.find { it.id == owner.messageId } ?: return@let
                 RewindOptionsBottomSheet(
-                    promptSnippet = targetMsg?.content ?: "",
-                    undoRecordCount = rewindUndoRecords.size, checkpointId = targetId, loadDiff = { viewModel.previewRewindDiff(it) },
-                    onShowTimeline = { showUndoTimeline = true },
-                    onOptionSelected = { option ->
-                        if (option == RewindOption.RESTORE_CODE || option == RewindOption.RESTORE_CODE_AND_CONVERSATION) {
-                            val sid = currentSessionId
-                            if (sid != null && targetMsg != null) {
-                                pendingCodeRewind = CodeRewindRequest(sid, targetId, targetMsg.timestamp, option, rewindPreviewFiles)
-                            } else viewModel.invalidRewindTarget()
+                    promptSnippet = message.content, target = owner, loadDiff = viewModel.rewind::preview,
+                    undoRecordCount = rewindUndoRecords.size, onShowTimeline = { timelineSession = owner.sessionId },
+                    onOptionSelected = { option, diff ->
+                        if (option.requiresCheckpoint) {
+                            if (diff != null) pendingCodeRewind = CodeRewindRequest(owner.sessionId, owner.messageId, message.timestamp, option, diff)
                         } else {
-                            viewModel.executeRewindOption(targetId, option) { text, attachments ->
-                                viewModel.updateInputDraft(text)
-                                scope.launch { viewModel.setPendingAttachments(withContext(Dispatchers.IO) { attachments.map { it.toPendingAttachment() } }) } // 附件要解码图片 + 重编码 + base64，不能压主线程
+                            viewModel.executeRewindOption(owner, option, undoId = rewindUndoRecords.firstOrNull()?.id) { text, files ->
+                                fillRewindDraft(owner.sessionId, text, files)
                             }
                         }
                     },
-                    onDismissRequest = { viewModel.dismissRewindMenu() }
+                    onDismissRequest = viewModel.rewind::dismissMenu
                 )
             }
-
             pendingCodeRewind?.takeIf { it.belongsTo(currentSessionId) }?.let { request ->
                 CodeRewindConfirmation(request, onDismiss = { pendingCodeRewind = null }) { confirmed ->
                     pendingCodeRewind = null
-                    viewModel.executeRewindOption(confirmed.messageId, confirmed.option, confirmed.sessionId) { text, attachments ->
-                        viewModel.updateInputDraft(text)
-                        scope.launch {
-                            val pending = withContext(Dispatchers.IO) { attachments.map { it.toPendingAttachment() } }
-                            if (viewModel.currentSessionId.value == confirmed.sessionId) viewModel.setPendingAttachments(pending)
-                        }
+                    viewModel.executeRewindOption(RewindMenuTarget(confirmed.sessionId, confirmed.messageId), confirmed.option, confirmed.checkpointId) { text, files ->
+                        fillRewindDraft(confirmed.sessionId, text, files)
                     }
                 }
             }
 
-            if (showUndoTimeline) {
+            timelineSession?.takeIf { it == currentSessionId }?.let { sid ->
                 AlertDialog(
-                    onDismissRequest = { showUndoTimeline = false },
+                    onDismissRequest = { timelineSession = null },
                     title = { Text(stringResource(R.string.checkpoint_undo_timeline_title)) },
                     text = {
                         if (rewindUndoRecords.isEmpty()) {
@@ -1711,8 +1709,8 @@ fun AIChatPanel(
                                         modifier = Modifier
                                             .fillMaxWidth()
                                             .clickable {
-                                                showUndoTimeline = false
-                                                viewModel.undoRewind(record.id)
+                                                timelineSession = null
+                                                viewModel.undoRewind(sid, record.id)
                                             }
                                             .padding(vertical = Spacing.sm)
                                     ) {
@@ -1735,26 +1733,27 @@ fun AIChatPanel(
                         }
                     },
                     confirmButton = {
-                        TextButton(onClick = { showUndoTimeline = false }) {
+                        TextButton(onClick = { timelineSession = null }) {
                             Text(stringResource(R.string.common_cancel))
                         }
                     }
                 )
             }
 
-            val rewindConflicts by viewModel.rewindConflicts.collectAsStateWithLifecycle()
-            if (rewindConflicts.isNotEmpty()) {
+            val rewindNotice by viewModel.rewind.notice.collectAsStateWithLifecycle()
+            rewindNotice?.takeIf { it.sessionId == currentSessionId }?.result?.let { result ->
                 AlertDialog(
-                    onDismissRequest = { viewModel.dismissRewindConflicts() },
+                    onDismissRequest = viewModel.rewind::dismissNotice,
                     title = { Text(stringResource(R.string.checkpoint_conflict_title)) },
                     text = {
-                        Text(
-                            stringResource(R.string.checkpoint_conflict_message, rewindConflicts.size) +
-                                "\n" + rewindConflicts.joinToString("\n")
-                        )
+                        Column(Modifier.verticalScroll(rememberScrollState())) {
+                            Text(stringResource(R.string.checkpoint_result_count, result.restoredCount))
+                            if (result.conflicts.isNotEmpty()) Text(stringResource(R.string.checkpoint_conflict_message, result.conflicts.size) + "\n" + result.conflicts.joinToString("\n"))
+                            if (result.failures.isNotEmpty()) Text(stringResource(R.string.checkpoint_failed_files, result.failures.size) + "\n" + result.failures.joinToString("\n"))
+                        }
                     },
                     confirmButton = {
-                        TextButton(onClick = { viewModel.dismissRewindConflicts() }) {
+                        TextButton(onClick = viewModel.rewind::dismissNotice) {
                             Text(stringResource(R.string.common_ok))
                         }
                     }

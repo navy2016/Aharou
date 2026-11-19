@@ -271,7 +271,7 @@ class LocalFileAccess @Inject constructor(
     override fun copyToLocal(path: String): File = resolve(path)
 
     override fun delete(path: String) {
-        resolve(path, followFinalLink = false).delete()
+        Files.deleteIfExists(resolve(path, followFinalLink = false).toPath())
     }
 
     override fun deleteRecursively(path: String) {

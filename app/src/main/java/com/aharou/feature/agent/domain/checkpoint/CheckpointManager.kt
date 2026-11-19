@@ -3,17 +3,21 @@ package com.aharou.feature.agent.domain.checkpoint
 import android.content.Context
 import com.aharou.core.util.FileLogger
 import com.aharou.core.util.LineDiff
-import com.aharou.core.util.writeTextSafely
 import com.aharou.feature.agent.data.local.dao.CheckpointDao
 import com.aharou.feature.agent.data.local.entity.CheckpointEntity
 import com.aharou.feature.agent.data.local.entity.CheckpointFileSnapshotEntity
 import com.aharou.feature.workspace.domain.FileAccessProvider
+import com.aharou.feature.workspace.domain.sha256Fingerprint
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
+import java.io.IOException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
@@ -30,10 +34,9 @@ class CheckpointManager @Inject constructor(
     private val fileLocks: com.aharou.feature.agent.domain.tool.WorkspaceFileLock,
     private val fileVersions: com.aharou.feature.agent.domain.tool.FileVersionRegistry
 ) {
-    /** 回退结果：实际还原的文件数，以及因「被检查点之外的操作改过」而跳过的文件。 */
-    data class RestoreResult(val restoredCount: Int, val conflicts: List<String>) {
-        val hasConflict: Boolean get() = conflicts.isNotEmpty()
-    }
+    class TargetUnavailable : IOException("Checkpoint or undo target is no longer available")
+
+    data class RestoreResult(val restoredCount: Int, val conflicts: List<String>, val failures: List<String> = emptyList())
 
     /** 回退预览里单个文件的去向，三态与 [restoreCodeToCheckpoint] 的实际行为一一对应。 */
     enum class RewindFileState {
@@ -71,6 +74,7 @@ class CheckpointManager @Inject constructor(
      * 已扫描的那批——超上限时不再逐文件读内容推演，否则大工作区会同时打爆内存与 IO。
      */
     data class RewindDiff(
+        val checkpointId: String,
         val files: List<RewindFileDiff>,
         val restoreFileCount: Int,
         val changedFileCount: Int,
@@ -222,7 +226,7 @@ class CheckpointManager @Inject constructor(
      *
      * 每个文件在还原前比对当前内容摘要与快照记录的写入摘要：不一致说明它被检查点之外的操作改过，
      * 这时**不覆盖**它，而是记进 [RestoreResult.conflicts] 交由上层提示用户（避免把人家的改动冲掉）。
-     * 还原前的现场会另存一份，供 [undoLastRestore] 反悔。
+     * 还原前的现场会另存一份，供 [undoRestoreTo] 反悔。
      */
     suspend fun restoreCodeToCheckpoint(sessionId: String, targetCheckpointId: String): RestoreResult =
         restoreLock(sessionId).withLock { restoreBoundCode(sessionId, targetCheckpointId) }
@@ -231,78 +235,35 @@ class CheckpointManager @Inject constructor(
         sessionId: String,
         targetCheckpointId: String
     ): RestoreResult = withContext(Dispatchers.IO) {
-        val allCheckpoints = checkpointDao.getCheckpointsForSession(sessionId)
-        val targetIndex = allCheckpoints.indexOfFirst { it.id == targetCheckpointId }
-        if (targetIndex == -1) return@withContext RestoreResult(0, emptyList())
-
-        // 收集 targetCheckpointId 及其之后所有 Checkpoint 的快照，倒序还原
-        val checkpointsToRollback = allCheckpoints.subList(targetIndex, allCheckpoints.size).reversed()
-        var restoredFileCount = 0
+        val chains = snapshotChains(sessionId, targetCheckpointId)
         val conflicts = mutableListOf<String>()
-        val undoEntries = linkedMapOf<String, UndoEntry>()
-        var undoFile: File? = null
-        FileLogger.i(
-            TAG,
-            "还原开始: session=$sessionId target=$targetCheckpointId 涉及 ${checkpointsToRollback.size} 个检查点"
-        )
-
-        for (cp in checkpointsToRollback) {
-            val snapshots = checkpointDao.getFileSnapshotsForCheckpoint(cp.id)
-            val access = try { accessFor(cp.id, sessionId) } catch (error: Exception) {
-                if (error is kotlinx.coroutines.CancellationException) throw error
-                conflicts.addAll(snapshots.map { it.filePath })
-                continue
-            }
-            for (snapshot in snapshots) {
-                try {
-                val key = access.resourceKey(snapshot.filePath)
-                fileLocks.withLock(listOf(key, snapshot.resourceKey)) {
-                    if (snapshot.resourceKey != key || access.resourceKey(snapshot.filePath) != key) {
-                        conflicts.add(snapshot.filePath)
-                        return@withLock
+        val failures = mutableListOf<String>()
+        var restored = 0
+        val journal = UndoJournal(sessionId, KIND_RESTORE)
+        FileLogger.i(TAG, "还原开始: session=$sessionId target=$targetCheckpointId 涉及 ${chains.size} 个文件")
+        for ((key, chain) in chains) {
+            val target = chain.last()
+            val path = target.snapshot.filePath
+            try {
+                fileLocks.withLock(key) {
+                    val plan = planFile(key, chain)
+                    if (plan == null) {
+                        conflicts.add(path)
+                    } else if (plan.applies) {
+                        val applied = journal.write(requireNotNull(target.access), requireNotNull(target.executionId), key, path, plan.before, plan.after)
+                        if (applied) restored++ else conflicts.add(path)
                     }
-                    val originalFile = File(baseCheckpointDir, snapshot.snapshotRelativePath)
-                    val original = if (snapshot.changeType == "MODIFY") originalFile.takeIf { it.isFile }?.readBytes() else null
-                    if (snapshot.changeType == "MODIFY" && original == null) { conflicts.add(snapshot.filePath); return@withLock }
-                    val current = if (access.exists(snapshot.filePath)) access.copyToLocal(snapshot.filePath).readBytes() else null
-                    if (!checkpointCanRestore(snapshot.changeType, current, original, snapshot.writtenHash)) {
-                        conflicts.add(snapshot.filePath)
-                        return@withLock
-                    }
-                    if (snapshot.changeType == "CREATE" && current == null) return@withLock
-                    val before = undoEntries[key] ?: UndoEntry(snapshot.filePath, null, current != null,
-                        cp.executionId, key, bytes = current?.let { java.util.Base64.getEncoder().encodeToString(it) })
-                    val after = original?.let { com.aharou.feature.workspace.domain.sha256Fingerprint(it) }
-                    undoEntries[key] = before.copy(expectedHash = after)
-                    undoFile = saveUndo(sessionId, KIND_RESTORE, undoEntries.values.toList(), undoFile)
-                    if (original != null) access.writeBytes(snapshot.filePath, original) else access.delete(snapshot.filePath)
-                    fileVersions.recordExternal(key, after ?: "missing")
-                    restoredFileCount++
                 }
-                } catch (error: Exception) {
-                    if (error is kotlinx.coroutines.CancellationException) throw error
-                    conflicts.add(snapshot.filePath)
-                    FileLogger.w(TAG, "还原文件失败，保留当前内容: ${snapshot.filePath}", error)
-                }
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                failures.add(path)
+                FileLogger.w(TAG, "还原文件失败: $path", e)
             }
         }
-        FileLogger.i(TAG, "还原结束: session=$sessionId 共处理 $restoredFileCount 个文件，冲突 ${conflicts.size} 个")
-        RestoreResult(restoredFileCount, conflicts)
+        journal.trimHistory()
+        FileLogger.i(TAG, "还原结束: session=$sessionId 共处理 $restored 个文件，冲突 ${conflicts.size} 个，失败 ${failures.size} 个")
+        RestoreResult(restored, conflicts, failures)
     }
-
-    /**
-     * 预览还原到 [targetCheckpointId] 会涉及多少个文件快照，供回退前的确认提示展示。
-     *
-     * 只数不动文件；范围与 [restoreCodeToCheckpoint] 同源，但它是上限——被判定为冲突的文件会被跳过。
-     */
-    suspend fun countFilesToRestore(sessionId: String, targetCheckpointId: String): Int =
-        withContext(Dispatchers.IO) {
-            val allCheckpoints = checkpointDao.getCheckpointsForSession(sessionId)
-            val targetIndex = allCheckpoints.indexOfFirst { it.id == targetCheckpointId }
-            if (targetIndex == -1) return@withContext 0
-            allCheckpoints.subList(targetIndex, allCheckpoints.size)
-                .sumOf { checkpointDao.getFileSnapshotsForCheckpoint(it.id).size }
-        }
 
     /**
      * 预览回退到 [targetCheckpointId] 会发生什么：哪些文件会被还原、哪些本来就没变、哪些会被跳过。
@@ -315,52 +276,24 @@ class CheckpointManager @Inject constructor(
         sessionId: String,
         targetCheckpointId: String
     ): RewindDiff = withContext(Dispatchers.IO) {
-        val allCheckpoints = checkpointDao.getCheckpointsForSession(sessionId)
-        val targetIndex = allCheckpoints.indexOfFirst { it.id == targetCheckpointId }
-        if (targetIndex == -1) return@withContext RewindDiff(emptyList(), 0, 0, 0, false)
-
-        val entries = LinkedHashMap<String, PreviewEntry>()
-        var truncated = false
-
-        // 倒序（新→旧）与 restore 一致：同一个文件在多个检查点各有快照时，回退是逐份往回写的，
-        // 冲突判定必须跟着这条链走，只拿最早那份去比会把能干净回退的文件误报成冲突。
-        for (cp in allCheckpoints.subList(targetIndex, allCheckpoints.size).reversed()) {
-            val access = try { accessFor(cp.id, sessionId) } catch (error: Exception) {
-                if (error is kotlinx.coroutines.CancellationException) throw error
-                null
-            }
-            for (snapshot in checkpointDao.getFileSnapshotsForCheckpoint(cp.id)) {
-                val key = snapshot.resourceKey ?: "${cp.id}:${snapshot.filePath}"
-                val entry = entries[key]
-                if (entry == null) {
-                    if (entries.size >= MAX_PREVIEW_FILE_COUNT) {
-                        truncated = true
-                        continue
-                    }
-                    entries[key] = PreviewEntry(snapshot.filePath)
-                        .also { applyPreviewSnapshot(it, snapshot, access) }
-                } else {
-                    applyPreviewSnapshot(entry, snapshot, access)
-                }
-            }
-        }
-
+        val chains = snapshotChains(sessionId, targetCheckpointId)
         val changed = ArrayList<RewindFileDiff>()
         val unchanged = ArrayList<RewindFileDiff>()
         val conflicts = ArrayList<RewindFileDiff>()
-        var restoreCount = 0
-        for (entry in entries.values) {
-            if (entry.lastOutcomeConflict) {
-                conflicts.add(
-                    RewindFileDiff(entry.filePath, entry.changeType, RewindFileState.CONFLICT, 0, 0, emptyList(), false)
-                )
+        for ((key, chain) in chains.entries.take(MAX_PREVIEW_FILE_COUNT)) {
+            val entry = chain.last().snapshot
+            val plan = try { fileLocks.withLock(key) { planFile(key, chain) } } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                null
+            }
+            if (plan == null) {
+                conflicts.add(RewindFileDiff(entry.filePath, entry.changeType, RewindFileState.CONFLICT, 0, 0, emptyList(), false))
                 continue
             }
-            if (!entry.restored) continue
-            restoreCount++
-            val before = entry.diskContent?.toString(Charsets.UTF_8) ?: ""
-            val after = entry.virtualContent?.toString(Charsets.UTF_8) ?: ""
-            if (before == after) {
+            if (!plan.applies) continue
+            val before = plan.before?.toString(Charsets.UTF_8).orEmpty()
+            val after = plan.after?.toString(Charsets.UTF_8).orEmpty()
+            if (plan.before.contentEquals(plan.after)) {
                 unchanged.add(
                     RewindFileDiff(
                         entry.filePath,
@@ -396,133 +329,124 @@ class CheckpointManager @Inject constructor(
         }
 
         RewindDiff(
+            checkpointId = targetCheckpointId,
             files = changed + unchanged + conflicts,
-            restoreFileCount = restoreCount,
+            restoreFileCount = changed.size + unchanged.size,
             changedFileCount = changed.size,
             conflictCount = conflicts.size,
-            truncated = truncated
+            truncated = chains.size > MAX_PREVIEW_FILE_COUNT
         )
     }
 
-    /**
-     * 把一份快照「施加」到内存里的模拟状态上：还原会真的写盘，这里只记账。
-     *
-     * 冲突判定条件逐字对齐 [restoreCodeToCheckpoint]，不另造规则；快照文件丢失时与还原一样直接跳过。
-     */
-    private suspend fun applyPreviewSnapshot(entry: PreviewEntry, snapshot: CheckpointFileSnapshotEntity, access: FileAccessProvider?) {
-        entry.changeType = snapshot.changeType
-        if (access == null || snapshot.resourceKey == null) { entry.lastOutcomeConflict = true; return }
-        fileLocks.withLock(snapshot.resourceKey) {
-            try {
-                if (access.resourceKey(snapshot.filePath) != snapshot.resourceKey) { entry.lastOutcomeConflict = true; return@withLock }
-                val current = if (entry.virtualLoaded) entry.virtualContent else {
-                    val bytes = if (access.exists(snapshot.filePath)) access.copyToLocal(snapshot.filePath).readBytes() else null
-                    entry.diskContent = bytes
-                    entry.virtualContent = bytes
-                    entry.virtualLoaded = true
-                    bytes
-                }
-                val originalFile = File(baseCheckpointDir, snapshot.snapshotRelativePath)
-                val original = if (snapshot.changeType == "MODIFY") originalFile.takeIf { it.isFile }?.readBytes() else null
-                if (snapshot.changeType == "MODIFY" && original == null ||
-                    !checkpointCanRestore(snapshot.changeType, current, original, snapshot.writtenHash)) {
-                    entry.lastOutcomeConflict = true
-                } else if (snapshot.changeType != "CREATE" || current != null) {
-                    entry.virtualContent = original
-                    entry.restored = true
-                    entry.lastOutcomeConflict = false
-                }
-            } catch (error: Exception) {
-                if (error is kotlinx.coroutines.CancellationException) throw error
-                entry.lastOutcomeConflict = true
+    private data class SnapshotStep(val executionId: String?, val snapshot: CheckpointFileSnapshotEntity, val access: FileAccessProvider?)
+    private data class FilePlan(val before: ByteArray?, val after: ByteArray?, val applies: Boolean)
+
+    private suspend fun snapshotChains(sessionId: String, targetId: String): Map<String, List<SnapshotStep>> {
+        val checkpoints = checkpointDao.getCheckpointsForSession(sessionId)
+        val index = checkpoints.indexOfFirst { it.id == targetId }
+        if (index < 0) throw TargetUnavailable()
+        val chains = linkedMapOf<String, MutableList<SnapshotStep>>()
+        val unbound = mutableListOf<SnapshotStep>()
+        for (cp in checkpoints.subList(index, checkpoints.size).asReversed()) {
+            val snapshots = checkpointDao.getFileSnapshotsForCheckpoint(cp.id)
+            if (snapshots.isEmpty()) continue
+            val access = try { accessFor(cp.id, sessionId) } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                null
+            }
+            for (snapshot in snapshots) {
+                val step = SnapshotStep(cp.executionId, snapshot, access)
+                val key = snapshot.resourceKey
+                if (key == null) unbound.add(step) else chains.getOrPut(key) { mutableListOf() }.add(step)
             }
         }
+        // 无资源标识的旧快照不能授权写入，也不能让同名的已登记快照绕过它。
+        if (unbound.isNotEmpty()) {
+            val byPath = chains.values.flatMap { chain ->
+                chain.map { it.snapshot.filePath }.distinct().map { path -> path to chain }
+            }.groupBy({ it.first }, { it.second })
+            for (step in unbound) {
+                val named = byPath[step.snapshot.filePath].orEmpty()
+                if (named.isEmpty()) chains.getOrPut("unbound\u0000${step.snapshot.filePath}") { mutableListOf() }.add(step)
+                else named.forEach { it.add(0, step) }
+            }
+        }
+        return chains
     }
 
-    /** 预览时单个文件的模拟状态。 */
-    private class PreviewEntry(val filePath: String) {
-        var changeType: String = "MODIFY"
-
-        /** 磁盘上此刻的真实内容，首次触碰时读一次；null 表示文件不存在。 */
-        var diskContent: ByteArray? = null
-
-        /** 推演到当前位置时的内容：每还原一份快照它就变成那份快照的原文，null 表示将被删除。 */
-        var virtualContent: ByteArray? = null
-        var virtualLoaded = false
-
-        /** 至少发生过一次还原。 */
-        var restored = false
-
-        /** 最后一笔是冲突跳过——还原里冲突的 continue 会让文件停在这一刻，net 效果由它决定。 */
-        var lastOutcomeConflict = false
+    private fun planFile(key: String, chain: List<SnapshotStep>): FilePlan? {
+        val newest = chain.first()
+        val access = newest.access ?: return null
+        if (chain.any { it.snapshot.resourceKey != key || it.access?.resourceKey(it.snapshot.filePath) != key }) return null
+        val path = newest.snapshot.filePath
+        val before = if (access.exists(path)) access.copyToLocal(path).readBytes() else null
+        var current = before
+        var applies = false
+        for ((_, snapshot) in chain) {
+            val original = when (snapshot.changeType) {
+                "MODIFY" -> File(baseCheckpointDir, snapshot.snapshotRelativePath).takeIf { it.isFile }?.readBytes() ?: return null
+                "CREATE" -> null
+                else -> return null
+            }
+            if (!checkpointCanRestore(snapshot.changeType, current, original, snapshot.writtenHash)) return null
+            if (current != null || original != null) applies = true
+            current = original
+        }
+        return FilePlan(before, current, applies)
     }
 
     /** 列出现场时间线，新的在前；界面据此让用户挑一个时间节点撤销。 */
-    fun listUndoRecords(sessionId: String): List<UndoRecordInfo> =
-        undoRecords(sessionId).mapNotNull { file ->
-            val record = readUndo(file) ?: return@mapNotNull null
-            UndoRecordInfo(file.name, record.kind, record.createdAt, record.files.size)
-        }
-
-    /** 撤销最近一次恢复。 */
-    suspend fun undoLastRestore(sessionId: String): Int = undoRestoreTo(sessionId, null)
-
-    /**
-     * 撤销到指定现场（[recordId] 取自 [listUndoRecords]；为空即最新一份），返回还原的文件数。
-     *
-     * 撤销前先把当前现场也存一份——撤销本身同样会盖文件，得给它留个反向的后悔键，
-     * 于是来回跳都不丢东西。目标现场用过即删，不会再出现在时间线里。
-     */
-    suspend fun undoRestoreTo(sessionId: String, recordId: String?): Int =
-        restoreLock(sessionId).withLock { undoBoundRestore(sessionId, recordId) }
-
-    private suspend fun undoBoundRestore(sessionId: String, recordId: String?): Int = withContext(Dispatchers.IO) {
-        val records = undoRecords(sessionId)
-        val target = (if (recordId != null) records.firstOrNull { it.name == recordId } else records.firstOrNull())
-            ?: return@withContext 0
-        val record = readUndo(target) ?: return@withContext 0
-
-        var count = 0
-        val remaining = mutableListOf<UndoEntry>()
-        val inverse = mutableListOf<UndoEntry>()
-        var inverseFile: File? = null
-        for (entry in record.files) {
-            try {
-                val binding = executions.validate(executions.getExecution(entry.executionId
-                    ?: throw java.io.IOException("Undo execution binding is unknown")))
-                val access = fileAccess.forExecution(binding).forStrictRead()
-                val key = access.resourceKey(entry.filePath)
-                fileLocks.withLock(listOf(key, entry.resourceKey)) {
-                    if (entry.resourceKey != key || access.resourceKey(entry.filePath) != key || access.fingerprint(entry.filePath) != entry.expectedHash)
-                        throw java.io.IOException("Undo target changed externally")
-                    val current = if (access.exists(entry.filePath)) access.copyToLocal(entry.filePath).readBytes() else null
-                    val restored = if (entry.existed) entry.bytes?.let { java.util.Base64.getDecoder().decode(it) }
-                        ?: throw java.io.IOException("Undo snapshot is incomplete") else null
-                    val after = restored?.let { com.aharou.feature.workspace.domain.sha256Fingerprint(it) }
-                    inverse.add(UndoEntry(entry.filePath, null, current != null, binding.id, key, after,
-                        current?.let { java.util.Base64.getEncoder().encodeToString(it) }))
-                    inverseFile = saveUndo(sessionId, KIND_UNDO, inverse, inverseFile)
-                    if (restored != null) access.writeBytes(entry.filePath, restored) else access.delete(entry.filePath)
-                    fileVersions.recordExternal(key, after ?: "missing")
-                    count++
-                }
-            } catch (error: Exception) {
-                if (error is kotlinx.coroutines.CancellationException) throw error
-                remaining.add(entry)
-                FileLogger.w(TAG, "撤销恢复跳过冲突文件: ${entry.filePath}", error)
+    suspend fun listUndoRecords(sessionId: String): List<UndoRecordInfo> = restoreLock(sessionId).withLock {
+        withContext(Dispatchers.IO) {
+            undoRecords(sessionId).mapNotNull { file ->
+                val record = readUndo(file)?.takeIf { it.files.isNotEmpty() } ?: return@mapNotNull null
+                UndoRecordInfo(file.name, record.kind, record.createdAt, record.files.size)
             }
         }
-        if (remaining.isEmpty()) target.delete() else
-            check(target.writeTextSafely(Json.encodeToString(record.copy(files = remaining)), TAG))
-        FileLogger.i(TAG, "已撤销到现场 ${target.name}: session=$sessionId 处理 $count 个文件，剩余 ${undoRecordCount(sessionId)} 个")
-        count
     }
 
-    /** 还能撤销几次（现场条数），供界面提示。 */
-    fun undoRecordCount(sessionId: String): Int = undoRecords(sessionId).size
+    suspend fun undoRestoreTo(sessionId: String, recordId: String): RestoreResult =
+        restoreLock(sessionId).withLock { undoBoundRestore(sessionId, recordId) }
 
-    /** 是否还有可撤销的现场。 */
-    fun hasUndoRecord(sessionId: String): Boolean = undoRecords(sessionId).isNotEmpty()
+    private suspend fun undoBoundRestore(sessionId: String, recordId: String): RestoreResult = withContext(Dispatchers.IO) {
+        val target = undoRecords(sessionId).firstOrNull { it.name == recordId } ?: throw TargetUnavailable()
+        val record = readUndo(target)?.takeIf { it.files.isNotEmpty() } ?: throw TargetUnavailable()
+        var count = 0
+        val remaining = mutableListOf<UndoEntry>()
+        val conflicts = mutableListOf<String>()
+        val failures = mutableListOf<String>()
+        val journal = UndoJournal(sessionId, KIND_UNDO)
+        for (entry in record.files) {
+            try {
+                val binding = executions.validate(executions.getExecution(entry.executionId ?: throw IOException("Undo execution binding is unknown")))
+                val access = fileAccess.forExecution(binding).forStrictRead()
+                val applied = fileLocks.withLock(entry.resourceKey) {
+                    val key = access.resourceKey(entry.filePath)
+                    if (entry.resourceKey != key) return@withLock false
+                    val current = if (access.exists(entry.filePath)) access.copyToLocal(entry.filePath).readBytes() else null
+                    if (current?.let { sha256Fingerprint(it) } != entry.expectedHash) return@withLock false
+                    val restored = if (entry.existed) entry.bytes?.let { java.util.Base64.getDecoder().decode(it) }
+                        ?: throw IOException("Undo snapshot is incomplete") else null
+                    journal.write(access, binding.id, key, entry.filePath, current, restored)
+                }
+                if (applied) count++ else {
+                    conflicts.add(entry.filePath)
+                    remaining.add(entry)
+                    FileLogger.w(TAG, "撤销恢复跳过冲突文件: ${entry.filePath}")
+                }
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                remaining.add(entry)
+                failures.add(entry.filePath)
+                FileLogger.w(TAG, "撤销恢复失败: ${entry.filePath}", e)
+            }
+        }
+        if (remaining.isEmpty()) Files.delete(target.toPath())
+        else if (remaining.size != record.files.size) writeUndoRecord(target, record.copy(files = remaining))
+        journal.trimHistory(target.takeIf { remaining.isNotEmpty() })
+        FileLogger.i(TAG, "已撤销到现场 ${target.name}: session=$sessionId 处理 $count 个文件，跳过 ${conflicts.size} 个，失败 ${failures.size} 个，剩余备份节点 ${undoRecords(sessionId).size} 个")
+        RestoreResult(count, conflicts, failures)
+    }
 
     /**
      * 删除 Session 关联的所有 Checkpoint 快照与记录
@@ -540,21 +464,66 @@ class CheckpointManager @Inject constructor(
         }
     }
 
-    /**
-     * 存一份可回滚现场。每次恢复/撤销各存一份、各自成文件，于是能像时间线一样往回选，
-     * 而不是只能撤最近一次。
-     *
-     * 超过 [MAX_UNDO_RECORDS] 就删最旧的：现场里放的是整份文件内容，不设上限会把磁盘吃掉。
-     */
-    private fun saveUndo(sessionId: String, kind: String, entries: List<UndoEntry>, target: File? = null): File? {
-        if (entries.isEmpty()) return target
-        val dir = undoDir(sessionId).apply { mkdirs() }
-        val now = System.currentTimeMillis()
-        val file = target ?: File(dir, "$now-${UUID.randomUUID().toString().take(6)}.json")
-        if (!file.writeTextSafely(Json.encodeToString(UndoRecord(kind, now, entries)), TAG))
-            throw java.io.IOException("Cannot persist checkpoint undo journal")
-        undoRecords(sessionId).drop(MAX_UNDO_RECORDS).forEach { it.delete() }
-        return file
+    private inner class UndoJournal(private val sessionId: String, private val kind: String) {
+        private val entries = mutableListOf<UndoEntry>()
+        private var file: File? = null
+
+        fun write(access: FileAccessProvider, executionId: String, key: String, path: String, before: ByteArray?, after: ByteArray?): Boolean {
+            val beforeHash = before?.let { sha256Fingerprint(it) }
+            val afterHash = after?.let { sha256Fingerprint(it) }
+            fun matchesBefore() = access.resourceKey(path) == key &&
+                (if (before == null) !access.exists(path) else access.fingerprint(path) == beforeHash)
+            val entry = UndoEntry(path, null, before != null, executionId, key, afterHash, before?.let { java.util.Base64.getEncoder().encodeToString(it) })
+            save(entries + entry)
+            val applied = try {
+                if (!matchesBefore()) false else {
+                    if (after == null) access.delete(path) else access.writeBytes(path, after)
+                    true
+                }
+            } catch (e: Exception) {
+                // 连接中断时写入结果可能未知；只有能确认未变才撤掉这条写前记录。
+                if (e !is CancellationException && runCatching { matchesBefore() }.getOrDefault(false)) save(entries) else entries.add(entry)
+                throw e
+            }
+            if (!applied) {
+                save(entries)
+                return false
+            }
+            entries.add(entry)
+            fileVersions.recordExternal(key, afterHash ?: "missing")
+            return true
+        }
+
+        private fun save(snapshot: List<UndoEntry>) {
+            if (snapshot.isEmpty()) {
+                file?.let { Files.deleteIfExists(it.toPath()) }
+                file = null
+                return
+            }
+            val now = System.currentTimeMillis()
+            val target = file ?: File(undoDir(sessionId).apply { mkdirs() }, "$now-${UUID.randomUUID().toString().take(6)}.json")
+            writeUndoRecord(target, UndoRecord(kind, now, snapshot))
+            file = target
+        }
+
+        fun trimHistory(remainingTarget: File? = null) {
+            val written = file ?: return
+            val keep = setOfNotNull(written, remainingTarget)
+            undoRecords(sessionId).filterNot { it in keep }.drop(MAX_UNDO_RECORDS - keep.size).forEach { it.delete() }
+        }
+    }
+
+    private fun writeUndoRecord(target: File, record: UndoRecord) {
+        val tmp = File.createTempFile(".undo-", ".tmp", target.parentFile)
+        try {
+            tmp.outputStream().use { out ->
+                out.write(Json.encodeToString(record).toByteArray(Charsets.UTF_8))
+                out.fd.sync()
+            }
+            Files.move(tmp.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+        } finally {
+            tmp.delete()
+        }
     }
 
     /** 现场目录：一条一次，文件名以时间戳开头。 */

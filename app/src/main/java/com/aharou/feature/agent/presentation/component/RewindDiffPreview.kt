@@ -49,14 +49,14 @@ import com.aharou.feature.agent.domain.checkpoint.CheckpointManager
  *
  * 文案从参数传入而不是在组件里直接 stringResource：本仓库不允许 agent 改 strings.xml，
  * 等主代理把 key 落位后，调用处换成 `stringResource(R.string.xxx, ...)` 即可，组件本身不用改。
- * [summary] / [conflictNotice] / [truncatedNotice] 分别带 2 / 1 / 1 个计数占位。
+ * 汇总区分完整预览与部分预览，截断提示不代表实际文件总数。
  */
 data class RewindDiffPreviewTexts(
     /** 汇总行，形如「将有 %1$d 个文件被还原（%2$d 个有实际改动）」。 */
     val summary: String,
     /** 冲突提示，形如「%1$d 个文件被检查点之外的操作改过，回退会跳过」。 */
     val conflictNotice: String,
-    /** 文件数超出预览上限时的提示，形如「文件较多，仅列出前 %1$d 个」。 */
+    /** 文件数超出预览上限时的提示。 */
     val truncatedNotice: String,
     /** 单个冲突文件上的小标签，如「跳过」。 */
     val conflictBadge: String,

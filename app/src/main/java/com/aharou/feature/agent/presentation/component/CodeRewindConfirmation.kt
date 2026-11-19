@@ -6,14 +6,21 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.res.stringResource
 import com.aharou.R
+import com.aharou.feature.agent.domain.checkpoint.CheckpointManager
 
 internal data class CodeRewindRequest(
     val sessionId: String,
     val messageId: String,
     val timestamp: Long,
     val option: RewindOption,
-    val fileCount: Int,
+    val checkpointId: String,
+    val restoreCount: Int,
+    val skipCount: Int,
+    val partial: Boolean,
 ) {
+    constructor(sessionId: String, messageId: String, timestamp: Long, option: RewindOption, diff: CheckpointManager.RewindDiff) :
+        this(sessionId, messageId, timestamp, option, diff.checkpointId, diff.restoreFileCount, diff.conflictCount, diff.truncated)
+
     fun belongsTo(currentSessionId: String?) = sessionId == currentSessionId
 }
 
@@ -27,8 +34,8 @@ internal fun CodeRewindConfirmation(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.checkpoint_confirm_rewind_title)) },
         text = {
-            Text(stringResource(R.string.checkpoint_confirm_rewind_body,
-                formatRewindTime(request.timestamp), request.fileCount))
+            Text(stringResource(if (request.partial) R.string.checkpoint_confirm_rewind_partial else R.string.checkpoint_confirm_rewind_body,
+                formatRewindTime(request.timestamp), request.restoreCount, request.skipCount))
         },
         confirmButton = {
             TextButton(onClick = { onConfirm(request) }) {

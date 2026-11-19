@@ -1,6 +1,7 @@
 package com.aharou.feature.agent.domain.execution
 
 import android.content.ContextWrapper
+import com.aharou.feature.agent.data.local.entity.SessionExecutionEntity
 import com.aharou.feature.agent.domain.container.CommandEngine
 import com.aharou.feature.agent.domain.container.CommandResult
 import com.aharou.feature.agent.domain.container.ContainerProfile
@@ -39,26 +40,35 @@ class WorktreeManagerTest {
             executions, engine, profiles, paths, WorkspaceFileLock())
     }
 
+    private fun gitMetadata(command: String, execution: ExecutionBinding, head: String = commit): String = when {
+        command.contains("git symbolic-ref HEAD") ->
+            "${execution.executionRoot}\n${execution.gitCommonDir}\n$head\nrefs/heads/${execution.branch}"
+        command.contains("--show-toplevel") -> "${execution.executionRoot}\n${execution.executionRoot}/.git\n$commit"
+        else -> ""
+    }
+
     @Test
     fun preparedWorktreeUsesTheSelectedCommitAndStableMetadataMounts() = runTest {
         val manager = manager()
-        val calls = mutableListOf<Pair<String, ExecutionBinding?>>()
+        val calls = mutableListOf<Pair<String, ExecutionBinding>>()
         coEvery { engine.runCommandSyncUnbounded(any(), any(), any(), any()) } answers {
             val command = arg<String>(0)
-            calls += command to arg<ExecutionBinding?>(3)
-            CommandResult(when {
-                command.contains("--show-toplevel") -> "/project\n/project/.git\n$commit"
-                command == "git status --porcelain" -> " M source.kt"
-                command.contains("rev-parse HEAD") -> commit
-                else -> ""
-            }, 0)
+            val execution = arg<ExecutionBinding>(3)
+            calls += command to execution
+            CommandResult(if (command == "git status --porcelain") " M source.kt" else gitMetadata(command, execution), 0)
         }
         val prepared = manager.prepare("child", parent)
         assertTrue(prepared.parentDirty)
         assertEquals(commit, prepared.binding.baseCommit)
         assertEquals("worktree", prepared.binding.isolation)
         assertTrue(prepared.binding.executionRoot.startsWith(temporary.root.canonicalPath))
-        assertTrue(calls.any { (command, binding) -> command.contains("worktree add -b") && binding?.gitCommonDir == "/project/.git" && binding.mountRoot != null })
+        val creation = calls.single { it.first.contains("worktree add -b") }.second
+        assertEquals("/project", creation.executionRoot)
+        assertEquals("/project/.git", creation.gitCommonDir)
+        assertEquals(SessionExecutionEntity.PREPARING, creation.preparationState)
+        assertFalse(creation.ready)
+        assertEquals(prepared.binding.mountRoot, creation.mountRoot)
+        assertEquals(prepared.binding, calls.single { it.first.contains("git symbolic-ref HEAD") }.second)
         assertFalse(calls.any { it.first.contains("stash") || it.first.contains("commit -") || it.first.contains("worktree remove") })
         coVerify(exactly = 1) { executions.ready("child", prepared.binding) }
     }
@@ -95,8 +105,7 @@ class WorktreeManagerTest {
         val remoteParent = parent.copy(executionRoot = "/srv/project", mode = "REMOTE_SSH", sshIdentity = "server")
         coEvery { engine.runCommandSyncUnbounded(any(), any(), any(), any()) } answers {
             val command = arg<String>(0)
-            CommandResult(if (command.contains("--show-toplevel")) "/srv/project\n/srv/project/.git\n$commit"
-                else if (command.contains("rev-parse HEAD")) commit else "", 0)
+            CommandResult(gitMetadata(command, arg(3)), 0)
         }
         val prepared = manager.prepare("child", remoteParent)
         assertTrue(prepared.binding.executionRoot.startsWith("/srv/project-aharou-worktrees/"))
@@ -112,8 +121,7 @@ class WorktreeManagerTest {
         coEvery { executions.validate(match { it.isWorktree }) } throws cause
         coEvery { engine.runCommandSyncUnbounded(any(), any(), any(), any()) } answers {
             val command = arg<String>(0)
-            CommandResult(if (command.contains("--show-toplevel")) "/project\n/project/.git\n$commit"
-                else if (command.contains("rev-parse HEAD")) commit else "", 0)
+            CommandResult(gitMetadata(command, arg(3)), 0)
         }
         val failure = runCatching { manager.prepare("child", parent) }.exceptionOrNull()
         assertTrue(failure is WorktreeManager.PreparationException)
@@ -133,8 +141,7 @@ class WorktreeManagerTest {
         coEvery { executions.failed(any(), any()) } throws recordError
         coEvery { engine.runCommandSyncUnbounded(any(), any(), any(), any()) } answers {
             val command = arg<String>(0)
-            CommandResult(if (command.contains("--show-toplevel")) "/project\n/project/.git\n$commit"
-                else if (command.contains("rev-parse HEAD")) commit else "", 0)
+            CommandResult(gitMetadata(command, arg(3)), 0)
         }
         val failure = runCatching { manager.prepare("child", parent) }.exceptionOrNull() as WorktreeManager.PreparationException
         assertEquals("record_ready", failure.stage)
@@ -147,10 +154,33 @@ class WorktreeManagerTest {
         val manager = manager()
         coEvery { engine.runCommandSyncUnbounded(any(), any(), any(), any()) } answers {
             val command = arg<String>(0)
-            CommandResult(if (command.contains("--show-toplevel")) "/project\n/project/.git\n$commit"
-                else if (command.contains("rev-parse HEAD")) "b".repeat(40) else "", 0)
+            CommandResult(gitMetadata(command, arg(3), head = "b".repeat(40)), 0)
         }
-        assertTrue(runCatching { manager.prepare("child", parent) }.isFailure)
+        val failure = runCatching { manager.prepare("child", parent) }.exceptionOrNull() as WorktreeManager.PreparationException
+        assertEquals("verify_head", failure.stage)
+        assertTrue(failure.message.orEmpty().contains("HEAD mismatch"))
+        coVerify(exactly = 0) { executions.ready(any(), any()) }
+    }
+
+    @Test fun finalGitViewMustMatchTheTreeRepositoryAndBranchEvenAtTheSameCommit() = runTest {
+        val manager = manager()
+        for ((property, expectedError) in mapOf("root" to "path mismatch", "common" to "path mismatch", "branch" to "branch mismatch")) {
+            coEvery { engine.runCommandSyncUnbounded(any(), any(), any(), any()) } answers {
+                val command = arg<String>(0)
+                val execution = arg<ExecutionBinding>(3)
+                val metadata = if (!command.contains("git symbolic-ref HEAD")) gitMetadata(command, execution)
+                    else gitMetadata(command, when (property) {
+                        "root" -> execution.copy(executionRoot = parent.executionRoot)
+                        "common" -> execution.copy(gitCommonDir = "/other/.git")
+                        else -> execution.copy(branch = "other")
+                    })
+                CommandResult(metadata, 0)
+            }
+            val failure = runCatching { manager.prepare(property, parent) }.exceptionOrNull() as WorktreeManager.PreparationException
+            assertEquals("verify_head", failure.stage)
+            assertTrue(failure.message.orEmpty().contains(expectedError))
+            coVerify(exactly = 1) { executions.failed(property, any()) }
+        }
         coVerify(exactly = 0) { executions.ready(any(), any()) }
     }
 }

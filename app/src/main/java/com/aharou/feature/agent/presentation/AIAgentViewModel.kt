@@ -2944,107 +2944,29 @@ class AIAgentViewModel @Inject constructor(
         }
     }
 
-    // Checkpoint Rewind 选中的目标消息 id
-    private val _targetRewindMessageId = MutableStateFlow<String?>(null)
-    val targetRewindMessageId: StateFlow<String?> = _targetRewindMessageId.asStateFlow()
+    internal val rewind = CheckpointRewindController({ _currentSessionId.value }, agentMessageDao, checkpointDao,
+        checkpointManager, messagePersistenceUseCase, turnHandoff, ::cancelRunningTurn) { setAgentState(it, AgentUIState.Idle) }
 
-    // 回退时因「被检查点之外的操作改过」而跳过的文件；非空时界面提示
-    private val _rewindConflicts = MutableStateFlow<List<String>>(emptyList())
-    val rewindConflicts: StateFlow<List<String>> = _rewindConflicts.asStateFlow()
+    fun openRewindMenu(messageId: String) = viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) { rewind.open(messageId) }
 
-    /** 打开回退菜单时算出的「将还原的文件数」上限，供确认提示展示。 */
-    private val _rewindPreviewFiles = MutableStateFlow(0)
-    val rewindPreviewFiles: StateFlow<Int> = _rewindPreviewFiles.asStateFlow()
-
-    /** 回退时间线：每次恢复/撤销留下的现场，供用户挑一个节点撤销（新→旧）。 */
-    private val _rewindUndoRecords = MutableStateFlow<List<CheckpointManager.UndoRecordInfo>>(emptyList())
-    val rewindUndoRecords: StateFlow<List<CheckpointManager.UndoRecordInfo>> = _rewindUndoRecords.asStateFlow()
-
-    fun dismissRewindConflicts() {
-        _rewindConflicts.value = emptyList()
+    internal fun undoRewind(sessionId: String, recordId: String) = viewModelScope.launch {
+        showRewindOutcome(sessionId, rewind.undoTimeline(sessionId, recordId))
     }
 
-    /** 撤销最近一次代码恢复（把当时的现场写回去）。 */
-    fun undoLastRewind() = viewModelScope.launch {
-        val sessionId = _currentSessionId.value ?: return@launch
-        checkpointManager.undoLastRestore(sessionId)
+    internal fun executeRewindOption(owner: RewindMenuTarget, option: RewindOption, checkpointId: String? = null,
+        undoId: String? = null, onFillPrompt: (String, List<AgentAttachment>) -> Unit) = viewModelScope.launch {
+        showRewindOutcome(owner.sessionId, rewind.execute(owner, option, checkpointId, undoId, onFillPrompt))
     }
 
-    fun openRewindMenu(messageId: String) {
-        val sessionId = _currentSessionId.value ?: return
-        _targetRewindMessageId.value = messageId
-        _rewindPreviewFiles.value = 0
-        viewModelScope.launch {
-            val checkpoint = checkpointDao.getCheckpointBySessionAndMessage(sessionId, messageId)
-            val count = checkpoint?.let { checkpointManager.countFilesToRestore(sessionId, it.id) } ?: 0
-            val records = checkpointManager.listUndoRecords(sessionId)
-            if (_currentSessionId.value != sessionId || _targetRewindMessageId.value != messageId) return@launch
-            _rewindPreviewFiles.value = count
-            _rewindUndoRecords.value = records
+    private fun showRewindOutcome(sessionId: String, outcome: CheckpointRewindController.Outcome) {
+        if (_currentSessionId.value != sessionId) return
+        val message = when (outcome) {
+            CheckpointRewindController.Outcome.DONE -> return
+            CheckpointRewindController.Outcome.BUSY -> R.string.checkpoint_restore_busy
+            CheckpointRewindController.Outcome.UNAVAILABLE -> R.string.checkpoint_target_unavailable
+            CheckpointRewindController.Outcome.FAILED -> R.string.checkpoint_operation_failed
         }
-    }
-
-    /** 撤销到指定的备份时间节点（[recordId] 为空即最新一份）。 */
-    fun undoRewind(recordId: String?) = viewModelScope.launch {
-        val sessionId = _currentSessionId.value ?: return@launch
-        checkpointManager.undoRestoreTo(sessionId, recordId)
-        _rewindUndoRecords.value = checkpointManager.listUndoRecords(sessionId)
-    }
-
-    fun dismissRewindMenu() { _targetRewindMessageId.value = null }
-    fun invalidRewindTarget() { Toast.makeText(context, R.string.checkpoint_target_unavailable, Toast.LENGTH_SHORT).show() }
-
-    suspend fun previewRewindDiff(messageId: String): CheckpointManager.RewindDiff? =
-        _currentSessionId.value?.let { sid -> checkpointDao.getCheckpointBySessionAndMessage(sid, messageId)?.let { runCatching { checkpointManager.previewRewindDiff(sid, it.id) }.getOrNull() } }
-
-    fun executeRewindOption(
-        messageId: String,
-        option: RewindOption,
-        targetSessionId: String? = _currentSessionId.value,
-        onFillPrompt: (String, List<AgentAttachment>) -> Unit
-    ) = viewModelScope.launch {
-        val sessionId = targetSessionId
-        val target = agentMessageDao.getMessageById(messageId)
-        if (sessionId == null || _currentSessionId.value != sessionId || target == null || target.sessionId != sessionId ||
-            target.isCompactionMarker || target.isContextSummary) {
-            invalidRewindTarget()
-            return@launch
-        }
-        dismissRewindMenu()
-
-        turnHandoff.withRestart(sessionId) {
-            if (!cancelRunningTurn(sessionId)) { invalidRewindTarget(); return@withRestart }
-            val currentTarget = agentMessageDao.getMessageById(messageId)
-            if (currentTarget == null || currentTarget.sessionId != sessionId) { invalidRewindTarget(); return@withRestart }
-            val checkpoint = checkpointDao.getCheckpointBySessionAndMessage(sessionId, messageId)
-            if (option == RewindOption.RESTORE_CODE && checkpoint == null) { invalidRewindTarget(); return@withRestart }
-            setAgentState(sessionId, AgentUIState.Idle)
-            checkpointManager.setActiveCheckpointId(sessionId, null)
-            val targetMsgEntity = messagePersistenceUseCase.restore(currentTarget)
-            val attachments = targetMsgEntity.toUIMessage().attachments
-            var conflicts: List<String> = emptyList()
-            when (option) {
-                RewindOption.RESTORE_CODE_AND_CONVERSATION -> {
-                    if (checkpoint != null) conflicts = checkpointManager.restoreCodeToCheckpoint(sessionId, checkpoint.id).conflicts
-                    messagePersistenceUseCase.rewindConversation(sessionId, targetMsgEntity.timestamp)
-                    withContext(Dispatchers.Main) { if (_currentSessionId.value == sessionId) onFillPrompt(targetMsgEntity.content, attachments) }
-                }
-                RewindOption.RESTORE_CONVERSATION -> {
-                    messagePersistenceUseCase.rewindConversation(sessionId, targetMsgEntity.timestamp)
-                    withContext(Dispatchers.Main) { if (_currentSessionId.value == sessionId) onFillPrompt(targetMsgEntity.content, attachments) }
-                }
-                RewindOption.RESTORE_CODE -> {
-                    if (checkpoint != null) conflicts = checkpointManager.restoreCodeToCheckpoint(sessionId, checkpoint.id).conflicts
-                }
-                RewindOption.UNDO_LAST_RESTORE -> checkpointManager.undoLastRestore(sessionId)
-            }
-            agentMessageDao.repairSingletonVariantGroups(sessionId)
-            val records = checkpointManager.listUndoRecords(sessionId)
-            if (_currentSessionId.value == sessionId) {
-                _rewindConflicts.value = conflicts
-                _rewindUndoRecords.value = records
-            }
-        } ?: Toast.makeText(context, R.string.checkpoint_restore_busy, Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
     }
 
     /**

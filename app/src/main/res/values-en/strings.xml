@@ -944,9 +944,12 @@
 
     <!-- Checkpoint & Rewind -->
     <string name="checkpoint_rewind_title">Checkpoint &amp; Rewind</string>
-    <string name="checkpoint_rewind_diff_summary">%1$d files will be restored (%2$d with real changes)</string>
-    <string name="checkpoint_rewind_diff_conflict">%1$d files changed outside the checkpoint and will be skipped</string>
-    <string name="checkpoint_rewind_diff_truncated">Too many files; showing the first %1$d only</string>
+    <string name="checkpoint_rewind_diff_summary">Expected to restore %1$d files (%2$d with changes)</string>
+    <string name="checkpoint_rewind_diff_partial">In this partial preview: expected to restore %1$d files (%2$d with changes)</string>
+    <string name="checkpoint_rewind_diff_conflict">%1$d previewed files cannot be safely restored and are expected to be skipped</string>
+    <string name="checkpoint_rewind_diff_truncated">Not all files are shown. The remaining files will be checked during restore.</string>
+    <string name="checkpoint_preview_loading">Loading checkpoint preview…</string>
+    <string name="checkpoint_preview_unavailable">No code checkpoint preview is available for this message. You can still restore just the conversation.</string>
     <string name="checkpoint_rewind_diff_conflict_badge">Skipped</string>
     <string name="checkpoint_rewind_diff_unchanged">No changes</string>
     <string name="checkpoint_rewind_diff_expand">Expand</string>
@@ -3345,12 +3348,16 @@
     <string name="prompts_disable_builtin_hint">Keep only your own fragments; you must supply every rule yourself</string>
     <!-- Checkpoint: conflict detection and undo -->
     <string name="checkpoint_conflict_title">Some files were not restored</string>
-    <string name="checkpoint_conflict_message">%1$d file(s) were changed outside the checkpoint and were skipped to avoid overwriting your edits:</string>
+    <string name="checkpoint_conflict_message">Skipped %1$d files because of conflicts or uncertain ownership:</string>
+    <string name="checkpoint_result_count">Files processed: %1$d.</string>
+    <string name="checkpoint_failed_files">Failed to process %1$d files:</string>
+    <string name="checkpoint_operation_failed">The checkpoint operation did not finish. Check your files and restore timeline.</string>
     <string name="checkpoint_undo_last_restore">Undo last restore</string>
     <string name="checkpoint_target_unavailable">The rewind target is no longer available. Reopen the checkpoint menu in its conversation.</string>
     <string name="checkpoint_restore_busy">This conversation is regenerating or restoring. Try again when it finishes.</string>
     <string name="checkpoint_confirm_rewind_title">Confirm rewind</string>
-    <string name="checkpoint_confirm_rewind_body">Rewind to %1$s and restore %2$d files. Code changes made after that point will be discarded; files modified outside the checkpoint are skipped automatically.</string>
+    <string name="checkpoint_confirm_rewind_body">Rewind to %1$s. Expected: restore %2$d files, skip %3$d. Files are checked again before writing to protect external changes.</string>
+    <string name="checkpoint_confirm_rewind_partial">Rewind to %1$s. In the previewed subset only: restore %2$d files, skip %3$d. These are not totals; all files will be checked during restore.</string>
     <string name="checkpoint_confirm_rewind_action">Rewind</string>
     <string name="checkpoint_undo_timeline_title">Restore timeline</string>
     <string name="checkpoint_undo_timeline_desc">%1$d restore points — pick one to roll back to</string>

@@ -124,7 +124,7 @@ class CheckpointManagerSessionIsolationTest {
         fileAccess.writeFile(created.path, "NEW_OK\n", true)
         manager.afterFileModified("sessionA", created.path)
         var menuTarget: String? = "input"
-        val confirmed = CodeRewindRequest("sessionA", requireNotNull(menuTarget), cp.createdAt, RewindOption.RESTORE_CODE, 2)
+        val confirmed = CodeRewindRequest("sessionA", requireNotNull(menuTarget), cp.createdAt, RewindOption.RESTORE_CODE, manager.previewRewindDiff("sessionA", cp.id))
         menuTarget = null
         assertEquals(null, menuTarget)
         val target = requireNotNull(dao.getCheckpointBySessionAndMessage(confirmed.sessionId, confirmed.messageId))
@@ -132,7 +132,7 @@ class CheckpointManagerSessionIsolationTest {
         assertEquals("EDITOR_SAVED\n", modified.readText())
         assertFalse(created.exists())
         assertTrue(manager.listUndoRecords("sessionA").isNotEmpty())
-        assertEquals(2, manager.undoLastRestore("sessionA"))
+        assertEquals(2, manager.undoRestoreTo("sessionA", manager.listUndoRecords("sessionA").single().id).restoredCount)
         assertEquals("CHECKPOINT_OK\n", modified.readText())
         assertEquals("NEW_OK\n", created.readText())
     }
@@ -148,7 +148,9 @@ class CheckpointManagerSessionIsolationTest {
             manager.afterFileModified("sessionA", file.path)
             fileAccess.writeFile(file.path, "manual", true)
         }
-        val confirmed = CodeRewindRequest("sessionA", "input", cp.createdAt, RewindOption.RESTORE_CODE, 2)
+        val confirmed = CodeRewindRequest("sessionA", "input", cp.createdAt, RewindOption.RESTORE_CODE, manager.previewRewindDiff("sessionA", cp.id))
+        assertEquals(0, confirmed.restoreCount)
+        assertEquals(2, confirmed.skipCount)
         val target = requireNotNull(dao.getCheckpointBySessionAndMessage(confirmed.sessionId, confirmed.messageId))
         val result = manager.restoreCodeToCheckpoint(confirmed.sessionId, target.id)
         assertEquals(0, result.restoredCount)
@@ -234,9 +236,10 @@ class CheckpointManagerSessionIsolationTest {
         manager.afterFileModified("sessionA", file.path)
         manager.restoreCodeToCheckpoint("sessionA", cp.id)
         file.writeText("external after restore")
-        assertEquals(0, manager.undoLastRestore("sessionA"))
+        val target = manager.listUndoRecords("sessionA").single()
+        assertEquals(CheckpointManager.RestoreResult(0, listOf(file.path)), manager.undoRestoreTo("sessionA", target.id))
         assertEquals("external after restore", file.readText())
-        assertTrue(manager.hasUndoRecord("sessionA"))
+        assertEquals(target, manager.listUndoRecords("sessionA").single())
     }
 
     @Test
@@ -247,7 +250,7 @@ class CheckpointManagerSessionIsolationTest {
         file.writeText("agent\r\n")
         manager.afterFileModified("sessionA", file.path)
         manager.restoreCodeToCheckpoint("sessionA", cp.id)
-        assertEquals(1, manager.undoLastRestore("sessionA"))
+        assertEquals(1, manager.undoRestoreTo("sessionA", manager.listUndoRecords("sessionA").single().id).restoredCount)
         assertEquals("agent\r\n", file.readText())
     }
 
@@ -269,6 +272,96 @@ class CheckpointManagerSessionIsolationTest {
         dao.insertFileSnapshot(CheckpointFileSnapshotEntity("legacy-snapshot", cp.id, file.path, "missing", "CREATE"))
         assertEquals(listOf(file.path), manager.restoreCodeToCheckpoint("sessionA", cp.id).conflicts)
         assertEquals("current", file.readText())
+    }
+
+    private suspend fun agentWrite(file: File, text: String) {
+        manager.beforeFileModified("sessionA", file.path)
+        fileAccess.writeFile(file.path, text)
+        manager.afterFileModified("sessionA", file.path)
+    }
+
+    @Test fun newestConflictCannotBeClearedByAnOlderCreateAndOtherFilesStillRestore() = runTest {
+        val file = File(workspace, "record.txt")
+        val other = File(workspace, "other.txt").apply { writeText("base") }
+        val first = manager.createCheckpoint("sessionA", "one", "one", binding("executionA"))
+        agentWrite(file, "A"); agentWrite(other, "changed")
+        manager.createCheckpoint("sessionA", "two", "two", binding("executionA")); agentWrite(file, "B")
+        manager.createCheckpoint("sessionA", "three", "three", binding("executionA")); agentWrite(file, "C")
+        file.writeText("A")
+        val preview = manager.previewRewindDiff("sessionA", first.id)
+        assertEquals(1, preview.restoreFileCount); assertEquals(1, preview.conflictCount)
+        assertEquals(CheckpointManager.RestoreResult(1, listOf(file.path)), manager.restoreCodeToCheckpoint("sessionA", first.id))
+        assertEquals("A", file.readText()); assertEquals("base", other.readText())
+        assertEquals(1, manager.listUndoRecords("sessionA").single().fileCount)
+    }
+
+    @Test fun olderConflictLeavesDiskUnchangedEvenWhenTheNewestStepWasClean() = runTest {
+        val file = File(workspace, "chain.txt").apply { writeText("base") }
+        val first = manager.createCheckpoint("sessionA", "one", "one", binding("executionA")); agentWrite(file, "A")
+        file.writeText("between checkpoints")
+        manager.createCheckpoint("sessionA", "two", "two", binding("executionA")); agentWrite(file, "B")
+        assertEquals(1, manager.previewRewindDiff("sessionA", first.id).conflictCount)
+        assertEquals(CheckpointManager.RestoreResult(0, listOf(file.path)), manager.restoreCodeToCheckpoint("sessionA", first.id))
+        assertEquals("B", file.readText()); assertTrue(manager.listUndoRecords("sessionA").isEmpty())
+    }
+
+    @Test fun cleanCreateAndModifyChainCountsAndJournalsOneFile() = runTest {
+        val file = File(workspace, "created.txt")
+        val first = manager.createCheckpoint("sessionA", "one", "one", binding("executionA")); agentWrite(file, "A")
+        manager.createCheckpoint("sessionA", "two", "two", binding("executionA")); agentWrite(file, "B")
+        assertEquals(1, manager.previewRewindDiff("sessionA", first.id).restoreFileCount)
+        assertEquals(CheckpointManager.RestoreResult(1, emptyList()), manager.restoreCodeToCheckpoint("sessionA", first.id))
+        assertFalse(file.exists())
+        val target = manager.listUndoRecords("sessionA").single()
+        assertEquals(1, target.fileCount)
+        assertEquals(1, manager.undoRestoreTo("sessionA", target.id).restoredCount)
+        assertEquals("B", file.readText())
+    }
+
+    @Test fun aliasesOfAConflictedResourceNeverReachAnOlderDelete() = runTest {
+        val file = File(workspace, "target.txt")
+        val first = manager.createCheckpoint("sessionA", "one", "one", binding("executionA")); agentWrite(file, "A")
+        val alias = File(workspace, "alias.txt")
+        java.nio.file.Files.createSymbolicLink(alias.toPath(), file.toPath())
+        manager.createCheckpoint("sessionA", "two", "two", binding("executionA")); agentWrite(alias, "B")
+        manager.createCheckpoint("sessionA", "three", "three", binding("executionA")); agentWrite(alias, "C")
+        file.writeText("A")
+        assertEquals(1, manager.previewRewindDiff("sessionA", first.id).conflictCount)
+        assertEquals(0, manager.restoreCodeToCheckpoint("sessionA", first.id).restoredCount)
+        assertEquals("A", alias.readText()); assertTrue(file.isFile)
+    }
+
+    @Test fun failedDeleteIsNotCountedAndLeavesNoUndoForAnUnchangedFile() = runTest {
+        val file = File(workspace, "retained.txt")
+        val cp = manager.createCheckpoint("sessionA", "create", "create", binding("executionA")); agentWrite(file, "A")
+        fileAccess.refuseDelete = file.path
+        val result = manager.restoreCodeToCheckpoint("sessionA", cp.id)
+        assertEquals(CheckpointManager.RestoreResult(0, emptyList(), listOf(file.path)), result)
+        assertEquals("A", file.readText()); assertTrue(manager.listUndoRecords("sessionA").isEmpty())
+    }
+
+    @Test fun mixedUndoReturnsOnlySkippedPathsAndRetainsThemAtTheSelectedNode() = runTest {
+        val a = File(workspace, "a").apply { writeText("base A") }
+        val b = File(workspace, "b").apply { writeText("base B") }
+        val cp = manager.createCheckpoint("sessionA", "both", "both", binding("executionA")); agentWrite(a, "AI A"); agentWrite(b, "AI B")
+        manager.restoreCodeToCheckpoint("sessionA", cp.id)
+        val target = manager.listUndoRecords("sessionA").single()
+        a.writeText("user")
+        assertEquals(CheckpointManager.RestoreResult(1, listOf(a.path)), manager.undoRestoreTo("sessionA", target.id))
+        assertEquals("user", a.readText()); assertEquals("AI B", b.readText())
+        assertEquals(1, manager.listUndoRecords("sessionA").single { it.id == target.id }.fileCount)
+        a.writeText("base A")
+        assertEquals(1, manager.undoRestoreTo("sessionA", target.id).restoredCount)
+        assertEquals("AI A", a.readText())
+    }
+
+    @Test fun aPartialPreviewDoesNotLimitExecution() = runTest {
+        val cp = manager.createCheckpoint("sessionA", "many", "many", binding("executionA"))
+        // 冲突条目避免为这个上限用例生成数百份文件和写前日志。
+        repeat(201) { i -> dao.insertFileSnapshot(CheckpointFileSnapshotEntity("s$i", cp.id, "missing$i", "absent", "MODIFY", resourceKey = "key$i")) }
+        val preview = manager.previewRewindDiff("sessionA", cp.id)
+        assertTrue(preview.truncated); assertEquals(200, preview.conflictCount)
+        assertEquals(201, manager.restoreCodeToCheckpoint("sessionA", cp.id).conflicts.size)
     }
 
     private class FakeContext(private val dir: File) : ContextWrapper(null) {
@@ -336,9 +429,11 @@ class CheckpointManagerSessionIsolationTest {
             File(path).writeText(content, encoding)
         }
 
+        var refuseDelete: String? = null
         override fun exists(path: String): Boolean = File(path).exists()
         override fun delete(path: String) {
-            File(path).delete()
+            if (path == refuseDelete) throw java.io.IOException("delete refused")
+            java.nio.file.Files.deleteIfExists(File(path).toPath())
         }
 
         override fun readLines(path: String): Sequence<String> = throw UnsupportedOperationException()

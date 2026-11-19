@@ -3,7 +3,7 @@ package com.aharou.feature.agent.domain.container
 import com.aharou.core.util.BoundedLineReader
 import com.aharou.core.util.FileLogger
 import com.aharou.feature.agent.domain.execution.ExecutionBinding
-import com.aharou.feature.agent.domain.execution.executionMounts
+import com.aharou.feature.agent.domain.execution.workspaceProotArgs
 import com.aharou.feature.agent.domain.execution.executionGitEnvironment
 import com.aharou.core.util.LINE_TRUNCATED_NOTE
 import com.aharou.core.util.ProcessIdentity
@@ -856,15 +856,7 @@ class LinuxContainerEngine @Inject constructor(
             "-0"              // 伪 root，apk 等需要
         )
 
-        // 把当前工作区目录绑定到容器内 ~/workspace（即 /root/workspace），使命令与文件工具作用于同一目录
-        if (projectPath != null) {
-            argv.add("-b")
-            argv.add("$projectPath:/root/workspace")
-            argv.add("-w")
-            argv.add("/root/workspace")
-        }
-
-        argv.addAll(executionMounts(execution ?: profileResolver.executionFor(projectPath), profile))
+        argv.addAll(workspaceProotArgs(projectPath, execution ?: profileResolver.executionFor(projectPath), profile))
         if (inheritUserConfig) argv.addAll(containerUserBindings(context, containerInstaller))
 
         // profile 的额外绑定与参数：内置与导入容器默认也在此注入（见 ContainerProfile.DEFAULT_PROOT_ARGS），

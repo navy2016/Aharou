@@ -64,15 +64,22 @@ class WorktreeManager @Inject constructor(
                 gitCommonDir = common, mountRoot = if (isLocal) pool else null)
             stage = "record_paths"
             executions.updatePreparation(ownerId, binding)
-            val preparing = binding.copy(executionRoot = parent.executionRoot)
+            val preparing = binding.copy(executionRoot = repo, ready = false, preparationState = SessionExecutionEntity.PREPARING)
             val dirty = locks.withLock("git\u0000${parent.sshIdentity.orEmpty()}\u0000$common") {
                 stage = "parent_status"
                 val dirty = command("git status --porcelain", parent).isNotBlank()
                 stage = "create_worktree"
                 command("git -C ${shellQuote(repo)} worktree add -b ${shellQuote(branch)} ${shellQuote(destination)} ${shellQuote(metadata[2])}", preparing)
                 stage = "verify_head"
-                val actual = command("git -C ${shellQuote(destination)} rev-parse HEAD", preparing).trim()
-                if (actual != metadata[2]) throw IOException("Prepared worktree does not match the selected commit")
+                val checkout = command("git rev-parse --path-format=absolute --show-toplevel --git-common-dir HEAD && git symbolic-ref HEAD", binding).lines()
+                if (checkout.size != 4) throw IOException("Cannot resolve prepared worktree Git metadata")
+                if (checkout[2] != metadata[2]) throw IOException("Prepared worktree HEAD mismatch: actual=${checkout[2]} expected=${metadata[2]}")
+                if (checkout[3] != "refs/heads/$branch") throw IOException("Prepared worktree branch mismatch: actual=${checkout[3]} expected=refs/heads/$branch")
+                val childMapper = if (isLocal) paths.forExecution(binding, profile) else null
+                val actualRoot = childMapper?.resolveFile(checkout[0], destination)?.canonicalPath ?: checkout[0]
+                val actualCommon = childMapper?.resolveFile(checkout[1], destination)?.canonicalPath ?: checkout[1]
+                if (actualRoot != destination || actualCommon != common)
+                    throw IOException("Prepared worktree path mismatch: root=$actualRoot expectedRoot=$destination common=$actualCommon expectedCommon=$common")
                 dirty
             }
             stage = "validate_execution"
