@@ -210,8 +210,8 @@ internal class LlmStreamCall(
     private suspend fun finish() {
         try {
             runCancellationSafeTail {
-                if (sessionId != null && hasOutput) {
-                    runCatching { persistUnconfirmed(sessionId) }.onFailure { warn("保存回复快照失败", it) }
+                if (hasOutput) sessionId?.let { sid ->
+                    runCatching { persistUnconfirmed(sid) }.onFailure { warn("保存回复快照失败", it) }
                 }
                 runCatching { recordCall() }.onFailure { warn("写入调用记录失败", it) }
             }

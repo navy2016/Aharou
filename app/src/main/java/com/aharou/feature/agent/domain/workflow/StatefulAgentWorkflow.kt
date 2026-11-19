@@ -7,6 +7,7 @@ import com.aharou.core.util.FileLogger
 import com.aharou.feature.agent.domain.privacy.maskIfNeeded
 import com.aharou.feature.agent.domain.privacy.outboundMaskerOrNull
 import com.aharou.feature.agent.domain.privacy.restoreIfNeeded
+import com.aharou.feature.agent.domain.privacy.restoredFromOutbound
 import com.aharou.feature.agent.data.local.dao.LlmCallRecordDao
 import com.aharou.feature.agent.data.local.entity.LlmCallRecordEntity
 import com.aharou.feature.agent.data.remote.anthropic.AnthropicApi
