@@ -22,6 +22,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -29,6 +30,7 @@ import androidx.compose.ui.unit.sp
 import com.aharou.R
 import com.aharou.core.theme.Spacing
 import com.aharou.feature.agent.domain.checkpoint.CheckpointManager
+import com.aharou.feature.agent.presentation.RewindMenuTarget
 import compose.icons.FeatherIcons
 import compose.icons.feathericons.FileText
 import compose.icons.feathericons.MessageSquare
@@ -40,24 +42,29 @@ enum class RewindOption {
     RESTORE_CODE,
 
     /** 撤销最近一次代码恢复，把当时的现场写回去。 */
-    UNDO_LAST_RESTORE
+    UNDO_LAST_RESTORE;
+
+    val requiresCheckpoint: Boolean get() = this == RESTORE_CODE || this == RESTORE_CODE_AND_CONVERSATION
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun RewindOptionsBottomSheet(
+internal fun RewindOptionsBottomSheet(
     promptSnippet: String,
     undoRecordCount: Int,
-    checkpointId: String? = null,
-    loadDiff: suspend (String) -> CheckpointManager.RewindDiff? = { null },
+    target: RewindMenuTarget,
+    loadDiff: suspend (RewindMenuTarget) -> CheckpointManager.RewindDiff?,
     onShowTimeline: () -> Unit,
-    onOptionSelected: (RewindOption) -> Unit,
+    onOptionSelected: (RewindOption, CheckpointManager.RewindDiff?) -> Unit,
     onDismissRequest: () -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    // 预览在面板打开时算一次：回退是不可逆的，先让用户看到到底改哪些文件。
-    var rewindDiff by remember(checkpointId) { mutableStateOf<CheckpointManager.RewindDiff?>(null) }
-    LaunchedEffect(checkpointId) { rewindDiff = checkpointId?.let { loadDiff(it) } }
+    var rewindDiff by remember(target) { mutableStateOf<CheckpointManager.RewindDiff?>(null) }
+    var loading by remember(target) { mutableStateOf(true) }
+    LaunchedEffect(target) {
+        rewindDiff = loadDiff(target)
+        loading = false
+    }
 
     AdaptiveModalBottomSheet(
         onDismissRequest = onDismissRequest,
@@ -87,14 +94,15 @@ fun RewindOptionsBottomSheet(
 
             Spacer(modifier = Modifier.height(Spacing.md))
 
+            if (rewindDiff == null) Text(stringResource(if (loading) R.string.checkpoint_preview_loading else R.string.checkpoint_preview_unavailable))
             rewindDiff?.let { diff ->
-                if (diff.files.isNotEmpty()) {
+                if (diff.files.isNotEmpty() || diff.truncated) {
                     RewindDiffPreview(
                         diff = diff,
                         texts = RewindDiffPreviewTexts(
-                            summary = stringResource(R.string.checkpoint_rewind_diff_summary, diff.restoreFileCount, diff.changedFileCount),
+                            summary = stringResource(if (diff.truncated) R.string.checkpoint_rewind_diff_partial else R.string.checkpoint_rewind_diff_summary, diff.restoreFileCount, diff.changedFileCount),
                             conflictNotice = stringResource(R.string.checkpoint_rewind_diff_conflict, diff.conflictCount),
-                            truncatedNotice = stringResource(R.string.checkpoint_rewind_diff_truncated, diff.files.size),
+                            truncatedNotice = stringResource(R.string.checkpoint_rewind_diff_truncated),
                             conflictBadge = stringResource(R.string.checkpoint_rewind_diff_conflict_badge),
                             unchanged = stringResource(R.string.checkpoint_rewind_diff_unchanged),
                             expand = stringResource(R.string.checkpoint_rewind_diff_expand),
@@ -109,8 +117,9 @@ fun RewindOptionsBottomSheet(
                 icon = FeatherIcons.RotateCcw,
                 title = stringResource(R.string.checkpoint_restore_code_and_conversation),
                 description = stringResource(R.string.checkpoint_restore_code_and_conversation_desc),
+                enabled = rewindDiff != null,
                 onClick = {
-                    onOptionSelected(RewindOption.RESTORE_CODE_AND_CONVERSATION)
+                    onOptionSelected(RewindOption.RESTORE_CODE_AND_CONVERSATION, rewindDiff)
                     onDismissRequest()
                 }
             )
@@ -120,7 +129,7 @@ fun RewindOptionsBottomSheet(
                 title = stringResource(R.string.checkpoint_restore_conversation),
                 description = stringResource(R.string.checkpoint_restore_conversation_desc),
                 onClick = {
-                    onOptionSelected(RewindOption.RESTORE_CONVERSATION)
+                    onOptionSelected(RewindOption.RESTORE_CONVERSATION, null)
                     onDismissRequest()
                 }
             )
@@ -129,8 +138,9 @@ fun RewindOptionsBottomSheet(
                 icon = FeatherIcons.FileText,
                 title = stringResource(R.string.checkpoint_restore_code),
                 description = stringResource(R.string.checkpoint_restore_code_desc),
+                enabled = rewindDiff != null,
                 onClick = {
-                    onOptionSelected(RewindOption.RESTORE_CODE)
+                    onOptionSelected(RewindOption.RESTORE_CODE, rewindDiff)
                     onDismissRequest()
                 }
             )
@@ -138,9 +148,10 @@ fun RewindOptionsBottomSheet(
             OptionRow(
                 icon = FeatherIcons.RotateCcw,
                 title = stringResource(R.string.checkpoint_undo_last_restore),
-                description = stringResource(R.string.checkpoint_undo_last_restore_desc),
+                description = stringResource(if (undoRecordCount > 0) R.string.checkpoint_undo_last_restore_desc else R.string.checkpoint_undo_timeline_empty),
+                enabled = undoRecordCount > 0,
                 onClick = {
-                    onOptionSelected(RewindOption.UNDO_LAST_RESTORE)
+                    onOptionSelected(RewindOption.UNDO_LAST_RESTORE, null)
                     onDismissRequest()
                 }
             )
@@ -174,12 +185,14 @@ private fun OptionRow(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     title: String,
     description: String,
+    enabled: Boolean = true,
     onClick: () -> Unit
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            .alpha(if (enabled) 1f else 0.5f)
+            .clickable(enabled = enabled, onClick = onClick)
             .padding(vertical = Spacing.xs, horizontal = Spacing.xs),
         verticalAlignment = Alignment.CenterVertically
     ) {

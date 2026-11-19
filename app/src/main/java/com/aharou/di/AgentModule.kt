@@ -100,7 +100,6 @@ import javax.inject.Singleton
 
 import com.aharou.core.db.MigrationLoader
 import com.aharou.core.util.FileLogger
-import com.aharou.feature.agent.domain.checkpoint.CheckpointManager
 import com.aharou.feature.agent.domain.notification.AgentEventInjector
 import com.aharou.feature.agent.domain.notification.AgentNotificationCenter
 import com.aharou.feature.agent.domain.notification.DefaultAgentEventInjector
@@ -171,6 +170,11 @@ object AgentModule {
     fun provideChatSessionDao(database: AgentDatabase): ChatSessionDao {
         return database.chatSessionDao()
     }
+
+    @Provides
+    @Singleton
+    fun provideSessionExecutionDao(database: AgentDatabase): com.aharou.feature.agent.data.local.dao.SessionExecutionDao =
+        database.sessionExecutionDao()
 
     @Provides
     @Singleton
@@ -529,7 +533,6 @@ object AgentModule {
         providerRequestSettings: com.aharou.feature.agent.domain.provider.ProviderRequestSettings,
         sessionUseCase: SessionUseCase,
         messagePersistenceUseCase: MessagePersistenceUseCase,
-        checkpointManager: CheckpointManager,
         llmCallRecordDao: LlmCallRecordDao,
         keyRotator: ProviderKeyRotator,
         generatedImagePersister: GeneratedImagePersister,
@@ -566,7 +569,6 @@ object AgentModule {
             providerRequestSettings,
             sessionUseCase,
             messagePersistenceUseCase,
-            checkpointManager,
             llmCallRecordDao,
             keyRotator,
             generatedImagePersister,

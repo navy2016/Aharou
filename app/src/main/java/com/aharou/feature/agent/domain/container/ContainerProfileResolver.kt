@@ -2,6 +2,10 @@ package com.aharou.feature.agent.domain.container
 
 import com.aharou.core.util.FileLogger
 import com.aharou.feature.settings.data.repository.ContainerSettingsRepository
+import com.aharou.feature.agent.domain.execution.ExecutionBinding
+import java.io.IOException
+import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -42,6 +46,46 @@ class ContainerProfileResolver @Inject constructor(
     @Volatile
     private var workspaceOverrides: Map<String, String> = emptyMap()
 
+    private val executionProfiles = ConcurrentHashMap<String, ContainerProfile>()
+    private val executionBindings = ConcurrentHashMap<String, ExecutionBinding>()
+    private val executionSnapshots = ConcurrentHashMap<String, ContainerProfile>()
+
+    fun executionFor(root: String?): ExecutionBinding? = root?.let(executionBindings::get)
+
+    suspend fun workspaceProfile(root: String): ContainerProfile {
+        val profiles = containerSettingsRepository.customProfilesFlow.first()
+        val active = containerSettingsRepository.activeProfileIdFlow.first()
+        val overrides = containerSettingsRepository.workspaceProfilesFlow.first()
+        val id = ContainerWorkspaceKeys.overrideFor(overrides, root) ?: active
+        return profiles.firstOrNull { it.id == id }
+            ?: ContainerProfile.BUILTIN_ALPINE.takeIf { it.id == id }
+            ?: profiles.firstOrNull() ?: ContainerProfile.BUILTIN_ALPINE
+    }
+
+    suspend fun bindExecution(binding: ExecutionBinding): ContainerProfile {
+        val profiles = containerSettingsRepository.customProfilesFlow.first()
+        val profile = profiles.firstOrNull { it.id == binding.profileId }
+            ?: ContainerProfile.BUILTIN_ALPINE.takeIf { it.id == binding.profileId }
+            ?: throw IOException("Execution container profile was removed")
+        if (profile.mode.name != binding.mode) throw IOException("Execution container mode changed")
+        customProfiles = profiles
+        executionSnapshots[binding.id] = profile
+        if (binding.isWorktree || binding.executionRoot != binding.projectRoot) {
+            executionProfiles[binding.executionRoot] = profile
+            executionBindings[binding.executionRoot] = binding
+        }
+        return profile
+    }
+
+    fun forExecution(binding: ExecutionBinding): ContainerProfile {
+        val profile = executionSnapshots[binding.id]
+            ?: customProfiles.firstOrNull { it.id == binding.profileId }
+            ?: ContainerProfile.BUILTIN_ALPINE.takeIf { it.id == binding.profileId }
+            ?: throw IOException("Execution container profile is unavailable")
+        if (profile.id != binding.profileId || profile.mode.name != binding.mode) throw IOException("Execution container identity changed")
+        return profile
+    }
+
     init {
         CoroutineScope(Dispatchers.IO).launch {
             containerSettingsRepository.activeProfileIdFlow.collect { id ->
@@ -74,6 +118,7 @@ class ContainerProfileResolver @Inject constructor(
      * 覆盖项指向的 profile 已被删除时退回全局默认，避免落到列表里第一个、完全无关的容器。
      */
     fun forWorkspace(projectPath: String?): ContainerProfile {
+        projectPath?.let(executionProfiles::get)?.let { return it }
         if (workspaceOverrides.isEmpty()) return defaultProfileCache
         val id = ContainerWorkspaceKeys.overrideFor(workspaceOverrides, projectPath) ?: return defaultProfileCache
         return customProfiles.firstOrNull { it.id == id } ?: defaultProfileCache
@@ -88,7 +133,7 @@ class ContainerProfileResolver @Inject constructor(
      */
     fun forTerminal(projectPath: String?): ContainerProfile {
         val profile = forWorkspace(projectPath)
-        if (profile.id == defaultProfileCache.id || containerInstaller.isInstalledFor(profile)) return profile
+        if (projectPath?.let(executionProfiles::containsKey) == true || profile.id == defaultProfileCache.id || containerInstaller.isInstalledFor(profile)) return profile
         FileLogger.w(
             "ContainerProfileResolver",
             "工作区 $projectPath 指定的容器 ${profile.id}(${profile.name}) 尚未安装，终端暂用全局默认容器 " +

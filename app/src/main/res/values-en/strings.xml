@@ -672,6 +672,8 @@
 
     <!-- Agent Status -->
     <string name="agent_stopped_by_user">Stopped by user</string>
+    <string name="agent_request_waiting">Received, waiting to run</string>
+    <string name="agent_request_not_started">Not started. Please send again.</string>
     <string name="agent_tool_executing">%1$s running…</string>
     <string name="agent_stop_refusal">The model declined to answer under its content safety policy.</string>
     <string name="agent_stop_context_exceeded">This request exceeds the model\'s context window. Compact the context or start a new session.</string>
@@ -942,9 +944,12 @@
 
     <!-- Checkpoint & Rewind -->
     <string name="checkpoint_rewind_title">Checkpoint &amp; Rewind</string>
-    <string name="checkpoint_rewind_diff_summary">%1$d files will be restored (%2$d with real changes)</string>
-    <string name="checkpoint_rewind_diff_conflict">%1$d files changed outside the checkpoint and will be skipped</string>
-    <string name="checkpoint_rewind_diff_truncated">Too many files; showing the first %1$d only</string>
+    <string name="checkpoint_rewind_diff_summary">Expected to restore %1$d files (%2$d with changes)</string>
+    <string name="checkpoint_rewind_diff_partial">In this partial preview: expected to restore %1$d files (%2$d with changes)</string>
+    <string name="checkpoint_rewind_diff_conflict">%1$d previewed files cannot be safely restored and are expected to be skipped</string>
+    <string name="checkpoint_rewind_diff_truncated">Not all files are shown. The remaining files will be checked during restore.</string>
+    <string name="checkpoint_preview_loading">Loading checkpoint preview…</string>
+    <string name="checkpoint_preview_unavailable">No code checkpoint preview is available for this message. You can still restore just the conversation.</string>
     <string name="checkpoint_rewind_diff_conflict_badge">Skipped</string>
     <string name="checkpoint_rewind_diff_unchanged">No changes</string>
     <string name="checkpoint_rewind_diff_expand">Expand</string>
@@ -1752,6 +1757,12 @@
     <string name="subagent_max_running">Concurrency limit</string>
     <string name="subagent_max_running_hint">Max subagents running at the same time, %1$d to %2$d, shared by the whole app. Set to 0 to disable new launches and reawakening without interrupting running turns.</string>
     <string name="subagent_concurrency_disabled">0 (disabled)</string>
+    <string name="execution_prepare_failed">Execution workspace preparation failed. The original project was not used. Check the environment and create a new task.</string>
+    <string name="execution_shared">Shared execution directory</string>
+    <string name="execution_worktree">Independent Git worktree</string>
+    <string name="execution_branch">Execution branch: %1$s</string>
+    <string name="execution_base_commit">Base commit: %1$s</string>
+    <string name="execution_parent_dirty">The parent has uncommitted changes. They were not copied into this worktree.</string>
     <string name="subagent_comm_enabled">Let subagents talk to each other</string>
     <string name="subagent_comm_enabled_desc">Subagents in the same batch can list their teammates and message them (team / tell). When off, they can only report upward; the parent side is unaffected.</string>
     <string name="settings_teams">Team presets</string>
@@ -3337,10 +3348,16 @@
     <string name="prompts_disable_builtin_hint">Keep only your own fragments; you must supply every rule yourself</string>
     <!-- Checkpoint: conflict detection and undo -->
     <string name="checkpoint_conflict_title">Some files were not restored</string>
-    <string name="checkpoint_conflict_message">%1$d file(s) were changed outside the checkpoint and were skipped to avoid overwriting your edits:</string>
+    <string name="checkpoint_conflict_message">Skipped %1$d files because of conflicts or uncertain ownership:</string>
+    <string name="checkpoint_result_count">Files processed: %1$d.</string>
+    <string name="checkpoint_failed_files">Failed to process %1$d files:</string>
+    <string name="checkpoint_operation_failed">The checkpoint operation did not finish. Check your files and restore timeline.</string>
     <string name="checkpoint_undo_last_restore">Undo last restore</string>
+    <string name="checkpoint_target_unavailable">The rewind target is no longer available. Reopen the checkpoint menu in its conversation.</string>
+    <string name="checkpoint_restore_busy">This conversation is regenerating or restoring. Try again when it finishes.</string>
     <string name="checkpoint_confirm_rewind_title">Confirm rewind</string>
-    <string name="checkpoint_confirm_rewind_body">Rewind to %1$s and restore %2$d files. Code changes made after that point will be discarded; files modified outside the checkpoint are skipped automatically.</string>
+    <string name="checkpoint_confirm_rewind_body">Rewind to %1$s. Expected: restore %2$d files, skip %3$d. Files are checked again before writing to protect external changes.</string>
+    <string name="checkpoint_confirm_rewind_partial">Rewind to %1$s. In the previewed subset only: restore %2$d files, skip %3$d. These are not totals; all files will be checked during restore.</string>
     <string name="checkpoint_confirm_rewind_action">Rewind</string>
     <string name="checkpoint_undo_timeline_title">Restore timeline</string>
     <string name="checkpoint_undo_timeline_desc">%1$d restore points — pick one to roll back to</string>

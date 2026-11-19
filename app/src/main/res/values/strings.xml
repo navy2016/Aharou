@@ -671,6 +671,8 @@
 
     <!-- Agent Status -->
     <string name="agent_stopped_by_user">已被用户停止</string>
+    <string name="agent_request_waiting">已接收，等待执行</string>
+    <string name="agent_request_not_started">未开始执行，请重新发送</string>
     <string name="agent_tool_executing">%1$s 执行中…</string>
     <string name="agent_stop_refusal">模型基于内容安全策略拒绝了本次回答。</string>
     <string name="agent_stop_context_exceeded">本次输入超出模型上下文窗口，请先压缩上下文或新建会话。</string>
@@ -941,9 +943,12 @@
 
     <!-- Checkpoint & Rewind -->
     <string name="checkpoint_rewind_title">检查点与撤销</string>
-    <string name="checkpoint_rewind_diff_summary">将有 %1$d 个文件被还原（%2$d 个有实际改动）</string>
-    <string name="checkpoint_rewind_diff_conflict">%1$d 个文件被检查点之外的操作改过，回退会跳过</string>
-    <string name="checkpoint_rewind_diff_truncated">文件较多，仅列出前 %1$d 个</string>
+    <string name="checkpoint_rewind_diff_summary">预计还原 %1$d 个文件（%2$d 个有实际改动）</string>
+    <string name="checkpoint_rewind_diff_partial">已预览部分：预计还原 %1$d 个文件（%2$d 个有实际改动）</string>
+    <string name="checkpoint_rewind_diff_conflict">已预览文件中有 %1$d 个无法安全还原，预计跳过</string>
+    <string name="checkpoint_rewind_diff_truncated">文件较多，未预览的文件将在执行时检查。</string>
+    <string name="checkpoint_preview_loading">正在读取检查点预览…</string>
+    <string name="checkpoint_preview_unavailable">此消息没有可用的代码检查点预览；仍可选择仅恢复对话。</string>
     <string name="checkpoint_rewind_diff_conflict_badge">跳过</string>
     <string name="checkpoint_rewind_diff_unchanged">无改动</string>
     <string name="checkpoint_rewind_diff_expand">展开</string>
@@ -1751,6 +1756,12 @@
     <string name="subagent_max_running">并发上限</string>
     <string name="subagent_max_running_hint">同时运行的子代理数量上限，范围 %1$d~%2$d，名额整个应用共享。设为 0 可关闭新派发和重新唤醒，不中断已运行的轮次。</string>
     <string name="subagent_concurrency_disabled">0（已关闭）</string>
+    <string name="execution_prepare_failed">执行目录准备失败。原项目未用于继续执行，请检查环境后新建任务。</string>
+    <string name="execution_shared">共享执行目录</string>
+    <string name="execution_worktree">独立 Git 工作树</string>
+    <string name="execution_branch">执行分支：%1$s</string>
+    <string name="execution_base_commit">基准提交：%1$s</string>
+    <string name="execution_parent_dirty">父目录有未提交修改，未带入这棵工作树。</string>
     <string name="subagent_comm_enabled">允许子代理互相对话</string>
     <string name="subagent_comm_enabled_desc">同一批次的子代理可以互相查看队友、发消息（team / tell）；关闭后它们只能向上汇报，主代理对子代理的收发不受影响。</string>
     <string name="settings_teams">团队预设</string>
@@ -3335,10 +3346,16 @@
     <string name="prompts_disable_builtin_hint">只保留你的片段；需要自己补全全部规则，谨慎开启</string>
     <!-- 检查点：冲突检测与撤销恢复 -->
     <string name="checkpoint_conflict_title">部分文件未还原</string>
-    <string name="checkpoint_conflict_message">有 %1$d 个文件被检查点之外的操作修改过，已跳过以免覆盖你的改动：</string>
+    <string name="checkpoint_conflict_message">以下 %1$d 个文件有冲突或归属不明，已跳过：</string>
+    <string name="checkpoint_result_count">实际处理 %1$d 个文件。</string>
+    <string name="checkpoint_failed_files">以下 %1$d 个文件处理失败：</string>
+    <string name="checkpoint_operation_failed">检查点操作未完成，请检查文件和恢复时间线。</string>
     <string name="checkpoint_undo_last_restore">撤销上次恢复</string>
+    <string name="checkpoint_target_unavailable">回退目标已失效，请重新打开对应会话的检查点菜单。</string>
+    <string name="checkpoint_restore_busy">该会话正在重新生成或恢复，请完成后再试。</string>
     <string name="checkpoint_confirm_rewind_title">确认回退</string>
-    <string name="checkpoint_confirm_rewind_body">将回到 %1$s，还原 %2$d 个文件。这之后的代码改动会被覆盖；被外部改过的文件会自动跳过。</string>
+    <string name="checkpoint_confirm_rewind_body">回退点：%1$s。预计还原 %2$d 个文件，跳过 %3$d 个。执行时会重新检查，不覆盖外部改动。</string>
+    <string name="checkpoint_confirm_rewind_partial">回退点：%1$s。仅在已预览部分，预计还原 %2$d 个、跳过 %3$d 个；这不是总数。执行时会检查全部文件。</string>
     <string name="checkpoint_confirm_rewind_action">确认回退</string>
     <string name="checkpoint_undo_timeline_title">恢复时间线</string>
     <string name="checkpoint_undo_timeline_desc">已有 %1$d 个备份时间节点，挑一个撤销</string>

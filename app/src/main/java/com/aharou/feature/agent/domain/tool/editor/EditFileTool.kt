@@ -23,6 +23,7 @@ import com.aharou.feature.agent.domain.tool.file.runFileOpWithTimeout
 import com.aharou.core.util.FileLogger
 import com.aharou.core.util.LineDiff
 import com.aharou.feature.workspace.domain.FileAccessProvider
+import com.aharou.feature.workspace.domain.forAgent
 import com.aharou.feature.workspace.domain.sha256Fingerprint
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -69,7 +70,8 @@ class EditFileTool @Inject constructor(
     private val fileLock: WorkspaceFileLock,
     private val versions: FileVersionRegistry,
     private val inboxEvents: SharedInboxEvents,
-    private val writeLease: SubAgentWriteLease
+    private val writeLease: SubAgentWriteLease,
+    private val checkpoints: com.aharou.feature.agent.domain.checkpoint.CheckpointManager
 ) : AgentTool() {
     override val name = "editFile"
     override val description =
@@ -187,7 +189,7 @@ class EditFileTool @Inject constructor(
         val path = args["path"]?.jsonPrimitive?.contentOrNull ?: return null
         val edits = parseEdits(args) ?: return null
         if (edits.any { it.oldString.isEmpty() || it.oldString == it.newString }) return null
-        val access = fileAccess.forWorkspace(context.projectRoot)
+        val access = fileAccess.forAgent(context)
         val content = runCatching {
             runFileOpWithTimeout { if (!access.exists(path)) null else access.readFile(path) }
         }.getOrNull() ?: return null
@@ -227,7 +229,7 @@ class EditFileTool @Inject constructor(
         context: AgentContext
     ): ToolResult {
         // 会话绑定的工作区：本会话的文件操作只落在自己的工作区，不跟着全局切换走
-        val access = fileAccess.forWorkspace(context.projectRoot)
+        val access = fileAccess.forAgent(context)
         val path = args["path"]?.jsonPrimitive?.contentOrNull
             ?: return ToolResult.Error("路径参数缺失", "MISSING_PATH")
         return withEditGuards(access, path, context.sessionId) { key ->
@@ -235,7 +237,7 @@ class EditFileTool @Inject constructor(
             performEdit(
                 access, path, args,
                 writeLease.pathsFor(context.sessionId) ?: context.writePaths,
-                context.sessionId, context.projectRoot, key
+                context.sessionId, context.executionRoot, key
             )
         }
     }
@@ -258,8 +260,13 @@ class EditFileTool @Inject constructor(
         checkVersion(access, path, key, sessionId)?.let { return it }
 
         return fileLock.withLock(key) {
+            if (access.resourceKey(path) != key) return@withLock ToolResult.Error("File target changed; reread the file", "RESOURCE_CHANGED")
             checkVersion(access, path, key, sessionId)?.let { return@withLock it }
-            block(key)
+            val checkpoint = sessionId?.let { checkpoints.beforeFileModified(it, path, access) }
+            val result = block(key)
+            if (result is ToolResult.Success && sessionId != null && checkpoint != null)
+                checkpoints.afterFileModified(sessionId, path, access, checkpoint, versions.get(sessionId, key))
+            result
         }
     }
 

@@ -3,6 +3,7 @@ package com.aharou.feature.agent.domain.subagent
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.sync.withLock
 
 /**
  * 子代理写路径租约：`task` 派发子代理时可声明它允许写的路径，
@@ -14,14 +15,34 @@ import javax.inject.Singleton
 @Singleton
 class SubAgentWriteLease @Inject constructor() {
     private val leases = ConcurrentHashMap<String, Set<String>>()
+    private val resources = ConcurrentHashMap<String, Set<String>>()
+    private val claimLock = kotlinx.coroutines.sync.Mutex()
 
-    fun register(sessionId: String, paths: Set<String>) {
-        if (leases.size > MAX_ENTRIES) leases.clear()
+    suspend fun claim(sessionId: String, paths: Set<String>, keys: Set<String>?, activeIds: Set<String>): String? = claimLock.withLock {
+        val conflict = conflictFor(sessionId, paths, activeIds, keys)
+        if (conflict == null) register(sessionId, paths, keys)
+        conflict
+    }
+
+    suspend fun grantIfAvailable(sessionId: String, paths: Set<String>, keys: Set<String>, activeIds: Set<String>,
+        persist: suspend (Set<String>) -> Unit): String? = claimLock.withLock {
+        val conflict = conflictFor(sessionId, paths, activeIds, keys)
+        if (conflict == null) {
+            persist(leases[sessionId].orEmpty() + paths)
+            grant(sessionId, paths, keys)
+        }
+        conflict
+    }
+
+    fun register(sessionId: String, paths: Set<String>, resourceKeys: Set<String>? = null) {
+        if (leases.size > MAX_ENTRIES) { leases.clear(); resources.clear() }
         leases[sessionId] = paths
+        if (resourceKeys != null) resources[sessionId] = resourceKeys else resources.remove(sessionId)
     }
 
     fun release(sessionId: String) {
         leases.remove(sessionId)
+        resources.remove(sessionId)
     }
 
     /**
@@ -30,10 +51,11 @@ class SubAgentWriteLease @Inject constructor() {
      * 给「派发时把路径猜窄了、子代理写到租约外被拦」兜底：主会话收到求助后追加即可，
      * 不必重派一个同样的任务（重派还要再烧一遍上下文）。
      */
-    fun grant(sessionId: String, paths: Set<String>): Set<String> {
+    fun grant(sessionId: String, paths: Set<String>, resourceKeys: Set<String>? = null): Set<String> {
         val merged = (leases[sessionId].orEmpty() + paths).toSet()
         if (leases.size > MAX_ENTRIES && !leases.containsKey(sessionId)) leases.clear()
         leases[sessionId] = merged
+        if (resourceKeys != null) resources[sessionId] = resources[sessionId].orEmpty() + resourceKeys
         return merged
     }
 
@@ -41,9 +63,10 @@ class SubAgentWriteLease @Inject constructor() {
      * 追加的写范围是否与**其它**仍在运行的租约重叠（不含 [sessionId] 自己）。
      * 运行期追加要过这道检查，规则与派发时一致。
      */
-    fun conflictFor(sessionId: String, writePaths: Set<String>, activeSessionIds: Set<String>): String? =
+    fun conflictFor(sessionId: String, writePaths: Set<String>, activeSessionIds: Set<String>, resourceKeys: Set<String>? = null): String? =
         leases.entries.firstOrNull { (id, existing) ->
-            id != sessionId && id in activeSessionIds && WriteLease.overlaps(writePaths, existing)
+            val keys = resourceKeys ?: resources[sessionId]
+            id != sessionId && id in activeSessionIds && overlaps(writePaths, existing, keys, resources[id])
         }?.key
 
     /** 该会话声明的可写路径；未登记（主会话、或派发时未声明）返回 null 表示不限制。 */
@@ -58,9 +81,13 @@ class SubAgentWriteLease @Inject constructor() {
      *
      * @return 冲突的会话 id；null 表示无冲突。
      */
-    fun conflictingSession(writePaths: Set<String>, activeSessionIds: Set<String>): String? = leases.entries
-        .firstOrNull { (id, existing) -> id in activeSessionIds && WriteLease.overlaps(writePaths, existing) }
+    fun conflictingSession(writePaths: Set<String>, activeSessionIds: Set<String>, resourceKeys: Set<String>? = null): String? = leases.entries
+        .firstOrNull { (id, existing) -> id in activeSessionIds && overlaps(writePaths, existing, resourceKeys, resources[id]) }
         ?.key
+
+    private fun overlaps(a: Set<String>, b: Set<String>, aKeys: Set<String>?, bKeys: Set<String>?): Boolean =
+        if (aKeys == null || bKeys == null) WriteLease.overlaps(a, b) else
+            aKeys.any { x -> bKeys.any { y -> x == y || x.startsWith(y.trimEnd('/') + "/") || y.startsWith(x.trimEnd('/') + "/") } }
 
     private companion object {
         /** 兜底上限：子会话 id 不会复用，正常路径走 release；超限时整体清空避免无限累积。 */

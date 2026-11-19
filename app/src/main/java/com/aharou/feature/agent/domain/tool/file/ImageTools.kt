@@ -34,6 +34,7 @@ import com.aharou.feature.settings.domain.model.AIProviderConfig
 import com.aharou.feature.settings.domain.model.ProviderType
 import com.aharou.feature.settings.domain.repository.AIProviderRepository
 import com.aharou.feature.workspace.domain.FileAccessProvider
+import com.aharou.feature.workspace.domain.forAgent
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -106,7 +107,7 @@ class ViewImageTool @Inject constructor(
         context: AgentContext
     ): ToolResult {
         // 会话绑定的工作区：本会话的文件操作只落在自己的工作区，不跟着全局切换走
-        val access = (fileAccess).forWorkspace(context.projectRoot)
+        val access = fileAccess.forAgent(context)
         val images = parseImages(args)
         val id = args["id"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
         val prompt = args["prompt"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()

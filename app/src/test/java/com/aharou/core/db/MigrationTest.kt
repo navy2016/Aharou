@@ -106,6 +106,26 @@ class MigrationTest {
         db.close()
     }
 
+    @Test
+    fun migrate_80_to_current_preserves_checkpoints_and_adds_execution_bindings() {
+        helper.createDatabase(dbName, 80).apply {
+            execSQL("INSERT INTO session_checkpoints (id, sessionId, userMessageId, promptSnippet, createdAt) VALUES ('cp', 'session', 'message', 'old', 1)")
+            close()
+        }
+        val db = Room.databaseBuilder(context, AgentDatabase::class.java, dbName)
+            .addMigrations(*MigrationLoader.loadMigrations(context)).build()
+        val sqlite = db.openHelper.writableDatabase
+        sqlite.query("SELECT executionId FROM session_checkpoints WHERE id = 'cp'").use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertTrue(cursor.isNull(0))
+        }
+        sqlite.query("SELECT COUNT(*) FROM session_execution_bindings").use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals(0, cursor.getInt(0))
+        }
+        db.close()
+    }
+
     /**
      * 未来新增迁移（51+）时把 @AutoMigration/新迁移加进来后在此补升级用例：
      * createDatabase(50) → 跑迁移数组 → 断言新列/新表存在。

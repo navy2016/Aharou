@@ -1,5 +1,6 @@
 package com.aharou.feature.terminal.domain
 
+import com.aharou.feature.agent.domain.execution.ExecutionBinding
 import com.aharou.feature.settings.data.repository.ExecutionMode
 import com.aharou.feature.settings.data.repository.ExecutionModeHolder
 import io.mockk.coEvery
@@ -7,63 +8,44 @@ import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/**
- * DelegatingTerminalSessionProvider：按 ExecutionModeHolder 的当前模式，在**每次调用**时把请求
- * 转发到本地 / 远程实现。
- *
- * 本地与远程管理器都是 Android/Hilt 重的具体类，这里以 mockk 替身注入，不触碰 Android 运行时；
- * ExecutionModeHolder 仅含一个 StateFlow，直接用真实实例，向真实切换语义负责。
- *
- * runningBackgroundTabs 在构造时就被 combine 捕获两侧的 Flow 实例，故用 [newProvider] 在构造前
- * 按需给出两侧内容，而非构造后再改桩。
- */
 class DelegatingTerminalSessionProviderTest {
-
     private val modeHolder = ExecutionModeHolder()
     private val local = mockk<TerminalSessionManager>(relaxed = true)
     private val remote = mockk<RemoteTerminalSessionManager>(relaxed = true)
 
-    private fun tabInfo(id: String) = TabInfo(
-        id = id,
-        title = id,
-        isBackground = true,
-        running = true,
-        command = "npm run dev"
-    )
+    private fun tabInfo(id: String) = TabInfo(id = id, title = id, isBackground = true, running = true, command = "npm run dev")
 
-    private fun newProvider(
-        localTabs: List<TabInfo> = emptyList(),
-        remoteTabs: List<TabInfo> = emptyList()
-    ): DelegatingTerminalSessionProvider {
+    private fun newProvider(localTabs: List<TabInfo> = emptyList(), remoteTabs: List<TabInfo> = emptyList()): DelegatingTerminalSessionProvider {
         every { local.runningBackgroundTabs } returns flowOf(localTabs)
         every { remote.runningBackgroundTabs } returns flowOf(remoteTabs)
+        every { local.tabFinishedEvents } returns MutableSharedFlow()
+        every { remote.tabFinishedEvents } returns MutableSharedFlow()
         return DelegatingTerminalSessionProvider(modeHolder, local, remote)
     }
 
     @Test
-    fun default_mode_routes_reads_to_local() {
+    fun listTabsIncludesBothBackends() {
         val provider = newProvider()
         every { local.listTabs() } returns listOf(tabInfo("term-1"))
-
-        assertEquals(listOf("term-1"), provider.listTabs().map { it.id })
-        verify(exactly = 0) { remote.listTabs() }
+        every { remote.listTabs() } returns listOf(tabInfo("ssh-term-1"))
+        assertEquals(listOf("term-1", "ssh-term-1"), provider.listTabs().map { it.id })
     }
 
     @Test
-    fun default_mode_routes_input_and_output_to_local() {
+    fun localInputAndOutputRemainBoundAfterSwitchingGlobalMode() {
         val provider = newProvider()
         every { local.sendInput(any(), any(), any()) } returns true
         every { local.getTabOutput("term-1") } returns "hello"
-
+        modeHolder.setMode(ExecutionMode.REMOTE_SSH)
         assertTrue(provider.sendInput("term-1", "ls", true))
         assertEquals("hello", provider.getTabOutput("term-1"))
         verify(exactly = 0) { remote.sendInput(any(), any(), any()) }
@@ -71,82 +53,62 @@ class DelegatingTerminalSessionProviderTest {
     }
 
     @Test
-    fun remote_ssh_mode_routes_to_remote() {
+    fun remoteOutputDoesNotDependOnTheGlobalMode() {
         val provider = newProvider()
-        modeHolder.setMode(ExecutionMode.REMOTE_SSH)
-        every { remote.getTabOutput("term-9") } returns "remote-out"
-
-        assertEquals("remote-out", provider.getTabOutput("term-9"))
+        every { remote.getTabOutput("ssh-term-9") } returns "remote-out"
+        assertEquals("remote-out", provider.getTabOutput("ssh-term-9"))
         verify(exactly = 0) { local.getTabOutput(any()) }
     }
 
     @Test
-    fun mode_is_read_on_every_call_not_cached_at_construction() {
+    fun closeUsesTheTabBackendAcrossModeSwitches() {
         val provider = newProvider()
         every { local.closeTab(any()) } returns true
-        every { remote.closeTab(any()) } returns false
-
-        assertTrue(provider.closeTab("a"))
-
+        every { remote.closeTab(any()) } returns true
+        provider.closeTab("term-1")
         modeHolder.setMode(ExecutionMode.REMOTE_SSH)
-        assertFalse(provider.closeTab("b"))
-
+        provider.closeTab("term-2")
         modeHolder.setMode(ExecutionMode.LOCAL_PROOT)
-        assertTrue(provider.closeTab("c"))
-
+        provider.closeTab("ssh-term-1")
         verify(exactly = 2) { local.closeTab(any()) }
         verify(exactly = 1) { remote.closeTab(any()) }
     }
 
     @Test
-    fun write_bytes_forwards_vararg_to_current_delegate() {
+    fun writeBytesUsesTheTabBackend() {
         val provider = newProvider()
-
-        provider.writeBytesToTab("term-1", 3, 4)
-
-        verify { local.writeBytesToTab("term-1", 3, 4) }
+        provider.writeBytesToTab("ssh-term-1", 3, 4)
+        verify { remote.writeBytesToTab("ssh-term-1", 3, 4) }
     }
 
     @Test
-    fun start_background_command_returns_delegate_tab_id() = runTest {
+    fun ordinaryBackgroundCommandUsesTheSelectedMode() = runTest {
         val provider = newProvider()
-        coEvery {
-            local.startBackgroundCommand("npm run dev", "dev", true, "sess-1", "/ws")
-        } returns "term-5"
-
-        assertEquals(
-            "term-5",
-            provider.startBackgroundCommand("npm run dev", "dev", true, "sess-1", "/ws")
-        )
-        coVerify(exactly = 0) {
-            remote.startBackgroundCommand(any(), any(), any(), any(), any())
-        }
+        coEvery { local.startBackgroundCommand("npm run dev", "dev", true, "sess-1", "/ws", null) } returns "term-5"
+        assertEquals("term-5", provider.startBackgroundCommand("npm run dev", "dev", true, "sess-1", "/ws"))
+        coVerify(exactly = 0) { remote.startBackgroundCommand(any(), any(), any(), any(), any(), any()) }
     }
 
     @Test
-    fun tab_finished_events_are_shared_and_stable_across_mode_switch() {
+    fun executionBindingSelectsRemoteEvenWhenTheGlobalModeIsLocal() = runTest {
         val provider = newProvider()
+        val binding = ExecutionBinding("execution", "/project", "/remote/worktree", "ssh", "REMOTE_SSH", "server")
+        coEvery { remote.startBackgroundCommand("pwd", null, true, "child", "/remote/worktree", binding) } returns "ssh-term-1"
+        assertEquals("ssh-term-1", provider.startBackgroundCommand("pwd", null, true, "child", "/remote/worktree", binding))
+        coVerify(exactly = 0) { local.startBackgroundCommand(any(), any(), any(), any(), any(), any()) }
+    }
 
-        // shareIn 之后对外是一个稳定的共享流实例：重复读取拿到同一个对象，
-        // 切模式只影响其内部的订阅对象，不会换一个实例出去（订阅方不需重订阅）。
-        // 不断言「能收到事件」：那要等 provider 自己后台线程把它们订阅上，
-        // 依赖真实时序，在 CI 慢机器上会抖成 flaky。
-        val flow = provider.tabFinishedEvents
-        assertSame(flow, provider.tabFinishedEvents)
-
+    @Test
+    fun finishedEventsFlowIsStableAcrossModeSwitches() {
+        val provider = newProvider()
+        val events = provider.tabFinishedEvents
         modeHolder.setMode(ExecutionMode.REMOTE_SSH)
-        assertSame(flow, provider.tabFinishedEvents)
+        assertSame(events, provider.tabFinishedEvents)
     }
 
     @Test
-    fun running_background_tabs_merges_local_and_remote_side() = runTest {
-        val provider = newProvider(
-            localTabs = listOf(tabInfo("term-1")),
-            remoteTabs = listOf(tabInfo("term-2"))
-        )
-
-        val merged = provider.runningBackgroundTabs.first()
-
-        assertEquals(listOf("term-1", "term-2"), merged.map { it.id })
+    fun runningBackgroundTabsMergeBothBackends() = runTest {
+        val provider = newProvider(listOf(tabInfo("term-1")), listOf(tabInfo("ssh-term-1")))
+        assertEquals(listOf("term-1", "ssh-term-1"), provider.runningBackgroundTabs.first().map { it.id })
     }
 }

@@ -9,6 +9,7 @@ import com.aharou.feature.agent.domain.tool.ToolParameter
 import com.aharou.feature.agent.domain.tool.ToolPermissionPolicy
 import com.aharou.feature.agent.domain.tool.ToolResult
 import com.aharou.feature.workspace.domain.FileAccessProvider
+import com.aharou.feature.workspace.domain.forAgent
 import com.aharou.feature.workspace.domain.FileEntry
 import com.aharou.feature.workspace.domain.WorkspacePathMapper
 import kotlinx.serialization.json.JsonElement
@@ -55,7 +56,7 @@ class ListFilesTool @Inject constructor(
         context: AgentContext
     ): ToolResult {
         // 会话绑定的工作区：本会话的文件操作只落在自己的工作区，不跟着全局切换走
-        val access = (fileAccess).forWorkspace(context.projectRoot)
+        val access = fileAccess.forAgent(context)
         return try {
             val rawArgs = args["args"]?.jsonPrimitive?.contentOrNull.orEmpty()
             val tokens = parseShellWords(rawArgs)

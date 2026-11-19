@@ -31,6 +31,17 @@ class AgentDefinitionRepository @Inject constructor(
         return listAll().filterNot { it.definition.name.lowercase() in disabled }
     }
 
+    fun listForExecution(binding: com.aharou.feature.agent.domain.execution.ExecutionBinding, includeDisabled: Boolean = false): List<AgentDefinitionEntry> {
+        val access = fileAccess.forExecution(binding.copy(executionRoot = binding.projectExecutionRoot, isolation = "shared"))
+        val all = mergeAll(AgentDefinitionDirectoryScanner.scan(access, "~/.aharou/agents"),
+            AgentDefinitionDirectoryScanner.scan(access, "~/workspace/.aharou/agents"))
+        if (includeDisabled) return all
+        val disabled = listOf("~/.aharou/agents.json", "~/workspace/.aharou/agents.json").flatMap { path ->
+            if (access.isFile(path)) AgentDefinitionConfigRepository.parseDisabled(access.readFile(path)) else emptySet()
+        }.map { it.lowercase() }.toSet()
+        return all.filterNot { it.definition.name.lowercase() in disabled }
+    }
+
     /** 按名称查找可派发的定义（忽略大小写）；不存在或已被禁用时返回 null。 */
     fun find(name: String): AgentDefinition? =
         listEnabled().firstOrNull { it.definition.name.equals(name, ignoreCase = true) }?.definition

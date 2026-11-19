@@ -37,8 +37,8 @@ class FileConcurrencyTest {
     private val inbox = mockk<SharedInboxEvents>(relaxed = true)
     private val leases = SubAgentWriteLease()
     private val reader = ReadFileTool(files, versions)
-    private val writer = WriteFileTool(files, locks, versions, inbox, leases)
-    private val editor = EditFileTool(files, locks, versions, inbox, leases)
+    private val writer = WriteFileTool(files, locks, versions, inbox, leases, mockk(relaxed = true))
+    private val editor = EditFileTool(files, locks, versions, inbox, leases, mockk(relaxed = true))
     private val context = AgentContext(null, null, "/project", null, sessionId = "session")
     private var content = "base"
 

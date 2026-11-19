@@ -60,15 +60,18 @@ class SearchCodeTool @Inject constructor(
                 ?: return ToolResult.Error("args 中存在未闭合的引号", "INVALID_ARGS")
             if (tokens.isEmpty()) return ToolResult.Error("缺少搜索参数 args", "MISSING_ARGS")
 
-            val command = buildSearchCommand(tokens, pathHomeResolver.home())
+            val home = pathHomeResolver.home()
+            val boundTokens = tokens.map { context.executionBinding?.workspaceArgument(it, home) ?: it }
+            val command = buildSearchCommand(boundTokens, home)
                 ?: return ToolResult.Error("search 仅支持 | head [-n N] 截断输出，不支持其它管道命令", "INVALID_PIPE")
 
             val startedAt = System.currentTimeMillis()
             val result = commandEngine.runCommandSyncIfReady(
                 command = command,
-                projectPath = context.projectRoot.takeIf { it.isNotBlank() }
+                projectPath = context.executionRoot.takeIf { it.isNotBlank() }
                     ?: workspaceRepository.currentPath(),
-                timeoutMs = SEARCH_TIMEOUT_MS
+                timeoutMs = SEARCH_TIMEOUT_MS,
+                execution = context.executionBinding
             ) ?: return ToolResult.Error("容器未就绪，无法执行 rg", "CONTAINER_NOT_READY")
 
             // 127 = shell 找不到命令；合并 stderr 后通常也能看到 command not found，双保险

@@ -41,7 +41,7 @@ class GitRepositoryTest {
         }
         val workspace = mockk<WorkspaceRepository>()
         every { workspace.currentPath() } returns workPath
-        return GitRepository(engine, workspace, mockk<PreCommitChecker>(relaxed = true))
+        return GitRepository(engine, workspace, mockk<PreCommitChecker>(relaxed = true), com.aharou.feature.agent.domain.tool.WorkspaceFileLock())
     }
 
     // ── status()：porcelain v1 -b 解析 ───────────────────────────
@@ -401,7 +401,7 @@ class GitRepositoryTest {
         every { workspace.currentPath() } returns workPath
         val slot = slot<String>()
         coEvery { engine.runCommandSyncUnbounded(capture(slot), any(), any()) } returns CommandResult("", 0)
-        val repo = GitRepository(engine, workspace, mockk<PreCommitChecker>(relaxed = true))
+        val repo = GitRepository(engine, workspace, mockk<PreCommitChecker>(relaxed = true), com.aharou.feature.agent.domain.tool.WorkspaceFileLock())
 
         repo.commit("fix: 表格 | 分号; 括号(1)")
         // '|' 是 shell 管道符，整条消息必须单引号包裹传递
@@ -415,7 +415,7 @@ class GitRepositoryTest {
         every { workspace.currentPath() } returns workPath
         val slot = slot<String>()
         coEvery { engine.runCommandSyncUnbounded(capture(slot), any(), any()) } returns CommandResult("", 0)
-        val repo = GitRepository(engine, workspace, mockk<PreCommitChecker>(relaxed = true))
+        val repo = GitRepository(engine, workspace, mockk<PreCommitChecker>(relaxed = true), com.aharou.feature.agent.domain.tool.WorkspaceFileLock())
 
         repo.commit("it's fixed")
         // 内嵌单引号关闭-转义-重开：it'\''s fixed

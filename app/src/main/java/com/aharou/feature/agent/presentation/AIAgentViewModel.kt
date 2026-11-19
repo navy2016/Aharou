@@ -133,7 +133,6 @@ import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -190,6 +189,8 @@ class AIAgentViewModel @Inject constructor(
     private val askUserQuestionManager: AskUserQuestionManager,
     private val containerEngine: LinuxContainerEngine,
     private val sessionUseCase: SessionUseCase,
+    private val executions: com.aharou.feature.agent.domain.execution.SessionExecutionRepository,
+    private val editorIdentity: com.aharou.feature.editor.presentation.EditorWorkspaceIdentity,
     private val messagePersistenceUseCase: MessagePersistenceUseCase,
     private val messageArchiveStore: MessageArchiveStore,
     private val messageRegenerator: MessageRegenerator,
@@ -235,6 +236,8 @@ class AIAgentViewModel @Inject constructor(
     private val suppressedSubAgentStops = mutableSetOf<String>()
     private val sessionJobs = mutableMapOf<String, Job>()
     private val stoppingSessions = mutableMapOf<String, kotlinx.coroutines.CompletableDeferred<Unit>>()
+    private val turnHandoff = SessionTurnHandoff(sessionJobs, stoppingSessions)
+    private val pendingUserMessages = PendingUserMessages()
 
     /** 记忆兑现节流：每个会话上次自动整理的时间戳，10 分钟内不重复跑。 */
     private val lastCurateAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
@@ -919,6 +922,14 @@ class AIAgentViewModel @Inject constructor(
         sessionPath.ifBlank { selected }
     }.stateIn(viewModelScope, SharingStarted.Eagerly, "")
 
+    val currentSessionExecution = _currentSessionId.flatMapLatest { id ->
+        if (id == null) flowOf(null to null) else executions.observe(id).map { id to it }
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, null to null)
+
+    fun editorIdentity(root: String): String = editorIdentity.key(root)
+    fun currentExecution(): com.aharou.feature.agent.domain.execution.ExecutionBinding? =
+        currentSessionExecution.value.takeIf { it.first == _currentSessionId.value }?.second
+
     val sessions: StateFlow<List<ChatSession>> = _currentWorkspace
         .flatMapLatest { path ->
             if (path.isBlank()) flowOf(emptyList())
@@ -1144,6 +1155,7 @@ class AIAgentViewModel @Inject constructor(
         }
         // restoreAll 内部已逐条切 Dispatchers.IO，这里用 Default 承接附件 JSON 解析等 CPU 工作，避免嵌套线程切换。
         .flowOn(Dispatchers.Default)
+        .combine(pendingUserMessages.state) { messages, pending -> pendingUserMessages.merge(messages, pending) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ChatMessagesState(null, emptyList(), loaded = false))
 
     /**
@@ -1669,7 +1681,7 @@ class AIAgentViewModel @Inject constructor(
 
         executeAgentRequestStream(
             request = event.detail,
-            projectRoot = parentSession.workspacePath,
+            projectRoot = sessionUseCase.getSessionById(event.subSessionId)?.workspacePath.orEmpty(),
             targetSessionId = event.subSessionId,
             skipTitleUpdate = true, expectedSubAgentRunId = event.runId
         )
@@ -2061,6 +2073,7 @@ class AIAgentViewModel @Inject constructor(
         completion: AgentTurnCompletion? = null,
         expectedSubAgentRunId: String? = null,
         existingUserMessageId: String? = null,
+        restartTicket: kotlinx.coroutines.Deferred<Unit>? = null,
     ): Job = viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
         val sessionId = targetSessionId ?: ensureSession()
         if (sessionId.isBlank()) {
@@ -2068,13 +2081,13 @@ class AIAgentViewModel @Inject constructor(
             return@launch
         }
         val currentJob = requireNotNull(coroutineContext[Job])
-        try {
-            while (true) {
-                stoppingSessions[sessionId]?.await()
-                val previousJob = sessionJobs[sessionId]
-                if (previousJob == null || previousJob === currentJob || previousJob.isCompleted) break
-                previousJob.join()
+        val acceptedId = if (sessionId in stoppingSessions && !isAutoTrigger && existingUserMessageId == null && !request.startsWith("/")) {
+            UUID.randomUUID().toString().also { id ->
+                pendingUserMessages.add(sessionId, AgentUIMessage(id, MessageRole.USER, request, attachments = inputAttachments))
             }
+        } else null
+        try {
+            turnHandoff.awaitIdle(sessionId, currentJob, restartTicket)
             if (!skipCommandDispatch && request.startsWith("/")) {
                 slashCommandRegistry.resolve(request)?.let { command ->
                     runResolvedCommand(command, request, sessionId)
@@ -2129,6 +2142,7 @@ class AIAgentViewModel @Inject constructor(
                     persistUserMessage = persistUserMessage,
                     expectedSubAgentRunId = expectedSubAgentRunId,
                     existingUserMessageId = existingUserMessageId,
+                    newUserMessageId = acceptedId,
                 )
             ).collect { event ->
                 completion?.observe(event)
@@ -2235,6 +2249,7 @@ class AIAgentViewModel @Inject constructor(
                         removeRunningTool(sessionId, msgId)
                     }
                     is AgentEvent.Failed -> {
+                        acceptedId?.let { pendingUserMessages.fail(sessionId, it, context.getString(R.string.agent_request_not_started)) }
                         failed = true
                         setCompacting(sessionId, false)
                         val failureMessage = describeFailure(event)
@@ -2298,6 +2313,7 @@ class AIAgentViewModel @Inject constructor(
             setStreamingReasoning(sessionId, null)
 
         } catch (e: CancellationException) {
+            acceptedId?.let { pendingUserMessages.fail(sessionId, it, context.getString(R.string.agent_stopped_by_user)) }
             val cancelledState = _agentStates.value[sessionId]
             val isOwnJob = sessionJobs[sessionId] == coroutineContext[Job]
             FileLogger.d(TAG, "stream cancelled: sid=$sessionId isOwnJob=$isOwnJob state=$cancelledState")
@@ -2309,6 +2325,7 @@ class AIAgentViewModel @Inject constructor(
             }
             throw e
         } catch (e: Exception) {
+             acceptedId?.let { pendingUserMessages.fail(sessionId, it, context.getString(R.string.agent_request_not_started)) }
              completion?.fail(e)
              FileLogger.e(TAG, "executeAgentRequestStream 失败: request=$request", e)
              if (sessionJobs[sessionId] === currentJob) {
@@ -2471,16 +2488,19 @@ class AIAgentViewModel @Inject constructor(
         stoppingSessions[sessionId] = stopped
         job?.cancel()
         viewModelScope.launch {
-            job?.join()
-            if (stoppingSessions[sessionId] === stopped) stoppingSessions.remove(sessionId)
-            stopped.complete(Unit)
-            if (sessionJobs[sessionId]?.let { it !== job } == true) return@launch
-            settleStoppedTools(sessionId, runningTools, pendingPermissions, stoppedText)
-            setStreamingText(sessionId, null)
-            setStreamingReasoning(sessionId, null)
-            setCompacting(sessionId, false)
-            setRetryState(sessionId, null)
-            setAgentState(sessionId, AgentUIState.Idle)
+            try {
+                job?.join()
+                if (sessionJobs[sessionId]?.let { it !== job } == true) return@launch
+                settleStoppedTools(sessionId, runningTools, pendingPermissions, stoppedText)
+                setStreamingText(sessionId, null)
+                setStreamingReasoning(sessionId, null)
+                setCompacting(sessionId, false)
+                setRetryState(sessionId, null)
+                setAgentState(sessionId, AgentUIState.Idle)
+            } finally {
+                if (stoppingSessions[sessionId] === stopped) stoppingSessions.remove(sessionId)
+                stopped.complete(Unit)
+            }
             flushPendingNotifications(sessionId)
             processNextInQueue(sessionId)
         }
@@ -2924,115 +2944,29 @@ class AIAgentViewModel @Inject constructor(
         }
     }
 
-    // Checkpoint Rewind 选中的目标消息 id
-    private val _targetRewindMessageId = MutableStateFlow<String?>(null)
-    val targetRewindMessageId: StateFlow<String?> = _targetRewindMessageId.asStateFlow()
+    internal val rewind = CheckpointRewindController({ _currentSessionId.value }, agentMessageDao, checkpointDao,
+        checkpointManager, messagePersistenceUseCase, turnHandoff, ::cancelRunningTurn) { setAgentState(it, AgentUIState.Idle) }
 
-    // 回退时因「被检查点之外的操作改过」而跳过的文件；非空时界面提示
-    private val _rewindConflicts = MutableStateFlow<List<String>>(emptyList())
-    val rewindConflicts: StateFlow<List<String>> = _rewindConflicts.asStateFlow()
+    fun openRewindMenu(messageId: String) = viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) { rewind.open(messageId) }
 
-    /** 打开回退菜单时算出的「将还原的文件数」上限，供确认提示展示。 */
-    private val _rewindPreviewFiles = MutableStateFlow(0)
-    val rewindPreviewFiles: StateFlow<Int> = _rewindPreviewFiles.asStateFlow()
-
-    /** 回退时间线：每次恢复/撤销留下的现场，供用户挑一个节点撤销（新→旧）。 */
-    private val _rewindUndoRecords = MutableStateFlow<List<CheckpointManager.UndoRecordInfo>>(emptyList())
-    val rewindUndoRecords: StateFlow<List<CheckpointManager.UndoRecordInfo>> = _rewindUndoRecords.asStateFlow()
-
-    fun dismissRewindConflicts() {
-        _rewindConflicts.value = emptyList()
+    internal fun undoRewind(sessionId: String, recordId: String) = viewModelScope.launch {
+        showRewindOutcome(sessionId, rewind.undoTimeline(sessionId, recordId))
     }
 
-    /** 撤销最近一次代码恢复（把当时的现场写回去）。 */
-    fun undoLastRewind() = viewModelScope.launch {
-        val sessionId = _currentSessionId.value ?: return@launch
-        checkpointManager.undoLastRestore(sessionId)
+    internal fun executeRewindOption(owner: RewindMenuTarget, option: RewindOption, checkpointId: String? = null,
+        undoId: String? = null, onFillPrompt: (String, List<AgentAttachment>) -> Unit) = viewModelScope.launch {
+        showRewindOutcome(owner.sessionId, rewind.execute(owner, option, checkpointId, undoId, onFillPrompt))
     }
 
-    fun openRewindMenu(messageId: String) {
-        _targetRewindMessageId.value = messageId
-        // 确认框要把「会动到几个文件」摆出来，故开菜单时先只读地数一遍（不动文件）。
-        _rewindPreviewFiles.value = 0
-        viewModelScope.launch {
-            val sessionId = _currentSessionId.value ?: return@launch
-            val checkpoint = checkpointDao.getCheckpointBySessionAndMessage(sessionId, messageId)
-            _rewindPreviewFiles.value = checkpoint
-                ?.let { checkpointManager.countFilesToRestore(sessionId, it.id) }
-                ?: 0
-            _rewindUndoRecords.value = checkpointManager.listUndoRecords(sessionId)
+    private fun showRewindOutcome(sessionId: String, outcome: CheckpointRewindController.Outcome) {
+        if (_currentSessionId.value != sessionId) return
+        val message = when (outcome) {
+            CheckpointRewindController.Outcome.DONE -> return
+            CheckpointRewindController.Outcome.BUSY -> R.string.checkpoint_restore_busy
+            CheckpointRewindController.Outcome.UNAVAILABLE -> R.string.checkpoint_target_unavailable
+            CheckpointRewindController.Outcome.FAILED -> R.string.checkpoint_operation_failed
         }
-    }
-
-    /** 撤销到指定的备份时间节点（[recordId] 为空即最新一份）。 */
-    fun undoRewind(recordId: String?) = viewModelScope.launch {
-        val sessionId = _currentSessionId.value ?: return@launch
-        checkpointManager.undoRestoreTo(sessionId, recordId)
-        _rewindUndoRecords.value = checkpointManager.listUndoRecords(sessionId)
-    }
-
-    fun dismissRewindMenu() { _targetRewindMessageId.value = null }
-
-    suspend fun previewRewindDiff(messageId: String): CheckpointManager.RewindDiff? =
-        _currentSessionId.value?.let { sid -> checkpointDao.getCheckpointBySessionAndMessage(sid, messageId)?.let { runCatching { checkpointManager.previewRewindDiff(sid, it.id) }.getOrNull() } }
-
-    fun executeRewindOption(
-        messageId: String,
-        option: RewindOption,
-        onFillPrompt: (String, List<AgentAttachment>) -> Unit
-    ) = viewModelScope.launch {
-        val sessionId = _currentSessionId.value ?: return@launch
-        dismissRewindMenu()
-
-        // 1. 停止当前正在运行的 Agent 任务及后续排队
-        _queuedRequests.value = _queuedRequests.value + (sessionId to emptyList())
-        agentNotificationCenter.clear(sessionId)
-        val runningJob = sessionJobs[sessionId]
-        if (runningJob != null && runningJob.isActive) {
-            runningJob.cancelAndJoin()
-        }
-        sessionJobs.remove(sessionId)
-        _activeAgentSessions.value = _activeAgentSessions.value - sessionId
-
-        // 2. 重置会话运行、流式与检查点状态
-        setAgentState(sessionId, AgentUIState.Idle)
-        _runningTools.value = _runningTools.value - sessionId
-        setStreamingText(sessionId, null)
-        setStreamingReasoning(sessionId, null)
-        setCompacting(sessionId, false)
-        setRetryState(sessionId, null)
-        checkpointManager.setActiveCheckpointId(sessionId, null)
-
-        val checkpoint = checkpointDao.getCheckpointBySessionAndMessage(sessionId, messageId)
-        // 压缩标记/摘要行不承载可回退的内容：退到它们会撤销压缩并把保留的 tail 删空。
-        val targetMsgEntity = messagePersistenceUseCase.restore(agentMessageDao.getMessageById(messageId)?.takeUnless { it.isCompactionMarker || it.isContextSummary } ?: return@launch)
-        val attachments = targetMsgEntity.toUIMessage().attachments
-
-        var conflicts: List<String> = emptyList()
-        when (option) {
-            RewindOption.RESTORE_CODE_AND_CONVERSATION -> {
-                if (checkpoint != null) {
-                    conflicts = checkpointManager.restoreCodeToCheckpoint(sessionId, checkpoint.id).conflicts
-                }
-                messagePersistenceUseCase.rewindConversation(sessionId, targetMsgEntity.timestamp)
-                withContext(Dispatchers.Main) { onFillPrompt(targetMsgEntity.content, attachments) }
-            }
-            RewindOption.RESTORE_CONVERSATION -> {
-                messagePersistenceUseCase.rewindConversation(sessionId, targetMsgEntity.timestamp)
-                withContext(Dispatchers.Main) { onFillPrompt(targetMsgEntity.content, attachments) }
-            }
-            RewindOption.RESTORE_CODE -> {
-                if (checkpoint != null) {
-                    conflicts = checkpointManager.restoreCodeToCheckpoint(sessionId, checkpoint.id).conflicts
-                }
-            }
-            RewindOption.UNDO_LAST_RESTORE -> {
-                checkpointManager.undoLastRestore(sessionId)
-            }
-        }
-        // 回退可能删掉变体组里除一条以外的所有版本，只剩一条时必须恢复它的上下文参与权。
-        agentMessageDao.repairSingletonVariantGroups(sessionId)
-        _rewindConflicts.value = conflicts
+        Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
     }
 
     /**
@@ -3042,7 +2976,7 @@ class AIAgentViewModel @Inject constructor(
         val sessionId = _currentSessionId.value ?: return@launch
         val userMessage = lastUserInputMessage(sessionId)
         setAgentState(sessionId, AgentUIState.Idle)
-        cancelRunningTurn(sessionId)
+        if (!cancelRunningTurn(sessionId)) return@launch
         FileLogger.i(TAG, "重试：sid=$sessionId hasUserMessage=${userMessage != null}")
         if (userMessage == null || turnHasProgressAfter(sessionId, userMessage.timestamp)) {
             executeAgentRequestStream(
@@ -3072,22 +3006,29 @@ class AIAgentViewModel @Inject constructor(
                 (it.role == MessageRole.ASSISTANT.name && it.content.isNotBlank()))
         }
 
-    fun regenerateMessage(messageId: String) = viewModelScope.launch {
-        val sessionId = _currentSessionId.value ?: return@launch
-        messageRegenerator.regenerate(
-            sessionId, messageId,
-            cancelTurn = { cancelRunningTurn(sessionId); setAgentState(sessionId, AgentUIState.Idle) },
-            restart = { user ->
-                val input = com.aharou.feature.agent.presentation.component.regenerationInput(context, user, fileAccess.forWorkspace(workspaceOf(sessionId)))
-                executeAgentRequestStream(
-                    request = input.text, modelRequest = input.modelRequest, projectRoot = workspaceOf(sessionId),
-                    inputAttachments = input.attachments, inputImages = input.images, targetSessionId = sessionId,
-                    persistUserMessage = false, existingUserMessageId = user.id, skipTitleUpdate = true,
-                    skipCommandDispatch = true,
-                ).join()
-            },
-            selectVariant = { group, position -> _variantSelections.value = _variantSelections.value + (group to position) },
-        )
+    fun regenerateMessage(messageId: String, targetSessionId: String? = _currentSessionId.value) = viewModelScope.launch {
+        val sessionId = targetSessionId ?: return@launch
+        turnHandoff.withRestart(sessionId) { ticket ->
+            val target = agentMessageDao.getMessageById(messageId)
+            FileLogger.d(TAG, "regenerate request: sid=$sessionId message=$messageId role=${target?.role} oldJob=${sessionJobs[sessionId]?.let(System::identityHashCode)} stopping=${sessionId in stoppingSessions} active=${sessionJobs[sessionId]?.isActive} completed=${sessionJobs[sessionId]?.isCompleted}")
+            messageRegenerator.regenerate(
+                sessionId, messageId,
+                cancelTurn = {
+                    if (!cancelRunningTurn(sessionId)) throw CancellationException("Regeneration superseded")
+                    setAgentState(sessionId, AgentUIState.Idle)
+                },
+                restart = { user ->
+                    val input = com.aharou.feature.agent.presentation.component.regenerationInput(context, user, fileAccess.forWorkspace(workspaceOf(sessionId)))
+                    executeAgentRequestStream(
+                        request = input.text, modelRequest = input.modelRequest, projectRoot = workspaceOf(sessionId),
+                        inputAttachments = input.attachments, inputImages = input.images, targetSessionId = sessionId,
+                        persistUserMessage = false, existingUserMessageId = user.id, skipTitleUpdate = true,
+                        skipCommandDispatch = true, restartTicket = ticket,
+                    ).join()
+                },
+                selectVariant = { group, position -> _variantSelections.value = _variantSelections.value + (group to position) },
+            )
+        }
     }
 
     fun selectMessageVariant(groupId: String, position: Int) {
@@ -3144,10 +3085,12 @@ class AIAgentViewModel @Inject constructor(
     }
 
     /** 中断当前轮并清掉运行态（重试 / 重新生成前调用），与回退流程同款收尾。 */
-    private suspend fun cancelRunningTurn(sessionId: String) {
+    private suspend fun cancelRunningTurn(sessionId: String): Boolean {
+        val previous = sessionJobs[sessionId]
+        FileLogger.d(TAG, "restart handoff: sid=$sessionId oldJob=${previous?.let(System::identityHashCode)} stopping=${sessionId in stoppingSessions} active=${previous?.isActive}")
         _queuedRequests.value = _queuedRequests.value + (sessionId to emptyList())
+        if (!turnHandoff.settleForRestart(sessionId)) return false
         agentNotificationCenter.clear(sessionId)
-        sessionJobs[sessionId]?.takeIf { it.isActive }?.cancelAndJoin()
         sessionJobs.remove(sessionId)
         _activeAgentSessions.value = _activeAgentSessions.value - sessionId
         _runningTools.value = _runningTools.value - sessionId
@@ -3156,6 +3099,8 @@ class AIAgentViewModel @Inject constructor(
         setCompacting(sessionId, false)
         setRetryState(sessionId, null)
         setKeySwitchState(sessionId, null)
+        FileLogger.d(TAG, "restart handoff complete: sid=$sessionId oldJob=${previous?.let(System::identityHashCode)}")
+        return true
     }
 
     /**
@@ -3263,6 +3208,7 @@ class AIAgentViewModel @Inject constructor(
             // 隐身会话的消息只在内存、不落库；分叉必然把内容写进磁盘，等于给隐身内容留痕。
             // 界面已隐藏该入口，这里再兜一层，防切换会话期间的竞态。
             if (source.ghostMode) return@launch
+            val forkExecution = executions.get(sourceId)
             val all = agentMessageDao.getMessagesBySessionOnce(sourceId)
             val cut = all.indexOfFirst { it.id == messageId }
             if (cut < 0) return@launch
@@ -3294,12 +3240,14 @@ class AIAgentViewModel @Inject constructor(
                 fork.copy(
                     title = context.getString(R.string.chat_fork_title, source.title),
                     modeBeforePlan = source.modeBeforePlan,
+                    executionBindingRequired = forkExecution != null,
                     totalInputTokens = entities.sumOf { it.inputTokens },
                     totalOutputTokens = entities.sumOf { it.outputTokens },
                     lastInputTokens = entities.lastOrNull { it.role == MessageRole.ASSISTANT.name }
                         ?.inputTokens ?: 0
                 )
             )
+            forkExecution?.let { executions.attach(fork.id, it) }
             agentMessageDao.insertAll(entities.map { messagePersistenceUseCase.prepareForStorage(it) })
             messagePersistenceUseCase.invalidateHistory(fork.id)
             selectSession(fork.id)

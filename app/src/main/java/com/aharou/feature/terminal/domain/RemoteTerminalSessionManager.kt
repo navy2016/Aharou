@@ -9,6 +9,8 @@ import com.aharou.feature.agent.domain.container.RemoteSshConnection
 import com.aharou.feature.settings.data.repository.ExecutionMode
 import com.aharou.feature.settings.data.repository.ExecutionModeHolder
 import com.aharou.feature.workspace.data.repository.WorkspaceRepository
+import com.aharou.feature.agent.domain.execution.ExecutionBinding
+import com.aharou.feature.agent.domain.execution.executionIdentity
 import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -117,9 +119,10 @@ class RemoteTerminalSessionManager @Inject constructor(
     }
 
     /** 新建一个交互 shell 标签并设为当前。返回新标签 id。 */
-    suspend fun createInteractiveTab(): String {
-        if (!ensureRemote()) throw IllegalStateException("非远程模式或 SSH 未连接")
-        return openShellTab(command = null, isBackground = false, notify = false, title = null, sourceSessionId = null).also { id ->
+    suspend fun createInteractiveTab(execution: ExecutionBinding? = null): String {
+        if (execution == null && !ensureRemote()) throw IllegalStateException("非远程模式或 SSH 未连接")
+        if (execution != null && connection.config?.executionIdentity() != execution.sshIdentity) throw java.io.IOException("SSH execution identity changed")
+        return openShellTab(command = null, isBackground = false, notify = false, title = null, sourceSessionId = null, execution = execution).also { id ->
             _activeTabId.value = id
             FileLogger.i(TAG, "新建交互远程终端标签 $id")
         }
@@ -130,9 +133,10 @@ class RemoteTerminalSessionManager @Inject constructor(
         title: String?,
         notify: Boolean,
         sourceSessionId: String?,
-        workspacePath: String?
+        workspacePath: String?, execution: ExecutionBinding?
     ): String {
-        if (!ensureRemote()) throw IllegalStateException("非远程模式或 SSH 未连接")
+        if (execution == null && !ensureRemote()) throw IllegalStateException("非远程模式或 SSH 未连接")
+        if (execution != null && connection.config?.executionIdentity() != execution.sshIdentity) throw java.io.IOException("SSH execution identity changed")
         val id = openShellTab(
             command,
             isBackground = true,
@@ -140,7 +144,8 @@ class RemoteTerminalSessionManager @Inject constructor(
             title = title,
             sourceSessionId = sourceSessionId,
             workspacePath = workspacePath,
-            createdByAgent = true
+            createdByAgent = true,
+            execution = execution
         )
         FileLogger.i(TAG, "后台命令标签 $id: $command")
         return id
@@ -157,14 +162,15 @@ class RemoteTerminalSessionManager @Inject constructor(
         title: String?,
         sourceSessionId: String?,
         workspacePath: String? = null,
-        createdByAgent: Boolean = false
+        createdByAgent: Boolean = false,
+        execution: ExecutionBinding? = null
     ): String {
         val id = nextId()
         // sshj startSession/startShell 走网络 I/O，必须离开主线程，否则 NetworkOnMainThreadException。
         // 但 TerminalSession 构造时会 new Handler()（绑当前线程 Looper），必须在有 Looper 的线程（主线程）构造，
         // 所以只把 sshj channel 建立切到 IO，拿到 shell 句柄后回主线程构造 session。
         val shell = withContext(Dispatchers.IO) {
-            connection.startShellSession().also { it.allocateDefaultPTY() }.startShell()
+            connection.startBoundShellSession(execution?.sshIdentity).also { it.allocateDefaultPTY() }.startShell()
         }
         val backend = SshShellBackend(shell)
         val termSession = TerminalSession(TRANSCRIPT_ROWS, AppRemoteSessionClient(), backend)
@@ -172,13 +178,12 @@ class RemoteTerminalSessionManager @Inject constructor(
         // shell 登录后默认在 home，先 cd 到当前工作区，与命令执行链路（RemoteSshEngine.buildCdCommand）保持一致：
         // 先 cd 真实工作区路径，再在 ~/workspace 指向同一物理目录时才切过去（用户自建同名真实目录时
         // 不能先 cd ~/workspace，否则命令跑进用户自己的目录，而文件读写走 base/<工作区名>）。
-        val wsPath = workspacePath?.takeIf { it.isNotBlank() } ?: workspaceRepository.currentPath()
+        val wsPath = execution?.executionRoot ?: workspacePath?.takeIf { it.isNotBlank() } ?: workspaceRepository.currentPath()
         if (wsPath.isNotBlank() && wsPath != "/") {
             val quoted = shellQuote(wsPath.trimEnd('/'))
-            termSession.write(
+            termSession.write(if (execution != null) "cd $quoted || exit 1\n" else
                 "cd $quoted 2>/dev/null; " +
-                    "if [ \"\$(cd ~/workspace 2>/dev/null && pwd -P)\" = \"\$(pwd -P)\" ]; then cd ~/workspace; fi\n"
-            )
+                    "if [ \"\$(cd ~/workspace 2>/dev/null && pwd -P)\" = \"\$(pwd -P)\" ]; then cd ~/workspace; fi\n")
         }
         if (command != null) {
             // sshj 的 Session.Shell 没有退出状态（SshShellBackend.waitForExit 恒 0），真实退出码只能靠命令
@@ -308,7 +313,7 @@ class RemoteTerminalSessionManager @Inject constructor(
         tab.session.write(arr, 0, arr.size)
     }
 
-    private fun nextId(): String = "term-${idCounter.incrementAndGet()}"
+    private fun nextId(): String = "ssh-term-${idCounter.incrementAndGet()}"
 
     private fun addTab(tab: TerminalTab) {
         _tabs.value = _tabs.value + tab

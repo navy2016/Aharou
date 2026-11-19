@@ -16,7 +16,8 @@ class SessionUseCase @Inject constructor(
     private val chatSessionDao: ChatSessionDao,
     private val agentMessageDao: AgentMessageDao,
     private val messageArchiveStore: MessageArchiveStore,
-    private val fileVersions: com.aharou.feature.agent.domain.tool.FileVersionRegistry
+    private val fileVersions: com.aharou.feature.agent.domain.tool.FileVersionRegistry,
+    private val executions: com.aharou.feature.agent.domain.execution.SessionExecutionRepository
 ) {
     companion object {
         private const val TAG = "SessionUseCase"
@@ -77,18 +78,12 @@ class SessionUseCase @Inject constructor(
     /** 删除会话及其全部子代理会话（消息 + 会话记录一并删除）。返回被删除的会话 id 列表。 */
     suspend fun deleteSession(id: String): List<String> {
         val deleted = mutableListOf(id)
-        // 递归收集子会话（v1 仅一层，循环即可）
-        chatSessionDao.getSubSessionsByParentOnce(id).forEach { child ->
-            agentMessageDao.deleteBySession(child.id)
-            chatSessionDao.delete(child.id)
-            messageArchiveStore.deleteSession(child.id)
-            GhostModeStore.forget(child.id)
-            deleted.add(child.id)
-        }
+        chatSessionDao.getSubSessionsByParentOnce(id).forEach { child -> deleted.addAll(deleteSession(child.id)) }
         agentMessageDao.deleteBySession(id)
         chatSessionDao.delete(id)
         messageArchiveStore.deleteSession(id)
         GhostModeStore.forget(id)
+        executions.forget(id)
         deleted.forEach(fileVersions::clearSession)
         return deleted
     }
@@ -102,6 +97,7 @@ class SessionUseCase @Inject constructor(
         sessions.forEach { session ->
             messageArchiveStore.deleteSession(session.id)
             fileVersions.clearSession(session.id)
+            executions.forget(session.id)
         }
         return sessions.size
     }

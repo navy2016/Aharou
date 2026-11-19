@@ -224,6 +224,14 @@ class LocalFileAccessTest {
         assertFalse(access.exists("f.txt"))
     }
 
+    @Test fun deleteReportsFailureForNonEmptyDirectoryWithoutRemovingItsContents() {
+        val access = newAccess()
+        access.writeFile("folder/keep", "retained")
+        assertThrows(java.io.IOException::class.java) { access.delete("folder") }
+        assertEquals("retained", access.readFile("folder/keep"))
+        access.delete("missing")
+    }
+
     @Test
     fun deleteRecursively_removesTree() {
         val access = newAccess()

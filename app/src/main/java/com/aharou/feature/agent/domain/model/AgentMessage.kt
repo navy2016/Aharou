@@ -116,5 +116,9 @@ data class AgentContext(
     /** 与上一轮相比工作区变过时，这里是上一轮的工作区；未变时为 null（系统提示据此追加一次性切换提示）。 */
     val workspaceSwitchedFrom: WorkspaceRef? = null,
     /** 界面当前选中的工作区；与会话绑定的 [projectRoot] 不一致时非空，用于提醒别按错仓库操作。 */
-    val selectedWorkspace: WorkspaceRef? = null
-)
+    val selectedWorkspace: WorkspaceRef? = null,
+    val executionBinding: com.aharou.feature.agent.domain.execution.ExecutionBinding? = null,
+    val executionParentDirty: Boolean = false
+) {
+    val executionRoot: String get() = executionBinding?.executionRoot ?: projectRoot
+}

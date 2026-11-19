@@ -3,6 +3,7 @@ package com.aharou.feature.workspace.domain
 import com.aharou.core.util.FileLogger
 import com.aharou.feature.agent.domain.container.ContainerInstaller
 import com.aharou.feature.agent.domain.container.ContainerProfile
+import com.aharou.feature.agent.domain.execution.ExecutionBinding
 import com.aharou.feature.settings.data.repository.ContainerSettingsRepository
 import com.aharou.feature.workspace.data.repository.WorkspaceRepository
 import kotlinx.coroutines.CoroutineScope
@@ -35,12 +36,18 @@ import javax.inject.Singleton
  * - 工具回显/返回的路径经 [toContainerPath] 还原成容器视角（`~/workspace/…` 或 `/etc/…`），对 AI 只暴露容器路径。
  */
 @Singleton
-class WorkspacePathMapper @Inject constructor(
+class WorkspacePathMapper private constructor(
     private val workspaceRepository: WorkspaceRepository,
     private val containerInstaller: ContainerInstaller,
     private val containerSettingsRepository: ContainerSettingsRepository,
-    private val pathHomeResolver: PathHomeResolver
+    private val pathHomeResolver: PathHomeResolver,
+    private val executionBinding: ExecutionBinding?,
+    boundProfile: ContainerProfile?
 ) {
+    @Inject
+    constructor(workspaceRepository: WorkspaceRepository, containerInstaller: ContainerInstaller,
+        containerSettingsRepository: ContainerSettingsRepository, pathHomeResolver: PathHomeResolver) :
+        this(workspaceRepository, containerInstaller, containerSettingsRepository, pathHomeResolver, null, null)
     /**
      * 跨设备协作期间放开路径越界校验：远端协助者需要读写工作区之外的文件。
      * 由 [com.aharou.feature.remotedevice.RemoteDeviceController] 在开关变化时同步。
@@ -69,12 +76,16 @@ class WorkspacePathMapper @Inject constructor(
      * 调用之间有自然顺序，实际不影响。
      */
     @Volatile
-    private var currentProfile: ContainerProfile = ContainerProfile.BUILTIN_ALPINE
+    private var currentProfile: ContainerProfile = boundProfile ?: ContainerProfile.BUILTIN_ALPINE
+
+    fun forExecution(binding: ExecutionBinding, profile: ContainerProfile): WorkspacePathMapper =
+        WorkspacePathMapper(workspaceRepository, containerInstaller, containerSettingsRepository, pathHomeResolver, binding, profile)
+            .also { it.allowEscape = allowEscape }
 
     init {
-        CoroutineScope(Dispatchers.IO).launch {
+        if (executionBinding == null) CoroutineScope(Dispatchers.IO).launch {
             containerSettingsRepository.activeProfileIdFlow.collect { id ->
-                currentProfile = resolveProfile(id)
+                if (executionBinding == null) currentProfile = resolveProfile(id)
             }
         }
     }
@@ -96,8 +107,11 @@ class WorkspacePathMapper @Inject constructor(
         File(workspacePath?.takeIf { it.isNotBlank() } ?: workspaceRepository.currentPath())
 
     /** [CONTAINER_ROOT] 展开后的绝对路径（`$HOME/workspace`），供路径匹配使用。home 未就绪时回退 `/root`。 */
-    private fun resolvedContainerRoot(): String =
-        pathHomeResolver.home().trimEnd('/') + "/workspace"
+    private fun boundHome(): String = if (executionBinding != null) currentProfile.env["HOME"] ?: "/root" else pathHomeResolver.home()
+    private fun expandPath(path: String): String = if (executionBinding == null) pathHomeResolver.expandHome(path) else
+        when { path == "~" -> boundHome(); path.startsWith("~/") -> boundHome().trimEnd('/') + path.removePrefix("~"); else -> path }
+
+    private fun resolvedContainerRoot(): String = boundHome().trimEnd('/') + "/workspace"
 
     /** 容器 rootfs 在宿主上的根目录（容器内 `/` 即此目录，随当前 profile 变化）。 */
     private fun rootfsRoot(): File = containerInstaller.rootfsDirFor(currentProfile)
@@ -123,8 +137,13 @@ class WorkspacePathMapper @Inject constructor(
     fun toHostFile(path: String, workspacePath: String? = null): File {
         val root = hostRoot(workspacePath)
         val wsRoot = resolvedContainerRoot()
-        val p = pathHomeResolver.expandHome(path.trim())
+        val p = expandPath(path.trim())
+        val alias = listOf("~/workspace", "/root/workspace").firstOrNull { path.trim() == it || path.trim().startsWith("$it/") }
         val file = when {
+            executionBinding != null && alias != null -> File(root, path.trim().removePrefix(alias).trimStart('/'))
+            executionBinding?.isWorktree == true &&
+                listOfNotNull(executionBinding?.executionRoot, executionBinding?.gitRepositoryRoot, executionBinding?.gitCommonDir)
+                    .any { p == it || p.startsWith(it.trimEnd('/') + "/") } -> File(p)
             p == wsRoot || p == "$wsRoot/" || p == CONTAINER_ROOT || p == "$CONTAINER_ROOT/" -> root
             p.startsWith("$wsRoot/") -> File(root, p.removePrefix("$wsRoot/"))
             p == AHAROU_MEMORY_ROOT || p == "$AHAROU_MEMORY_ROOT/" -> aharouMemoryRoot()
@@ -142,7 +161,8 @@ class WorkspacePathMapper @Inject constructor(
         // 例如 `/../../shared_prefs/x.xml` 会落到 App 私有数据区（DataStore / 凭据 / settings）。
         // 所以解析成真实路径后，必须确认它仍落在允许的根之内（工作区 / rootfs / AI 配置 / 记忆）。
         val resolved = runCatching { file.canonicalFile }.getOrElse { file }
-        val allowed = listOf(root, rootfsRoot(), aicodeRoot(), aharouMemoryRoot(), sharedRoot())
+        val allowed = listOf(root, rootfsRoot(), aicodeRoot(), aharouMemoryRoot(), sharedRoot()) +
+            listOfNotNull(executionBinding?.gitRepositoryRoot, executionBinding?.gitCommonDir).map(::File)
         if (!allowEscape && allowed.none { resolved.isUnder(it) }) {
             throw IllegalArgumentException("路径越界，拒绝访问：$path")
         }
@@ -179,7 +199,7 @@ class WorkspacePathMapper @Inject constructor(
      * （绝对目标回到容器根，相对目标相对链接所在目录）。`..` 在容器根之上饱和，走不出容器。
      */
     private fun walkLinks(path: String, workspacePath: String?, followFinalLink: Boolean): File {
-        val expanded = pathHomeResolver.expandHome(path.trim())
+        val expanded = expandPath(path.trim())
         // 相对路径按 [toHostFile] 的语义挂到容器工作区根下，先补成容器绝对路径才能逐段判断。
         val absolute = if (expanded.startsWith("/")) expanded else "${resolvedContainerRoot()}/$expanded"
         val pending = ArrayDeque(absolute.split('/').filter { it.isNotEmpty() })
@@ -250,6 +270,7 @@ class WorkspacePathMapper @Inject constructor(
         val raw = hostPath.trim().replace('\\', '/')
         val resolvedWs = resolvedContainerRoot().replace('\\', '/')
         return when {
+            executionBinding?.isWorktree == true && (abs == rootPath || abs.startsWith("$rootPath/")) -> abs
             abs == rootPath -> CONTAINER_ROOT
             abs.startsWith("$rootPath/") -> CONTAINER_ROOT + "/" + abs.removePrefix("$rootPath/")
             // 展开后的 $HOME/workspace 形式也还原为 ~/workspace（bind mount 路径可能以绝对形式出现）
@@ -279,7 +300,7 @@ class WorkspacePathMapper @Inject constructor(
             val idx = binding.indexOf(':')
             val src = (if (idx >= 0) binding.substring(0, idx) else binding).trim()
             val dstRaw = if (idx >= 0) binding.substring(idx + 1) else binding
-            val dst = pathHomeResolver.expandHome(dstRaw.trim()).trimEnd('/')
+            val dst = expandPath(dstRaw.trim()).trimEnd('/')
             if (src.isEmpty() || dst.isEmpty()) null else src to dst
         }.sortedByDescending { it.second.length }
 

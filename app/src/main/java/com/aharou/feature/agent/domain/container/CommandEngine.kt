@@ -1,5 +1,6 @@
 package com.aharou.feature.agent.domain.container
 
+import com.aharou.feature.agent.domain.execution.ExecutionBinding
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 
@@ -48,7 +49,8 @@ interface CommandEngine {
     fun runCommandStream(
         command: String,
         projectPath: String? = null,
-        timeoutMs: Long = DEFAULT_TIMEOUT_MS
+        timeoutMs: Long = DEFAULT_TIMEOUT_MS,
+        execution: ExecutionBinding? = null
     ): Flow<CommandEvent>
 
     /**
@@ -58,7 +60,8 @@ interface CommandEngine {
     suspend fun runCommandSync(
         command: String,
         projectPath: String? = null,
-        timeoutMs: Long = DEFAULT_TIMEOUT_MS
+        timeoutMs: Long = DEFAULT_TIMEOUT_MS,
+        execution: ExecutionBinding? = null
     ): String
 
     /**
@@ -68,7 +71,8 @@ interface CommandEngine {
     suspend fun runCommandSyncWithExit(
         command: String,
         projectPath: String? = null,
-        timeoutMs: Long = DEFAULT_TIMEOUT_MS
+        timeoutMs: Long = DEFAULT_TIMEOUT_MS,
+        execution: ExecutionBinding? = null
     ): CommandResult
 
     /**
@@ -83,7 +87,8 @@ interface CommandEngine {
     suspend fun runCommandSyncUnbounded(
         command: String,
         projectPath: String? = null,
-        timeoutMs: Long = DEFAULT_TIMEOUT_MS
+        timeoutMs: Long = DEFAULT_TIMEOUT_MS,
+        execution: ExecutionBinding? = null
     ): CommandResult
 
     /**
@@ -93,7 +98,8 @@ interface CommandEngine {
     suspend fun runCommandSyncIfReady(
         command: String,
         projectPath: String? = null,
-        timeoutMs: Long = DEFAULT_TIMEOUT_MS
+        timeoutMs: Long = DEFAULT_TIMEOUT_MS,
+        execution: ExecutionBinding? = null
     ): CommandResult?
 
     /** 后端是否已安装就绪。本地按 rootfs/proot 判断；远程按 SSH 连接是否存活判断。 */

@@ -28,6 +28,7 @@ import com.aharou.feature.settings.data.repository.ProviderKeyRotator
 import com.aharou.feature.settings.domain.model.ProviderType
 import com.aharou.feature.settings.domain.repository.AIProviderRepository
 import com.aharou.feature.workspace.domain.FileAccessProvider
+import com.aharou.feature.workspace.domain.forAgent
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -161,7 +162,7 @@ class GenerateImageTool @Inject constructor(
         context: AgentContext
     ): ToolResult = withContext(Dispatchers.IO) {
         // 会话绑定的工作区：本会话的文件操作只落在自己的工作区，不跟着全局切换走
-        val access = (fileAccess).forWorkspace(context.projectRoot)
+        val access = fileAccess.forAgent(context)
         val prompt = args["prompt"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
         if (prompt.isEmpty()) {
             return@withContext ToolResult.Error("缺少 prompt 参数：请描述想生成的图片内容。", "MISSING_PROMPT")

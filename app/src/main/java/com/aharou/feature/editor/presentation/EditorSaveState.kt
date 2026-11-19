@@ -69,7 +69,7 @@ class EditorWorkspaceIdentity @Inject constructor(
     }
 
     fun key(root: String): String {
-        val profile = configuration.value.profile(root)
+        val profile = profiles.executionFor(root)?.let(profiles::forExecution) ?: configuration.value.profile(root)
         val endpoint = if (profile.mode == ExecutionMode.REMOTE_SSH) {
             remote.config?.let { listOf(it.host, it.port.toString(), it.username) }.orEmpty()
         } else emptyList()
@@ -77,7 +77,7 @@ class EditorWorkspaceIdentity @Inject constructor(
     }
 
     fun matches(root: String, identity: String): Boolean {
-        val selected = configuration.value.profile(root)
+        val selected = profiles.executionFor(root)?.let(profiles::forExecution) ?: configuration.value.profile(root)
         val actual = profiles.forWorkspace(root)
         return selected.id == actual.id && selected.mode == actual.mode && key(root) == identity
     }

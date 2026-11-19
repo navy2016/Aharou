@@ -92,14 +92,16 @@ class GitBlameTool @Inject constructor(
             append("git -c core.quotepath=false blame --line-porcelain")
             if (start != null && end != null) append(" -L ").append(start).append(',').append(end)
             if (rev != null) append(' ').append(shellQuote(rev))
-            append(" -- ").append(shellQuote(pathHomeResolver.expandHome(path)))
+            val boundPath = context.executionBinding?.workspaceArgument(path, pathHomeResolver.home()) ?: path
+            append(" -- ").append(shellQuote(pathHomeResolver.expandHome(boundPath)))
         }
 
         return try {
             val result = commandEngine.runCommandSyncWithExit(
                 command = command,
-                projectPath = context.projectRoot,
+                projectPath = context.executionRoot,
                 timeoutMs = TIMEOUT_MS,
+                execution = context.executionBinding,
             )
             val exitCode = result.exitCode
                 ?: return ToolResult.Error("容器未就绪，无法执行 git blame", "CONTAINER_NOT_READY")

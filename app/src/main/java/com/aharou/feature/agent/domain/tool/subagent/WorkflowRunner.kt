@@ -39,9 +39,9 @@ class WorkflowRunner @Inject constructor(
 ) {
 
     /** 列工作流清单；给了 [workflow] 就展开它的团队链。 */
-    fun list(target: String): ToolResult {
+    fun list(target: String, execution: com.aharou.feature.agent.domain.execution.ExecutionBinding? = null): ToolResult {
         val entries = try {
-            workflowRepository.listAll()
+            (execution?.let(workflowRepository::forExecution) ?: workflowRepository).listAll()
         } catch (e: Exception) {
             FileLogger.e(TAG, "读取工作流预设失败", e)
             return ToolResult.Error("读取工作流预设失败：${e.message ?: "未知错误"}", "WORKFLOW_LIST_FAILED")
@@ -102,6 +102,7 @@ class WorkflowRunner @Inject constructor(
      */
     suspend fun run(
         args: Map<String, JsonElement>,
+        execution: com.aharou.feature.agent.domain.execution.ExecutionBinding? = null,
         exec: suspend (JsonArray) -> ToolResult
     ): ToolResult {
         val name = arg(args, "workflow")
@@ -114,21 +115,21 @@ class WorkflowRunner @Inject constructor(
         }
 
         val workflow = try {
-            workflowRepository.find(name)
+            (execution?.let(workflowRepository::forExecution) ?: workflowRepository).find(name)
         } catch (e: Exception) {
             FileLogger.e(TAG, "读取工作流预设失败", e)
             return ToolResult.Error("读取工作流预设失败：${e.message ?: "未知错误"}", "WORKFLOW_LIST_FAILED")
         } ?: return ToolResult.Error("工作流预设不存在：$name（先用 action=\"teams\" 查）", "WORKFLOW_NOT_FOUND")
 
         val enabled: List<AgentDefinition> = try {
-            agentDefinitionRepository.listEnabled().map { it.definition }
+            (execution?.let { agentDefinitionRepository.listForExecution(it) } ?: agentDefinitionRepository.listEnabled()).map { it.definition }
         } catch (e: Exception) {
             FileLogger.e(TAG, "读取子代理定义失败", e)
             return ToolResult.Error("读取子代理定义失败：${e.message ?: "未知错误"}", "AGENT_LIST_FAILED")
         }
 
         val teams = try {
-            teamRepository.listAll().associateBy { it.team.name.lowercase() }
+            (execution?.let(teamRepository::forExecution) ?: teamRepository).listAll().associateBy { it.team.name.lowercase() }
         } catch (e: Exception) {
             FileLogger.e(TAG, "读取团队预设失败", e)
             return ToolResult.Error("读取团队预设失败：${e.message ?: "未知错误"}", "TEAM_LIST_FAILED")

@@ -56,10 +56,12 @@
 | 删除文件 | `ChatDrawer.kt:1018`、`:1075` → `FileBrowseController.kt:332`；沙盒浏览器 `feature/sandbox/FileBrowserScreen.kt:363` | 部分 | 无专用 delete；只能 `Bash` `rm` | 同上；且 `rm` 走 shell，绕开了 UI 的删除确认 |
 | 复制 / 剪切 / 粘贴 | `ChatDrawer.kt:1024`、`:1028`、`:1035`（粘贴覆盖 `:404`）→ `FileBrowseController.kt:345`、`:350`、`:365` | 部分 | 无专用工具；`Bash` `cp`/`mv` | 同上 |
 | 打开 / 预览文件 | `ChatDrawer.kt`（`onOpenFile`）→ `MainActivity.kt`；沙盒 `FileBrowserScreen.kt` → `FilePreviewScreen.kt` | 有 | `readFile`（`AgentModule.kt:449`）、`viewImage`（`:452`） | 界面支持SVG预览；聊天SVG文字链接打开源码编辑器，支持当前工作区的实际绝对路径；文本打开上限100 MiB，超过20 MiB需确认且不截断内容；工具读取仍有单次输出预算 |
+| 选择子代理执行隔离 | `task` 派发卡片显示目录、分支与基准 | 有 | `task create / pipeline / team_run isolation=shared|worktree` | 默认继承当前执行目录；独立树不带未提交修改，整条流程共用，结束保留；无自动合并/推送/删除，也不是OS沙箱 |
+| 检查点执行定位 | 回退与恢复时间线 | 部分 | 文件工具写入在资源锁内记录绑定及摘要 | 确认锁定会话与检查点，撤销锁定备份节点；预览按真实文件计数，整条快照链有冲突就跳过；撤销分别反馈跳过和失败，不操作当前选中的其他项目 |
 | 查看已读文件变化提醒 | 会话中的系统通知条 | 有 | 文件工具结果中的 `file_change`，或下一次正常会话开始时注入 | 按实际文件资源定位；只提醒重新读取与核对依赖，不更新他人的读取基线，也不自动唤醒空闲会话 |
 | 编辑器同步外部修改 | `CodeEditorScreen.kt` → `EditorFileRefresh.kt` / `CodeEditorViewModel.kt` | 部分 | 文件工具写入会通知编辑器；`readFile` 读取磁盘最新内容 | 无未保存修改时更新显示与快照，有草稿时保留并提示；本地监听和本地/SSH返回复查，不向AI暴露或替换用户未保存草稿 |
 | 分享文件 / 文件夹 | `FileTreeActionSheet.kt` → `FileShareViewModel.kt` → `WorkspaceShareLauncher.kt` | 部分 | `sendFile` 向聊天区交付文件 | 用户可用系统分享面板发给其它应用，文件夹自动ZIP；工具不代替用户选择系统分享目标 |
-| 重新生成最后一轮回复 | 用户 / 助手消息的 `MessageActionsBottomSheet.kt` → `MessageRegenerator.kt` | 无 | 未提供专用工具 | 复用原用户消息与附件、保留旧回答变体；历史轮次不显示入口 |
+| 重新生成最后一轮回复 | 用户 / 助手消息的 `MessageActionsBottomSheet.kt` → `MessageRegenerator.kt` | 无 | 未提供专用工具 | 复用原用户消息与附件、保留旧回答变体；普通停止后等待旧轮收尾再接续，两类消息入口共用交接；历史轮次不显示入口 |
 
 ## 4. 模型与供应商配置
 

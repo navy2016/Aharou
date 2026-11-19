@@ -46,6 +46,7 @@ class DelegatingFileAccess private constructor(
     /** 绑定会话工作区的副本，两条访问腿使用相同的工作区根。 */
     override fun forWorkspace(workspacePath: String): FileAccessProvider {
         if (workspacePath.isBlank()) return this
+        profileResolver.executionFor(workspacePath)?.let { return forExecution(it, null) }
         return DelegatingFileAccess(
             modeHolder,
             profileResolver,
@@ -53,6 +54,14 @@ class DelegatingFileAccess private constructor(
             remoteLeg.forWorkspace(workspacePath),
             profileResolver.forWorkspace(workspacePath).mode,
         )
+    }
+
+    override fun forExecution(binding: com.aharou.feature.agent.domain.execution.ExecutionBinding,
+        profile: com.aharou.feature.agent.domain.container.ContainerProfile?): FileAccessProvider {
+        if (!binding.ready) throw java.io.IOException("Execution workspace is still preparing")
+        val selected = profile ?: profileResolver.forExecution(binding)
+        val leg = if (selected.mode == ExecutionMode.REMOTE_SSH) remoteLeg else localLeg
+        return leg.forExecution(binding, selected)
     }
 
     override fun forStrictRead(): FileAccessProvider = delegate().forStrictRead()

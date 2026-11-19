@@ -32,7 +32,7 @@ internal suspend fun regenerationInput(context: Context, message: AgentMessageEn
 
 internal fun canRegenerateMessage(message: AgentUIMessage, all: List<AgentUIMessage>): Boolean {
     if (message.role != MessageRole.USER && message.role != MessageRole.ASSISTANT) return false
-    if (all.none { it.id == message.id }) return false
+    if (message.isPending || all.none { it.id == message.id }) return false
     if (message.isSystemCardInTurn() || (!message.content.hasVisibleContent() && message.attachments.isEmpty())) return false
     val user = all.lastOrNull { it.role == MessageRole.USER && !it.isSystemCardInTurn() } ?: return false
     return message.id == user.id || (message.role == MessageRole.ASSISTANT && message.timestamp > user.timestamp)

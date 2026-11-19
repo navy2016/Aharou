@@ -33,7 +33,8 @@ class TaskToolAvailabilityTest {
     private val dao = mockk<ChatSessionDao>(relaxed = true)
     private val bus = SubAgentEventBus(MaxRunningSource { limit }, CommunicationEnabledSource { true })
     private val tool = TaskTool(sessions, dao, mockk(relaxed = true), bus, mockk(relaxed = true),
-        mockk(relaxed = true), mockk(relaxed = true), mockk(relaxed = true), SubAgentWriteLease(), mockk(relaxed = true))
+        mockk(relaxed = true), mockk(relaxed = true), mockk(relaxed = true), SubAgentWriteLease(), mockk(relaxed = true),
+        mockk(relaxed = true), mockk(relaxed = true))
     private val context = AgentContext(null, null, "/project", null, sessionId = "parent")
 
     @Before

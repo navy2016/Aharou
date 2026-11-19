@@ -72,6 +72,10 @@ class LocalFileAccess @Inject constructor(
         return LocalFileAccess(pathMapper).also { it.boundWorkspace = workspacePath }
     }
 
+    override fun forExecution(binding: com.aharou.feature.agent.domain.execution.ExecutionBinding,
+        profile: com.aharou.feature.agent.domain.container.ContainerProfile?): FileAccessProvider =
+        LocalFileAccess(pathMapper.forExecution(binding, requireNotNull(profile))).also { it.boundWorkspace = binding.executionRoot }
+
     override fun readFile(path: String): String {
         val file = resolve(path)
         if (!file.exists()) throw NoSuchFileException(file)
@@ -267,7 +271,7 @@ class LocalFileAccess @Inject constructor(
     override fun copyToLocal(path: String): File = resolve(path)
 
     override fun delete(path: String) {
-        resolve(path, followFinalLink = false).delete()
+        Files.deleteIfExists(resolve(path, followFinalLink = false).toPath())
     }
 
     override fun deleteRecursively(path: String) {

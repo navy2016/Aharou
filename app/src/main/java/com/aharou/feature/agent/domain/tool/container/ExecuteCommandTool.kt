@@ -166,7 +166,7 @@ class ExecuteCommandTool @Inject constructor(
         context: com.aharou.feature.agent.domain.model.AgentContext
     ): ToolResult {
         // 后台任务不在本方法里等结果，令牌交给 gradlew 自己消费；启动失败才在这里回收。
-        val granted = grantBuildToken(command, context.projectRoot)
+        val granted = grantBuildToken(command, context.executionRoot)
         return try {
             // 工作区按发起会话给：后台标签的 proot 挂载在启动那刻写死，不能用全局当前工作区。
             // TerminalSession 构造时内部会 new Handler()（绑当前线程 Looper），必须在有 Looper 的
@@ -176,7 +176,8 @@ class ExecuteCommandTool @Inject constructor(
                     command = command,
                     title = command.take(40),
                     notify = true,
-                    workspacePath = context.projectRoot
+                    workspacePath = context.executionRoot,
+                    execution = context.executionBinding
                 )
             }
             FileLogger.i(TAG, "已提交后台任务 tab=$tabId: $command")
@@ -187,10 +188,10 @@ class ExecuteCommandTool @Inject constructor(
                 )
             )
         } catch (e: CancellationException) {
-            if (granted) revokeBuildToken(context.projectRoot)
+            if (granted) revokeBuildToken(context.executionRoot)
             throw e
         } catch (e: Exception) {
-            if (granted) revokeBuildToken(context.projectRoot)
+            if (granted) revokeBuildToken(context.executionRoot)
             FileLogger.e(TAG, "提交后台任务失败: $command", e)
             ToolResult.Error("提交后台任务失败: ${e.message}")
         }
@@ -215,7 +216,7 @@ class ExecuteCommandTool @Inject constructor(
 
     /** 会话绑定的工作区；会话没绑定时回退全局当前工作区。 */
     private fun sessionWorkdir(context: com.aharou.feature.agent.domain.model.AgentContext): String =
-        context.projectRoot.takeIf { it.isNotBlank() } ?: workspaceRepository.currentPath()
+        context.executionRoot.takeIf { it.isNotBlank() } ?: workspaceRepository.currentPath()
 
     override suspend fun executeWithContext(
         args: Map<String, JsonElement>,
@@ -242,7 +243,7 @@ class ExecuteCommandTool @Inject constructor(
             // 在会话绑定的工作区目录内执行，与文件工具保持同一根目录
             val timeoutMs = resolveTimeoutMs(args)
             FileLogger.d(TAG, "execute_command (timeout=${timeoutMs}ms): $command")
-            val result = commandEngine.runCommandSyncWithExit(command, workdir, timeoutMs)
+            val result = commandEngine.runCommandSyncWithExit(command, workdir, timeoutMs, context.executionBinding)
             FileLogger.v(TAG, "execute_command 完成，输出 ${result.output.length} 字符，退出码 ${result.exitCode}")
             ToolResult.Success(JsonPrimitive(toModelOutput(result.output, result.exitCode)))
         } catch (e: CancellationException) {
@@ -286,7 +287,7 @@ class ExecuteCommandTool @Inject constructor(
         try {
             val timeoutMs = resolveTimeoutMs(args)
             FileLogger.d(TAG, "execute_command(流式, timeout=${timeoutMs}ms): $command")
-            commandEngine.runCommandStream(command, workdir, timeoutMs).collect { event ->
+            commandEngine.runCommandStream(command, workdir, timeoutMs, context.executionBinding).collect { event ->
                 when (event) {
                     is CommandEvent.Line -> {
                         accumulated.append(event.text)

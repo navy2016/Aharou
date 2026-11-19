@@ -4,9 +4,7 @@ import android.os.SystemClock
 import android.util.Base64
 import com.aharou.core.util.AILogger
 import com.aharou.core.util.FileLogger
-import com.aharou.core.util.runCancellationSafeTail
 import com.aharou.feature.agent.domain.privacy.maskIfNeeded
-import com.aharou.feature.agent.domain.privacy.maskedForOutbound
 import com.aharou.feature.agent.domain.privacy.outboundMaskerOrNull
 import com.aharou.feature.agent.domain.privacy.restoreIfNeeded
 import com.aharou.feature.agent.domain.privacy.restoredFromOutbound
@@ -31,14 +29,12 @@ import com.aharou.feature.agent.domain.ocr.TesseractOcrEngine
 import com.aharou.feature.agent.domain.subagent.AgentDefinition
 import com.aharou.feature.agent.domain.session.SessionUseCase
 import com.aharou.feature.agent.domain.session.MessagePersistenceUseCase
-import com.aharou.feature.agent.domain.checkpoint.CheckpointManager
 import com.aharou.feature.agent.domain.permission.PermissionChoice
 import com.aharou.feature.agent.domain.permission.ToolPermissionPolicyEngine
 import com.aharou.feature.agent.domain.receipt.ToolCallReceiptRepository
 import com.aharou.feature.agent.domain.prompt.SystemPromptProvider
 import com.aharou.feature.agent.domain.provider.AIProvider
 import com.aharou.feature.agent.domain.provider.AIResponse
-import com.aharou.feature.agent.domain.provider.AIStreamChunk
 import com.aharou.feature.agent.domain.provider.ProviderFailoverCoordinator
 import com.aharou.feature.agent.domain.tool.AgentTool
 import com.aharou.feature.agent.domain.tool.PendingPermissionBatch
@@ -92,7 +88,6 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
-import kotlinx.coroutines.flow.takeWhile
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
@@ -134,7 +129,6 @@ class StatefulAgentWorkflow @Inject constructor(
     private val providerRequestSettings: com.aharou.feature.agent.domain.provider.ProviderRequestSettings,
     private val sessionUseCase: SessionUseCase,
     private val messagePersistenceUseCase: MessagePersistenceUseCase,
-    private val checkpointManager: CheckpointManager,
     private val llmCallRecordDao: LlmCallRecordDao,
     private val keyRotator: ProviderKeyRotator,
     private val generatedImagePersister: GeneratedImagePersister,
@@ -157,11 +151,6 @@ class StatefulAgentWorkflow @Inject constructor(
         const val TAG = "StatefulAgentWorkflow"
         const val LIVE_TAIL_CHARS = 20_000
 
-        private fun livePreview(text: StringBuilder): String {
-            var start = (text.length - LIVE_TAIL_CHARS).coerceAtLeast(0)
-            if (start > 0 && text[start].isLowSurrogate() && text[start - 1].isHighSurrogate()) start++
-            return text.substring(start)
-        }
         internal fun AgentEvent.AssistantText.hasSnapshotData(): Boolean =
             content.isNotEmpty() || reasoning.isNotBlank() || toolCalls.isNotEmpty() || signature.isNotBlank() ||
                 thinkingBlocksJson.isNotBlank() || attachments.isNotEmpty() || inputTokens > 0 || outputTokens > 0 || cachedInputTokens > 0
@@ -476,18 +465,22 @@ class StatefulAgentWorkflow @Inject constructor(
             elapsedMs = (System.nanoTime() - historyStartedNs) / 1_000_000,
             details = "operation=$historyStartedNs messages=${currentContext.history.size} tools=${currentTools.size}")
 
-        while (!state.isFinished && actionQueue.isNotEmpty()) {
-            // 用户按了停止：不再往下走。正在跑的命令/请求留在后台跑完（见 stopAgentSession 的软打断）。
-            if (consumeUserInterrupt(currentContext.sessionId)) {
+        var interrupted = false
+        fun stopRequested(): Boolean {
+            if (!interrupted && consumeUserInterrupt(context.sessionId)) {
+                interrupted = true
                 FileLogger.i(TAG, "收到用户打断，本轮到此为止")
-                actionQueue.clear()
-                break
             }
+            return interrupted
+        }
+        loop@ while (!state.isFinished && actionQueue.isNotEmpty()) {
+            if (stopRequested()) break
             val action = actionQueue.removeFirst()
             val (newState, effects) = reduce(state, action, stuckNudgeText, reminderEngine.turnEndReminder(state.messages, currentContext.projectRoot, action))
             state = newState
 
             for (effect in effects) {
+                if (stopRequested()) break@loop
                 when (effect) {
                     is AgentSideEffect.PersistUser -> {
                         currentContext.sessionId?.let { sessionId ->
@@ -507,7 +500,8 @@ class StatefulAgentWorkflow @Inject constructor(
                             budget = llmBudget,
                             actionQueue = actionQueue,
                             emit = emit,
-                            telemetry = telemetry
+                            telemetry = telemetry,
+                            stopRequested = ::stopRequested
                         )
                     }
                     is AgentSideEffect.RequestPermissionBatch -> {
@@ -584,8 +578,10 @@ class StatefulAgentWorkflow @Inject constructor(
         budget: LlmCallBudgetState,
         actionQueue: ArrayDeque<AgentAction>,
         emit: suspend (AgentEvent) -> Unit,
-        telemetry: AgentTurnTelemetry
+        telemetry: AgentTurnTelemetry,
+        stopRequested: () -> Boolean,
     ): AgentSessionState {
+        if (stopRequested()) return initialState
         var state = initialState
         val providerInUse = aiProvider
         val requestSystemPrompt = appendMiddlewarePrompt(providerInUse.providerId, systemPrompt)
@@ -622,278 +618,80 @@ class StatefulAgentWorkflow @Inject constructor(
         val requestEstimate = requestBreakdown.total
         val predictedInput = ContextTokenEstimator.calibrated(requestEstimate, budget.baselineEstimate, budget.baselineUsage)
         emit(AgentEvent.ContextUsage(predictedInput, inputBudget, true, requestBreakdown))
+        if (stopRequested()) return state
         if (predictedInput >= inputBudget) {
             actionQueue.addLast(AgentAction.LlmError("", "input_budget_exceeded"))
             return state
         }
 
-        val acc = StringBuilder()
-        val reasoningAcc = StringBuilder()
-        var finalResponse: AIResponse? = null
-        val responseMessageId = UUID.randomUUID().toString()
-        var assistantSnapshot: AgentEvent.AssistantText? = null
-        var snapshotSent = false
-        var persistedImages = emptyList<AgentImage>()
-        suspend fun captureSnapshot(): AgentEvent.AssistantText {
-            assistantSnapshot?.let { return it }
-            val response = finalResponse ?: AIResponse(acc.toString(), reasoning = reasoningAcc.toString())
-            val (images, attachments) = if (response.images.isNotEmpty()) generatedImagePersister.persist(response.images)
-                else emptyList<AgentImage>() to emptyList<AgentAttachment>()
-            persistedImages = images
-            return AgentEvent.AssistantText(response.content, response.toolCalls,
-                response.reasoning.orEmpty().ifEmpty { reasoningAcc.toString() }, response.signature.orEmpty(), response.inputTokens,
-                response.outputTokens, response.cachedInputTokens, response.thinkingBlocksJson.orEmpty(),
-                attachments, responseMessageId, kotlinx.coroutines.CompletableDeferred()).also { assistantSnapshot = it }
-        }
-        suspend fun publishSnapshot() {
-            val snapshot = captureSnapshot()
-            if (!snapshotSent) { emit(snapshot); snapshotSent = true }
-            withTimeoutOrNull(PERSIST_WAIT_MS) { snapshot.persisted?.await() }
-        }
-
-        // 调用统计埋点：记录请求发出/首字/结束时刻与 usage，失败与取消同样留痕。
-        val callStartElapsed = SystemClock.elapsedRealtime()
-        val callStartWall = System.currentTimeMillis()
-        val callKind = "chat"
-        var ttfbElapsed: Long? = null
-        var callError: String? = null
-        var callCompleted = false
-
-        // 流式 delta 节流：上游每个 chunk 都携带完整累积文本，逐条发事件会让
-        // ViewModel 端每秒重建几十次状态、UI 端反复重启打字机协程。按时间窗口合并：
-        // 窗口内只保留最新累积文本，到窗口边界才发送，把下游事件频率压到 ~16/s。
-        // 打字机渲染本身有 100ms 节流，少发中间态无感知；collect 结束补发最后 pending。
-        val DELTA_THROTTLE_MS = 60L
-        var lastTextDeltaSentAt = 0L
-        var lastReasoningDeltaSentAt = 0L
-        var pendingTextDelta = false
-        var pendingReasoningDelta = false
-        var retryAttempts = 0
-        suspend fun flushPendingTextDelta() {
-            if (!pendingTextDelta) return
-            pendingTextDelta = false
-            emit(AgentEvent.AssistantDelta(livePreview(acc)))
-        }
-        suspend fun flushPendingReasoningDelta() {
-            if (!pendingReasoningDelta) return
-            pendingReasoningDelta = false
-            emit(AgentEvent.ReasoningDelta(livePreview(reasoningAcc)))
-        }
-        // 遥测的调用序号在 try 内产生，但 catch 分支也要用它标记这一次流失败，故声明在 try 之外。
-        var callId = -1
-
-        try {
-            // 早轮次里已落盘的工具结果换成引用，长会话不必每轮重发全文。图片投影沿用上面那份：估算的就是发出去的。
-            val outboundMasker = outboundMaskerOrNull(generalSettingsRepository.privacyMaskingEnabled())
-            val messagesToSend = foldStoredToolResults(sendProjection)
-                .let { list -> if (outboundMasker == null) list else list.maskedForOutbound(outboundMasker) }
-            // 采样循环检测：命中后 takeWhile 会取消上游流，模型不再继续把重复内容刷下去。
-            var samplingLoopCut = false
-            // 用户打断：与采样检测共用同一个 takeWhile，命中即掉断上游流，不再继续吐字。
-            var userInterruptCut = false
-            callId = telemetry.llmRequest(providerInUse.providerId, providerInUse.model, messagesToSend.size, promptTools.size, predictedInput)
-            providerInUse.completeStream(requestSystemPrompt, messagesToSend, promptTools, currentContext.reasoningEffort)
-                .takeWhile { !samplingLoopCut && !userInterruptCut }
-                .collect { chunk ->
-                    if (!userInterruptCut && consumeUserInterrupt(currentContext.sessionId)) {
-                        userInterruptCut = true
-                    }
-                when (chunk) {
-                    is AIStreamChunk.TextDelta -> {
-                        if (ttfbElapsed == null) { ttfbElapsed = SystemClock.elapsedRealtime() - callStartElapsed; telemetry.llmFirstByte(callId) }
-                        acc.append(chunk.text)
-                        val loopStart = samplingLoopStart(acc)
-                        if (loopStart >= 0) {
-                            samplingLoopCut = true
-                            cutSamplingLoop(acc, loopStart, inReasoning = false) { emit(it) }
-                        }
-                        pendingTextDelta = true
-                        val now = SystemClock.elapsedRealtime()
-                        if (now - lastTextDeltaSentAt >= DELTA_THROTTLE_MS) {
-                            flushPendingTextDelta()
-                            lastTextDeltaSentAt = now
-                        }
-                    }
-                    is AIStreamChunk.ReasoningDelta -> {
-                        // 思考内容也算首字（推理模型先吐思考再吐正文）
-                        if (ttfbElapsed == null) { ttfbElapsed = SystemClock.elapsedRealtime() - callStartElapsed; telemetry.llmFirstByte(callId) }
-                        reasoningAcc.append(chunk.text)
-                        val loopStart = samplingLoopStart(reasoningAcc)
-                        if (loopStart >= 0) {
-                            samplingLoopCut = true
-                            cutSamplingLoop(reasoningAcc, loopStart, inReasoning = true) { emit(it) }
-                        }
-                        pendingReasoningDelta = true
-                        val now = SystemClock.elapsedRealtime()
-                        if (now - lastReasoningDeltaSentAt >= DELTA_THROTTLE_MS) {
-                            flushPendingReasoningDelta()
-                            lastReasoningDeltaSentAt = now
-                        }
-                    }
-                    is AIStreamChunk.Retrying -> {
-                        retryAttempts = maxOf(retryAttempts, chunk.attempt)
-                        acc.setLength(0)
-                        reasoningAcc.setLength(0)
-                        pendingTextDelta = false
-                        pendingReasoningDelta = false
-                        lastTextDeltaSentAt = 0L
-                        lastReasoningDeltaSentAt = 0L
-                        emit(AgentEvent.Retrying(chunk.attempt, chunk.maxRetries, chunk.error))
-                    }
-                    is AIStreamChunk.KeySwitched -> {
-                        acc.setLength(0)
-                        reasoningAcc.setLength(0)
-                        pendingTextDelta = false
-                        pendingReasoningDelta = false
-                        lastTextDeltaSentAt = 0L
-                        lastReasoningDeltaSentAt = 0L
-                        emit(AgentEvent.KeySwitched(chunk.newIndex, chunk.total))
-                    }
-                    is AIStreamChunk.Final -> {
-                        // 纯工具调用轮没有文本/思考增量，Final 是首个内容事件，兜底记为 TTFB
-                        if (ttfbElapsed == null) { ttfbElapsed = SystemClock.elapsedRealtime() - callStartElapsed; telemetry.llmFirstByte(callId) }
-                        // 回填必须在完整文本上做：占位符可能被切在两个 chunk 之间
-                        finalResponse = chunk.response
-                            .let { resp -> if (outboundMasker == null) resp else resp.restoredFromOutbound(outboundMasker) }
-                    }
-                    is AIStreamChunk.ToolCallDeclared -> {
-                        // 工具名先于参数到达：立刻告诉 UI「模型准备调什么」，
-                        // 免得长参数流式期间一直停在「正在思考」。
-                        if (ttfbElapsed == null) { ttfbElapsed = SystemClock.elapsedRealtime() - callStartElapsed; telemetry.llmFirstByte(callId) }
-                        emit(AgentEvent.ToolCallPreparing(chunk.name))
-                    }
-                    is AIStreamChunk.ToolCallArgumentProgress -> emit(toolCallProgressEvent(chunk))
-                }
-            }
-            // 节流窗口内可能还压着最新累积文本：补发，保证 UI 尾巴拿到完整文本再交接落库。
-            flushPendingTextDelta()
-            flushPendingReasoningDelta()
-            val aiResponse = finalResponse ?: AIResponse(content = acc.toString())
-            val snapshot = captureSnapshot()
-            telemetry.llmStreamEnd(callId, acc.length, reasoningAcc.length, snapshot.toolCalls.size, aiResponse.stopReason, aiResponse.inputTokens, aiResponse.outputTokens, retryAttempts, aiResponse.cachedInputTokens)
-            callCompleted = true
-            if (aiResponse.stopReason == "model_context_window_exceeded" && !budget.overflowRecoveryAttempted) {
-                budget.overflowRecoveryAttempted = true
-                val recovery = contextCompactor.compactIfNeeded(state.messages, compactionProvider,
-                    currentContext.sessionId, force = true, windowProvider = aiProvider,
-                    systemPrompt = if (reuseMainPrefix) requestSystemPrompt else "", tools = if (reuseMainPrefix) promptTools else emptyList(), currentInputTokens = predictedInput) { emit(it) }
-                if (recovery.compacted) {
-                    state = state.copy(messages = recovery.messages)
-                    budget.baselineUsage = 0
-                    budget.baselineEstimate = 0
-                    actionQueue.addLast(AgentAction.InitRequest(recovery.messages))
-                    return state
-                }
-            }
-            budget.baselineEstimate = requestEstimate
-            budget.baselineUsage = aiResponse.inputTokens
-            emit(AgentEvent.ContextUsage(
-                if (budget.baselineUsage > 0) budget.baselineUsage else requestEstimate, inputBudget, budget.baselineUsage <= 0,
-                requestBreakdown
-            ))
-            val responseWithReasoning = aiResponse.copy(reasoning = snapshot.reasoning)
-
-            if (snapshot.hasSnapshotData()) publishSnapshot()
-            actionQueue.addLast(
-                AgentAction.LlmResponse(
-                    if (persistedImages.isNotEmpty()) responseWithReasoning.copy(images = persistedImages)
-                    else responseWithReasoning,
-                    messageId = responseMessageId
-                )
-            )
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            // provider 级失败且本轮未吐出内容：切回退供应商重发（放在溢出恢复之前，压缩救不回来这类错）
-            if (finalResponse == null && acc.isEmpty() && reasoningAcc.isEmpty() && (e.isKeySwitchFailure() || e.isQuotaExhausted())) {
-                if (failoverCoordinator.isActive(currentContext.sessionId)) {
-                    failoverCoordinator.deactivate(currentContext.sessionId)
-                } else {
-                    val origin = aiProviderRepository.getProviderById(providerInUse.providerId)
-                    val target = origin?.let { failoverCoordinator.activate(currentContext.sessionId, it) }
-                    if (target != null) {
-                        val fb = createStandaloneProvider(target, currentContext.sessionId)
-                        return executeLlmEffect(state, currentContext, currentTools, systemPrompt, fb,
-                            inputBudget, budget, actionQueue, emit, telemetry)
-                    }
-                }
-            }
-            if (finalResponse == null && !budget.overflowRecoveryAttempted && acc.isEmpty() && reasoningAcc.isEmpty() && isContextOverflow(e)) {
-                budget.overflowRecoveryAttempted = true
-                val recovery = contextCompactor.compactIfNeeded(state.messages, compactionProvider,
-                    currentContext.sessionId, force = true, windowProvider = aiProvider,
-                    systemPrompt = if (reuseMainPrefix) requestSystemPrompt else "", tools = if (reuseMainPrefix) promptTools else emptyList(), currentInputTokens = predictedInput) { emit(it) }
-                if (recovery.compacted) {
-                    state = state.copy(messages = recovery.messages)
-                    budget.baselineUsage = 0
-                    budget.baselineEstimate = 0
-                    actionQueue.addLast(AgentAction.InitRequest(recovery.messages))
-                    callError = e.message
-                    return state
-                }
-            }
-            callError = e.message ?: e.javaClass.simpleName
-            telemetry.llmStreamFailed(callId, callError ?: "unknown", acc.length)
-            if (finalResponse != null || acc.isNotEmpty() || reasoningAcc.isNotEmpty()) {
-                if (captureSnapshot().hasSnapshotData()) publishSnapshot()
-            }
-            // 多 Key 的自动切换与重发已在 adapter 内完成（见 AIProvider.keySwitcher）；
-            // 走到这里说明不是 Key 问题、或候选 Key 已全部失败，直接上报原始错误。
-            val errorText = "LLM 调用失败: ${e.message}"
-            actionQueue.addLast(AgentAction.LlmError(errorText))
-        } finally {
-            // 取消展开期间绝不允许异常逃出 finally：待传播的取消异常一旦再叠上抛出的异常
-            //（落库失败、日志格式化、OOM 等），ART 会直接 AssertNoPendingException 终止进程。
+        val call = LlmStreamCall(currentContext.sessionId, currentContext.reasoningEffort, providerInUse, telemetry,
+            generatedImagePersister, messagePersistenceUseCase, llmCallRecordDao, emit)
+        return call.run {
             try {
-                runCancellationSafeTail {
-                    currentContext.sessionId?.let { sid ->
-                        if (finalResponse != null || acc.isNotEmpty() || reasoningAcc.isNotEmpty()) runCatching {
-                            val snapshot = captureSnapshot()
-                            if (snapshot.hasSnapshotData() && !snapshot.persistenceConfirmed()) {
-                                messagePersistenceUseCase.persist(sid, com.aharou.feature.agent.presentation.MessageRole.ASSISTANT,
-                                    snapshot.content, id = responseMessageId, reasoning = snapshot.reasoning, toolCalls = snapshot.toolCalls,
-                                    signature = snapshot.signature, thinkingBlocksJson = snapshot.thinkingBlocksJson,
-                                    attachments = snapshot.attachments, inputTokens = snapshot.inputTokens,
-                                    outputTokens = snapshot.outputTokens, cachedInputTokens = snapshot.cachedInputTokens)
-                                snapshot.persisted?.complete(Unit)
-                            }
-                        }.onFailure { runCatching { FileLogger.w(TAG, "保存回复快照失败: " + it.javaClass.simpleName) } }
+                val masker = outboundMaskerOrNull(generalSettingsRepository.privacyMaskingEnabled())
+                val messages = foldStoredToolResults(sendProjection).maskIfNeeded(masker)
+                if (stopRequested()) return@run state
+                val response = call.collectResponse(requestSystemPrompt, messages, promptTools, predictedInput, masker, stopRequested)
+                if (response.stopReason == "model_context_window_exceeded" && !budget.overflowRecoveryAttempted && !stopRequested()) {
+                    budget.overflowRecoveryAttempted = true
+                    val recovery = contextCompactor.compactIfNeeded(state.messages, compactionProvider,
+                        currentContext.sessionId, force = true, windowProvider = aiProvider,
+                        systemPrompt = if (reuseMainPrefix) requestSystemPrompt else "", tools = if (reuseMainPrefix) promptTools else emptyList(), currentInputTokens = predictedInput) { emit(it) }
+                    if (recovery.compacted) {
+                        state = state.copy(messages = recovery.messages)
+                        budget.baselineUsage = 0
+                        budget.baselineEstimate = 0
+                        actionQueue.addLast(AgentAction.InitRequest(recovery.messages))
+                        return@run state
                     }
-                    // 调用记录同样放在 NonCancellable 里：否则取消时这一句会立刻再抛一个取消异常。
-                    val durationMillis = (SystemClock.elapsedRealtime() - callStartElapsed).toInt()
-                    val usage = finalResponse
-                    runCatching {
-                        llmCallRecordDao.insert(
-                            LlmCallRecordEntity(
-                                sessionId = currentContext.sessionId,
-                                providerId = providerInUse.providerId.ifBlank { null },
-                                model = providerInUse.model,
-                                reasoningEffort = currentContext.reasoningEffort,
-                                kind = callKind,
-                                inputTokens = usage?.inputTokens ?: 0,
-                                outputTokens = usage?.outputTokens ?: 0,
-                                cachedInputTokens = usage?.cachedInputTokens ?: 0,
-                                cacheCreationTokens = usage?.cacheCreationTokens ?: 0,
-                                ttfbMillis = ttfbElapsed?.toInt(),
-                                durationMillis = durationMillis,
-                                status = when {
-                                    callCompleted -> "success"
-                                    callError != null -> "error"
-                                    else -> "cancelled"
-                                },
-                                errorMessage = callError,
-                                stopReason = usage?.stopReason,
-                                retryCount = retryAttempts,
-                                createdAt = callStartWall
-                            )
-                        )
-                    }.onFailure { runCatching { FileLogger.w(TAG, "写入调用记录失败: " + it.javaClass.simpleName) } }
                 }
-            } catch (t: Throwable) {
-                runCatching { FileLogger.w(TAG, "收尾落库异常: " + t.javaClass.simpleName) }
+                budget.baselineEstimate = requestEstimate
+                budget.baselineUsage = response.inputTokens
+                emit(AgentEvent.ContextUsage(
+                    if (budget.baselineUsage > 0) budget.baselineUsage else requestEstimate, inputBudget, budget.baselineUsage <= 0, requestBreakdown
+                ))
+                call.publishSnapshot()
+                if (!stopRequested()) actionQueue.addLast(AgentAction.LlmResponse(response, messageId = call.messageId))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (stopRequested()) return@run state
+                if (!call.hasOutput && (e.isKeySwitchFailure() || e.isQuotaExhausted())) {
+                    if (failoverCoordinator.isActive(currentContext.sessionId)) {
+                        failoverCoordinator.deactivate(currentContext.sessionId)
+                    } else {
+                        val origin = aiProviderRepository.getProviderById(providerInUse.providerId)
+                        val target = if (origin != null && !stopRequested()) failoverCoordinator.activate(currentContext.sessionId, origin) else null
+                        if (target != null) {
+                            call.markFailed(e)
+                            if (stopRequested()) return@run state
+                            val fb = createStandaloneProvider(target, currentContext.sessionId)
+                            return@run executeLlmEffect(state, currentContext, currentTools, systemPrompt, fb,
+                                inputBudget, budget, actionQueue, emit, telemetry, stopRequested)
+                        }
+                    }
+                }
+                if (stopRequested()) return@run state
+                if (!call.hasOutput && !budget.overflowRecoveryAttempted && isContextOverflow(e)) {
+                    budget.overflowRecoveryAttempted = true
+                    val recovery = contextCompactor.compactIfNeeded(state.messages, compactionProvider,
+                        currentContext.sessionId, force = true, windowProvider = aiProvider,
+                        systemPrompt = if (reuseMainPrefix) requestSystemPrompt else "", tools = if (reuseMainPrefix) promptTools else emptyList(), currentInputTokens = predictedInput) { emit(it) }
+                    if (recovery.compacted) {
+                        state = state.copy(messages = recovery.messages)
+                        budget.baselineUsage = 0
+                        budget.baselineEstimate = 0
+                        actionQueue.addLast(AgentAction.InitRequest(recovery.messages))
+                        call.markRecovered(e)
+                        return@run state
+                    }
+                }
+                call.markFailed(e)
+                if (call.hasOutput) call.publishSnapshot()
+                actionQueue.addLast(AgentAction.LlmError("LLM 调用失败: ${e.message}"))
             }
+            state
         }
-        return state
     }
 
     /**
@@ -980,18 +778,6 @@ class StatefulAgentWorkflow @Inject constructor(
     ): AgentContext {
         val batchId = telemetry.toolBatchStart(toolCalls)
         var currentContext = initialContext
-        // 并行执行本批已批准的工具。先统一记录 checkpoint（editFile/writeFile 修改前快照），
-        // 再并行执行；mode 切换检查在结果收集后于主协程串行处理（planApproval 单例）。
-        toolCalls.forEach { toolCall ->
-            if (toolCall.name == "editFile" || toolCall.name == "writeFile") {
-                (toolCall.arguments["path"] as? JsonPrimitive)?.contentOrNull?.let { path ->
-                    currentContext.sessionId?.let { sid ->
-                        checkpointManager.beforeFileModified(sid, path)
-                    }
-                }
-            }
-        }
-
         // 批内去重：同一次响应里的同名同参调用只执行第一次，重复项不执行、只补一条说明；
         // 仍按原顺序返回（tool 消息条数须与 assistant(toolCalls) 对齐，否则 API 报 400）。
         val seenSignatures = HashSet<String>()
@@ -1038,12 +824,6 @@ class StatefulAgentWorkflow @Inject constructor(
                 ?: ToolRunResult(toolError(toolCall, "工具未执行", "TOOL_NOT_EXECUTED"), true)
             var rawResult = runResult.raw
             var isError = runResult.isError
-            // 写入成功后记录内容摘要，供回退时判断文件是否被检查点之外的操作改过
-            if (!isError && (toolCall.name == "editFile" || toolCall.name == "writeFile")) {
-                (toolCall.arguments["path"] as? JsonPrimitive)?.contentOrNull?.let { path ->
-                    currentContext.sessionId?.let { sid -> checkpointManager.afterFileModified(sid, path) }
-                }
-            }
             val (newCtx, updated) = checkAndUpdateMode(toolCall, isError, currentContext)
             if (updated) {
                 val reason = (toolCall.arguments["reason"] as? JsonPrimitive)?.content?.trim()

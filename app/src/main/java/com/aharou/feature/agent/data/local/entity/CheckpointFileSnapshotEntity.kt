@@ -19,5 +19,6 @@ data class CheckpointFileSnapshotEntity(
      * null 表示快照之后 AI 没写入过，此时无从判断文件是否被检查点之外的操作改过。
      */
     val writtenHash: String? = null,
-    val createdAt: Long = System.currentTimeMillis()
+    val createdAt: Long = System.currentTimeMillis(),
+    val resourceKey: String? = null
 )

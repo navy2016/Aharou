@@ -66,6 +66,13 @@ internal object TaskToolSpec {
             description = "子代理使用的提供商（create 可选）：可写 providerId 或设置里显示的提供商名称，覆盖角色定义里的 provider；留空则继承角色定义，未选角色时继承本会话 provider",
             required = false
         ),
+        "isolation" to ToolParameter(
+            name = "isolation",
+            type = ParameterType.STRING,
+            description = "执行工作区：shared（默认）继承父任务当前目录；worktree 从父仓库 HEAD 准备独立分支，不带未提交修改。pipeline/team_run 整条流程共用一棵工作树，结束后保留，不自动合并或删除。",
+            required = false,
+            enum = listOf("shared", "worktree")
+        ),
         "writePaths" to ToolParameter(
             name = "writePaths",
             type = ParameterType.ARRAY,

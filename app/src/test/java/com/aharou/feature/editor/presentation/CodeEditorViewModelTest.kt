@@ -75,7 +75,7 @@ class CodeEditorViewModelTest {
         every { TextMateSetup.ensureInitialized(any()) } returns Unit
         every { TextMateSetup.scopeNameFor(any()) } returns null
         model = CodeEditorViewModel(mockk<Context>(relaxed = true), files, settings,
-            mockk<EditorLspManager>(relaxed = true), versions, identity, mockk<EditorFileObserver>(relaxed = true))
+            mockk<EditorLspManager>(relaxed = true), versions, identity, mockk<EditorFileObserver>(relaxed = true), com.aharou.feature.agent.domain.tool.WorkspaceFileLock())
     }
 
     @After

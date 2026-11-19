@@ -21,6 +21,22 @@ class GitRepositoryRepoDiscoveryTest {
 
     private val root = "/root/workspace"
 
+    @Test
+    fun executionScopedRepositoryDoesNotFollowTheSelectedWorkspace() = runTest {
+        val engine = mockk<CommandEngine>()
+        val seen = mutableListOf<String?>()
+        coEvery { engine.runCommandSyncUnbounded(any(), any(), any(), any()) } answers {
+            seen += arg<String?>(1)
+            CommandResult("", 0)
+        }
+        val binding = com.aharou.feature.agent.domain.execution.ExecutionBinding("execution", root, "/worktrees/task", "profile", "LOCAL_PROOT", isolation = "worktree")
+        val scoped = createRepo(engine).forExecution(binding)
+        assertEquals("/worktrees/task", scoped.workspaceRoot())
+        scoped.status()
+        assertTrue(seen.isNotEmpty())
+        assertTrue(seen.all { it == "/worktrees/task" })
+    }
+
     /**
      * 扫描命令（`for d in` 加通配符那条）回 [scanResult]；`rev-parse --is-inside-work-tree` 按 [insideWorkTree]
      * 判定；其余 git 命令回 [gitOutput]。
@@ -48,7 +64,7 @@ class GitRepositoryRepoDiscoveryTest {
     private fun createRepo(engine: CommandEngine, workspacePath: String = root): GitRepository {
         val workspace = mockk<WorkspaceRepository>()
         every { workspace.currentPath() } returns workspacePath
-        return GitRepository(engine, workspace, mockk<PreCommitChecker>(relaxed = true))
+        return GitRepository(engine, workspace, mockk<PreCommitChecker>(relaxed = true), com.aharou.feature.agent.domain.tool.WorkspaceFileLock())
     }
 
     // ── discoverRepos：根 + 一层子目录 ────────────────────────────
